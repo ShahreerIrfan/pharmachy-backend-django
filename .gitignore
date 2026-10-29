@@ -1,0 +1,35 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Database
+*.sqlite3
+db.sqlite3
+
+# Static files & Media
+/staticfiles/
+/media/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE & Editor caches
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Quality & Tooling caches
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+

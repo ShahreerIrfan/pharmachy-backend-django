@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pharmacy-saas-backend"
+version = "2.0.0"
+description = "Bangladesh Multi-Tenant Pharmacy ERP & POS Cloud Authority API"
+readme = "README.md"
+requires-python = ">=3.13.0,<3.14.0"
+dependencies = [
+    "django>=6.1.0,<7.0.0",
+    "djangorestframework>=3.15.0",
+    "psycopg2-binary>=2.9.9",
+    "djangorestframework-simplejwt>=5.4.0",
+    "drf-spectacular>=0.28.0",
+    "django-cors-headers>=4.7.0",
+    "celery>=5.4.0",
+    "redis>=5.2.0",
+    "cryptography>=44.0.0",
+    "django-filter>=24.3",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # Pyflakes
+    "I",   # isort
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "E741",  # ambiguous variable name
+]
+
+[tool.ruff.lint.per-file-ignores]
+"config/*" = ["E402", "F401"]
+"config/**" = ["E402", "F401"]
+"tests/*" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["apps", "config", "tools"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["tests.py", "test_*.py", "*_tests.py"]
+addopts = "--strict-markers -ra"
+markers = [
+    "unit: Isolated in-memory unit tests without external I/O (ADR-0034)",
+    "integration: Multi-service database and worker integration tests (ADR-0034)",
+    "contract: OpenAPI 3.1 and JSON schema contract verification tests (ADR-0034)",
+    "concurrency: Multi-threaded checkout and row-level locking tests (ADR-0034)",
+    "security: RBAC, multi-tenant isolation, and Zero Real Patient PHI tests (ADR-0034)",
+    "ui: JavaFX snapshot and Flutter golden visual tests (ADR-0034)",
+    "offline_fault: Network interruption and outbox replay tests (ADR-0034)",
+    "e2e: End-to-end full customer journey tests (ADR-0034)",
+]

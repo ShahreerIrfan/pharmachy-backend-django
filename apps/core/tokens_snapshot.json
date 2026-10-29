@@ -1,0 +1,58 @@
+{
+  "version": "1.0.0",
+  "spatial_scale": {
+    "space_2": 2,
+    "space_4": 4,
+    "space_8": 8,
+    "space_12": 12,
+    "space_16": 16,
+    "space_24": 24,
+    "space_32": 32,
+    "space_48": 48,
+    "space_64": 64
+  },
+  "radii_scale": {
+    "radius_sm": 4,
+    "radius_md": 6,
+    "radius_lg": 8,
+    "radius_xl": 12
+  },
+  "themes": {
+    "light": {
+      "name": "LIGHT",
+      "bg_canvas": "#F8FAFC",
+      "bg_surface": "#FFFFFF",
+      "border_subtle": "#E2E8F0",
+      "text_primary": "#0F172A",
+      "text_secondary": "#475569",
+      "text_muted": "#64748B",
+      "accent_primary": "#0369A1",
+      "accent_teal": "#0F766E",
+      "focus_ring": "#0284C7",
+      "status_success_text": "#14532D",
+      "status_success_bg": "#DCFCE7",
+      "status_warning_text": "#78350F",
+      "status_warning_bg": "#FEF3C7",
+      "status_danger_text": "#7F1D1D",
+      "status_danger_bg": "#FEE2E2"
+    },
+    "dark": {
+      "name": "DARK",
+      "bg_canvas": "#0F172A",
+      "bg_surface": "#1E293B",
+      "border_subtle": "#334155",
+      "text_primary": "#F8FAFC",
+      "text_secondary": "#CBD5E1",
+      "text_muted": "#94A3B8",
+      "accent_primary": "#38BDF8",
+      "accent_teal": "#2DD4BF",
+      "focus_ring": "#38BDF8",
+      "status_success_text": "#4ADE80",
+      "status_success_bg": "#052E16",
+      "status_warning_text": "#FBBF24",
+      "status_warning_bg": "#451A03",
+      "status_danger_text": "#FCA5A5",
+      "status_danger_bg": "#450A0A"
+    }
+  }
+}

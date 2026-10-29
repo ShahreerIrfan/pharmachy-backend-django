@@ -1,0 +1,75 @@
+"""
+Root URL Configuration for Bangladesh Multi-Tenant Pharmacy ERP & POS Cloud Authority API
+Architecture Decision: ADR-0004, ADR-0021 & ADR-0031
+"""
+
+from __future__ import annotations
+
+from django.contrib import admin
+from django.http import JsonResponse
+from django.urls import include, path
+from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
+from rest_framework.routers import DefaultRouter
+
+from apps.audit_logging.views import AuditLogEntryViewSet
+from apps.secrets_vault.views import TenantSecretViewSet
+from apps.core.views import (
+    AsyncJobRecordViewSet,
+    BatchStockViewSet,
+    BranchViewSet,
+    ComplianceReminderViewSet,
+    DailyBranchAnalyticsViewSet,
+    MedicineProductViewSet,
+    PaymentTransactionViewSet,
+    PrescriptionRecordViewSet,
+    SaleInvoiceViewSet,
+    StaffMemberViewSet,
+    SubscriptionRecordViewSet,
+    TenantViewSet,
+)
+from apps.developer_toolchain.views import DeveloperQuickstartViewSet
+from apps.secrets_vault.views import TenantSecretViewSet
+
+router = DefaultRouter()
+router.register("tenants", TenantViewSet, basename="tenant")
+router.register("branches", BranchViewSet, basename="branch")
+router.register("medicines", MedicineProductViewSet, basename="medicine")
+router.register("batches", BatchStockViewSet, basename="batch")
+router.register("invoices", SaleInvoiceViewSet, basename="invoice")
+router.register("async-jobs", AsyncJobRecordViewSet, basename="async-job")
+router.register("analytics", DailyBranchAnalyticsViewSet, basename="analytics")
+router.register("compliance-reminders", ComplianceReminderViewSet, basename="compliance-reminder")
+router.register("subscriptions", SubscriptionRecordViewSet, basename="subscription")
+router.register("staff", StaffMemberViewSet, basename="staff")
+router.register("prescriptions", PrescriptionRecordViewSet, basename="prescription")
+router.register("payments", PaymentTransactionViewSet, basename="payment")
+router.register("audit-logs", AuditLogEntryViewSet, basename="audit-log")
+router.register("developer/quickstart", DeveloperQuickstartViewSet, basename="developer-quickstart")
+router.register("secrets", TenantSecretViewSet, basename="tenant-secret")
+
+
+def health_check(request):
+    """Probes system readiness, database connectivity, and version."""
+    from apps.core.celery_boundary import AsyncJobBoundaryEnforcer
+
+    redis_status = AsyncJobBoundaryEnforcer.check_redis_status()
+    return JsonResponse(
+        {
+            "service": "pharmacy-saas-cloud-api",
+            "version": "2.0.0",
+            "status": "HEALTHY",
+            "timezone": "Asia/Dhaka",
+            "redis": redis_status,
+        }
+    )
+
+
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("health/", health_check, name="health-check"),
+    path("api/v2/", include(router.urls)),
+    # OpenAPI 3.0 Documentation Endpoints
+    path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
+    path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
+    path("api/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
+]

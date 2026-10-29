@@ -1,0 +1,103 @@
+version: "3.9"
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pharmacy_backend_api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_DEBUG=False
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-django-insecure-prod-key-pharmacy-erp-saas}
+      - DJANGO_ALLOWED_HOSTS=${DJANGO_ALLOWED_HOSTS:-*}
+      - DB_ENGINE=postgres
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-pharmacy_erp_db}
+      - POSTGRES_USER=${POSTGRES_USER:-pharmacy_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pharmacy_secure_pass}
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_CACHE_URL=redis://redis:6379/1
+      - CELERY_TASK_ALWAYS_EAGER=False
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pharmacy_celery_worker
+    restart: always
+    command: ["celery", "-A", "config", "worker", "-l", "info", "--concurrency", "4"]
+    environment:
+      - DJANGO_DEBUG=False
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-django-insecure-prod-key-pharmacy-erp-saas}
+      - DB_ENGINE=postgres
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-pharmacy_erp_db}
+      - POSTGRES_USER=${POSTGRES_USER:-pharmacy_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pharmacy_secure_pass}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pharmacy_celery_beat
+    restart: always
+    command: ["celery", "-A", "config", "beat", "-l", "info"]
+    environment:
+      - DJANGO_DEBUG=False
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-django-insecure-prod-key-pharmacy-erp-saas}
+      - DB_ENGINE=postgres
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-pharmacy_erp_db}
+      - POSTGRES_USER=${POSTGRES_USER:-pharmacy_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-pharmacy_secure_pass}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: pharmacy_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pharmacy_erp_db}
+      POSTGRES_USER: ${POSTGRES_USER:-pharmacy_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pharmacy_secure_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pharmacy_user} -d ${POSTGRES_DB:-pharmacy_erp_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: pharmacy_redis
+    restart: always
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
+
