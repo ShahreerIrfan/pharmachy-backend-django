@@ -2329,30 +2329,45 @@ class PlatformConsoleViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=["get"], url_path="tenants")
     def tenants(self, request):
-        """Lists all onboarded platform tenants with search, filtering, and branch counts."""
+        """
+        Architecture Decision: ADR-0065
+        Searches and filters platform tenants with pagination, status chips,
+        and approved lifecycle actions. Strictly excludes patient records.
+        """
         self._require_superadmin(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
         from apps.core.platform_console import PlatformConsoleService
 
         operator_id = str(getattr(request.user, "user_id", None) or request.user)
         search = request.query_params.get("search")
         status_filter = request.query_params.get("status")
         plan_filter = request.query_params.get("plan_tier")
+        created_after = request.query_params.get("created_after")
+        created_before = request.query_params.get("created_before")
+        page = request.query_params.get("page", 1)
+        page_size = request.query_params.get("page_size", 20)
+        sort_by = request.query_params.get("sort_by", "created_at")
+        sort_order = request.query_params.get("sort_order", "desc")
 
         try:
-            page = max(1, int(request.query_params.get("page", 1)))
-            page_size = max(1, min(100, int(request.query_params.get("page_size", 20))))
-        except (ValueError, TypeError):
-            page = 1
-            page_size = 20
+            directory_data = PlatformConsoleService.list_tenants(
+                search=search,
+                status_filter=status_filter,
+                plan_filter=plan_filter,
+                created_after=created_after,
+                created_before=created_before,
+                page=page,
+                page_size=page_size,
+                sort_by=sort_by,
+                sort_order=sort_order,
+                operator_id=operator_id,
+            )
+        except DjangoValidationError as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"error": list(err.messages)}
+            raise ValidationError(detail=err_dict)
 
-        directory_data = PlatformConsoleService.list_tenants(
-            search=search,
-            status_filter=status_filter,
-            plan_filter=plan_filter,
-            page=page,
-            page_size=page_size,
-            operator_id=operator_id,
-        )
         return Response(
             {
                 "success": True,

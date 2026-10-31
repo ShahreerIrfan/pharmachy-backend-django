@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from django.core.exceptions import ValidationError
-from django.db import connection
+from django.db import connection, models
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -228,34 +228,139 @@ class PlatformConsoleService:
             "subscription_tier_distribution": tier_dist,
         }
 
+    STATUS_CHIP_MAP = {
+        "ACTIVE": {"tone": "success", "label_en": "Active", "label_bn": "সক্রিয়"},
+        "TRIAL": {"tone": "warning", "label_en": "Trial", "label_bn": "ট্রায়াল"},
+        "SUSPENDED": {"tone": "danger", "label_en": "Suspended", "label_bn": "স্থগিত"},
+        "ARCHIVED": {"tone": "neutral", "label_en": "Archived", "label_bn": "আর্কাইভকৃত"},
+        "GRACE_PERIOD": {"tone": "warning", "label_en": "Grace Period", "label_bn": "গ্রেস পিরিয়ড"},
+    }
+
+    APPROVED_ACTIONS_MAP = {
+        "ACTIVE": ["SUSPEND", "ARCHIVE", "UPDATE_PLAN", "PROVISION_BRANCH"],
+        "TRIAL": ["ACTIVATE_SUBSCRIPTION", "EXTEND_TRIAL", "SUSPEND", "ARCHIVE"],
+        "SUSPENDED": ["REINSTATE", "ARCHIVE"],
+        "GRACE_PERIOD": ["RENEW_SUBSCRIPTION", "SUSPEND", "ARCHIVE"],
+        "ARCHIVED": ["RESTORE_METADATA"],
+    }
+
+    ALLOWED_STATUSES = {"ACTIVE", "TRIAL", "SUSPENDED", "ARCHIVED", "GRACE_PERIOD"}
+    ALLOWED_PLAN_TIERS = {"BASIC", "STANDARD", "PRO"}
+
     @classmethod
     def list_tenants(
         cls,
         search: Optional[str] = None,
         status_filter: Optional[str] = None,
         plan_filter: Optional[str] = None,
-        page: int = 1,
-        page_size: int = 20,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        page: Any = 1,
+        page_size: Any = 20,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
         operator_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Returns a paginated list of tenants for the Super Admin platform directory.
+        Architecture Decision: ADR-0065
+        Returns a paginated list of tenants with rich search, filters, status chips,
+        and approved administrative lifecycle actions. Excludes patient-level records.
         """
-        qs = Tenant.objects.all().order_by("-created_at")
+        field_errors: Dict[str, List[str]] = {}
+
+        # 1. Page and Page Size validation
+        try:
+            int_page = int(page)
+            if int_page < 1:
+                field_errors["page"] = ["Page number must be a positive integer greater than or equal to 1."]
+        except (ValueError, TypeError):
+            field_errors["page"] = [f"Invalid page value '{page}'. Must be an integer."]
+            int_page = 1
+
+        try:
+            int_page_size = int(page_size)
+            if int_page_size < 1 or int_page_size > 100:
+                field_errors["page_size"] = ["Page size must be between 1 and 100."]
+        except (ValueError, TypeError):
+            field_errors["page_size"] = [f"Invalid page_size value '{page_size}'. Must be an integer."]
+            int_page_size = 20
+
+        # 2. Status validation
+        clean_status = None
+        if status_filter:
+            clean_status = str(status_filter).upper().strip()
+            if clean_status not in cls.ALLOWED_STATUSES:
+                field_errors["status"] = [
+                    f"Invalid status filter '{status_filter}'. Must be one of {sorted(cls.ALLOWED_STATUSES)}."
+                ]
+
+        # 3. Plan Tier validation
+        clean_plan = None
+        if plan_filter:
+            clean_plan = str(plan_filter).upper().strip()
+            if clean_plan not in cls.ALLOWED_PLAN_TIERS:
+                field_errors["plan_tier"] = [
+                    f"Invalid plan tier filter '{plan_filter}'. Must be one of {sorted(cls.ALLOWED_PLAN_TIERS)}."
+                ]
+
+        # 4. Date range validation
+        dt_after = None
+        if created_after:
+            from django.utils.dateparse import parse_date, parse_datetime
+
+            dt_after = parse_datetime(str(created_after).strip()) or parse_date(str(created_after).strip())
+            if not dt_after:
+                field_errors["created_after"] = [f"Invalid ISO 8601 date string for created_after: '{created_after}'."]
+
+        dt_before = None
+        if created_before:
+            from django.utils.dateparse import parse_date, parse_datetime
+
+            dt_before = parse_datetime(str(created_before).strip()) or parse_date(str(created_before).strip())
+            if not dt_before:
+                field_errors["created_before"] = [
+                    f"Invalid ISO 8601 date string for created_before: '{created_before}'."
+                ]
+
+        if field_errors:
+            raise ValidationError(field_errors)
+
+        # Build QuerySet
+        qs = Tenant.objects.all()
 
         if search:
             search_clean = str(search).strip()
-            qs = qs.filter(name__icontains=search_clean) | qs.filter(subdomain__icontains=search_clean)
+            qs = qs.filter(
+                models.Q(name__icontains=search_clean)
+                | models.Q(subdomain__icontains=search_clean)
+                | models.Q(tenant_id__icontains=search_clean)
+                | models.Q(billing_email__icontains=search_clean)
+            )
 
-        if status_filter:
-            qs = qs.filter(status=status_filter.upper())
+        if clean_status:
+            qs = qs.filter(status=clean_status)
 
-        if plan_filter:
-            qs = qs.filter(plan_tier=plan_filter.upper())
+        if clean_plan:
+            qs = qs.filter(plan_tier=clean_plan)
+
+        if dt_after:
+            qs = qs.filter(created_at__gte=dt_after)
+
+        if dt_before:
+            qs = qs.filter(created_at__lte=dt_before)
+
+        # Sorting
+        allowed_sorts = {"created_at", "name", "status", "plan_tier"}
+        clean_sort_by = str(sort_by or "created_at").lower().strip()
+        if clean_sort_by not in allowed_sorts:
+            clean_sort_by = "created_at"
+        prefix = "-" if str(sort_order or "desc").lower().strip() == "desc" else ""
+        qs = qs.order_by(f"{prefix}{clean_sort_by}")
 
         total_count = qs.count()
-        start = (page - 1) * page_size
-        end = start + page_size
+        total_pages = (total_count + int_page_size - 1) // int_page_size if total_count > 0 else 0
+        start = (int_page - 1) * int_page_size
+        end = start + int_page_size
         tenants_page = qs[start:end]
 
         items: List[Dict[str, Any]] = []
@@ -270,6 +375,13 @@ class PlatformConsoleService:
                     owner_email = owner.email
                     owner_phone = getattr(owner, "phone_number", None)
 
+            # Map status chips and approved actions
+            chip = cls.STATUS_CHIP_MAP.get(
+                t.status,
+                {"tone": "neutral", "label_en": t.status, "label_bn": t.status},
+            )
+            approved = cls.APPROVED_ACTIONS_MAP.get(t.status, [])
+
             items.append(
                 {
                     "tenant_id": t.tenant_id,
@@ -281,17 +393,22 @@ class PlatformConsoleService:
                     "branch_count": b_count,
                     "owner_email": owner_email,
                     "owner_phone": owner_phone,
+                    "status_chip": chip,
+                    "approved_actions": approved,
                 }
             )
 
         AuditLogEntry.objects.create(
-            action="PLATFORM_TENANT_DIRECTORY_ACCESSED",
+            action="PLATFORM_TENANT_SEARCH",
             resource_type="TENANT_DIRECTORY",
-            resource_id="directory_listing",
+            resource_id="directory_search",
             tenant_id="platform-global",
             status=AuditActionStatus.SUCCESS,
             metadata_json={
                 "operator_id": operator_id,
+                "search": search,
+                "status_filter": clean_status,
+                "plan_filter": clean_plan,
                 "result_count": len(items),
                 "total_count": total_count,
             },
@@ -299,8 +416,9 @@ class PlatformConsoleService:
 
         return {
             "total": total_count,
-            "page": page,
-            "page_size": page_size,
+            "page": int_page,
+            "page_size": int_page_size,
+            "total_pages": total_pages,
             "items": items,
         }
 
