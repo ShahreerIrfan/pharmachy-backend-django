@@ -44,6 +44,28 @@ class PaymentMethod(models.TextChoices):
     CARD = "CARD", "Card"
 
 
+class TenantLifecycleStatus(models.TextChoices):
+    PROVISIONING = "PROVISIONING", "Provisioning & Bootstrap"
+    TRIAL = "TRIAL", "Active Evaluation Trial"
+    ACTIVE = "ACTIVE", "Active & In Good Standing"
+    PAST_DUE = "PAST_DUE", "Past Due & In Grace Period"
+    SUSPENDED = "SUSPENDED", "Temporarily Suspended"
+    ARCHIVED = "ARCHIVED", "Decommissioned & Safely Archived"
+
+
+def get_default_canonical_settings() -> dict:
+    return {
+        "currency": "BDT",
+        "timezone": "Asia/Dhaka",
+        "tax_percentage": 0.0,
+        "allow_negative_stock": False,
+        "enforce_prescription_antibiotics": True,
+        "max_branches": 5,
+        "max_pos_terminals": 10,
+        "audit_retention_days": 365,
+    }
+
+
 class Tenant(models.Model):
     """Canonical multi-tenant account record representing a pharmacy chain or independent store."""
 
@@ -51,6 +73,20 @@ class Tenant(models.Model):
     name = models.CharField(max_length=255)
     subdomain = models.CharField(max_length=64, unique=True, db_index=True)
     plan_tier = models.CharField(max_length=32, choices=PlanTier.choices, default=PlanTier.STANDARD)
+    status = models.CharField(
+        max_length=32,
+        choices=TenantLifecycleStatus.choices,
+        default=TenantLifecycleStatus.ACTIVE,
+        db_index=True,
+    )
+    owner_user_id = models.CharField(max_length=128, blank=True, default="")
+    billing_customer_id = models.CharField(max_length=128, blank=True, default="")
+    billing_email = models.EmailField(blank=True, default="")
+    trial_ends_at = models.DateTimeField(null=True, blank=True)
+    grace_period_ends_at = models.DateTimeField(null=True, blank=True)
+    suspended_at = models.DateTimeField(null=True, blank=True)
+    suspension_reason = models.TextField(blank=True, default="")
+    canonical_settings = models.JSONField(default=get_default_canonical_settings, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -61,7 +97,81 @@ class Tenant(models.Model):
         verbose_name_plural = "Tenant Accounts"
 
     def __str__(self) -> str:
-        return f"{self.name} ({self.tenant_id})"
+        return f"{self.name} ({self.tenant_id}) [{self.status}]"
+
+    def is_checkout_allowed(self) -> bool:
+        """Returns True if the tenant is active and in good standing or active trial."""
+        return self.is_active and self.status in [
+            TenantLifecycleStatus.ACTIVE,
+            TenantLifecycleStatus.TRIAL,
+        ]
+
+    def can_transition_to(self, target_status: str) -> bool:
+        target = str(target_status).upper()
+        if target not in TenantLifecycleStatus.values:
+            return False
+        if self.status == target:
+            return True
+
+        valid_transitions = {
+            TenantLifecycleStatus.PROVISIONING: [TenantLifecycleStatus.TRIAL, TenantLifecycleStatus.ACTIVE],
+            TenantLifecycleStatus.TRIAL: [
+                TenantLifecycleStatus.ACTIVE,
+                TenantLifecycleStatus.SUSPENDED,
+                TenantLifecycleStatus.ARCHIVED,
+            ],
+            TenantLifecycleStatus.ACTIVE: [
+                TenantLifecycleStatus.PAST_DUE,
+                TenantLifecycleStatus.SUSPENDED,
+                TenantLifecycleStatus.ARCHIVED,
+            ],
+            TenantLifecycleStatus.PAST_DUE: [
+                TenantLifecycleStatus.ACTIVE,
+                TenantLifecycleStatus.SUSPENDED,
+                TenantLifecycleStatus.ARCHIVED,
+            ],
+            TenantLifecycleStatus.SUSPENDED: [TenantLifecycleStatus.ACTIVE, TenantLifecycleStatus.ARCHIVED],
+            TenantLifecycleStatus.ARCHIVED: [TenantLifecycleStatus.ACTIVE],
+        }
+        return target in valid_transitions.get(self.status, [])
+
+    def transition_status(self, target_status: str, operator_id: str, reason: str) -> None:
+        from django.core.exceptions import ValidationError
+        from django.utils import timezone
+
+        from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+        target_upper = str(target_status).upper()
+        if not self.can_transition_to(target_upper):
+            raise ValidationError(f"Invalid lifecycle transition from '{self.status}' to '{target_upper}'.")
+
+        old_status = self.status
+        self.status = target_upper
+
+        if self.status == TenantLifecycleStatus.SUSPENDED:
+            self.suspended_at = timezone.now()
+            self.suspension_reason = reason
+        elif self.status == TenantLifecycleStatus.ACTIVE:
+            self.suspended_at = None
+            self.suspension_reason = ""
+
+        self.save(update_fields=["status", "suspended_at", "suspension_reason", "updated_at"])
+
+        AuditLogEntry.objects.create(
+            action="TENANT_LIFECYCLE_TRANSITION",
+            resource_type="TENANT",
+            resource_id=self.tenant_id,
+            tenant_id=self.tenant_id,
+            user_id=operator_id,
+            status=AuditActionStatus.SUCCESS,
+            before_state={"status": old_status},
+            after_state={"status": self.status},
+            metadata_json={
+                "operator_id": operator_id,
+                "reason": reason,
+                "timestamp": timezone.now().isoformat(),
+            },
+        )
 
 
 class Branch(models.Model):

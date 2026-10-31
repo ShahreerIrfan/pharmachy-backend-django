@@ -45,8 +45,39 @@ from apps.core.validators import (
 class TenantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tenant
-        fields = ["tenant_id", "name", "subdomain", "plan_tier", "is_active", "created_at", "updated_at"]
-        read_only_fields = ["created_at", "updated_at"]
+        fields = [
+            "tenant_id",
+            "name",
+            "subdomain",
+            "plan_tier",
+            "status",
+            "owner_user_id",
+            "billing_customer_id",
+            "billing_email",
+            "trial_ends_at",
+            "grace_period_ends_at",
+            "suspended_at",
+            "suspension_reason",
+            "canonical_settings",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at", "suspended_at"]
+
+    def validate_canonical_settings(self, value):
+        if not isinstance(value, dict):
+            raise serializers.ValidationError("canonical_settings must be an object.")
+        if value.get("allow_negative_stock") is True:
+            raise serializers.ValidationError(
+                "Clinical safety invariant violation: allow_negative_stock must be false."
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        if "tenant_id" in validated_data and validated_data["tenant_id"] != instance.tenant_id:
+            raise serializers.ValidationError({"tenant_id": ["tenant_id is strictly immutable."]})
+        return super().update(instance, validated_data)
 
 
 class BranchSerializer(serializers.ModelSerializer):

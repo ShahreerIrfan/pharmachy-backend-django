@@ -65,9 +65,201 @@ from apps.core.throttling import (
 
 
 class TenantViewSet(viewsets.ModelViewSet):
+    """
+    Architecture Decision: ADR-0005 & ADR-0061
+    Multi-Tenant SaaS Lifecycle and Platform Super Admin ViewSet.
+    Enforces:
+      - Two-tenant isolation: Owners and staff see only their own tenant.
+      - Super Admin global cross-tenant visibility.
+      - Super Admin-exclusive audited lifecycle state transitions (SUSPEND, REINSTATE, ARCHIVE).
+      - Absolute block on destructive deletion (HTTP DELETE).
+    """
+
     queryset = Tenant.objects.all()
     serializer_class = TenantSerializer
-    permission_classes = [permissions.AllowAny]  # For local bootstrap / demo verification
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _is_superadmin(self, request) -> bool:
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return False
+        if getattr(user, "is_superuser", False):
+            return True
+        return str(getattr(user, "role", "")).upper() in ["SUPERADMIN", "PLATFORM_OPERATOR"]
+
+    def _get_caller_tenant_id(self, request) -> str:
+        tenant_id = (
+            getattr(request, "tenant_id", None)
+            or request.headers.get("X-Tenant-Id")
+            or getattr(getattr(request, "user", None), "tenant_id", None)
+        )
+        return str(tenant_id or "default-tenant").strip()
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self._is_superadmin(self.request):
+            status_filter = self.request.query_params.get("status")
+            if status_filter:
+                qs = qs.filter(status=status_filter.upper())
+            return qs
+        caller_tenant = self._get_caller_tenant_id(self.request)
+        return qs.filter(tenant_id=caller_tenant)
+
+    def get_object(self):
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        target_id = self.kwargs.get(lookup_url_kwarg, self.kwargs.get("pk"))
+        if target_id and not self._is_superadmin(self.request):
+            caller_tenant = self._get_caller_tenant_id(self.request)
+            if str(target_id).strip() != caller_tenant.strip():
+                from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+                AuditLogEntry.objects.create(
+                    action="SECURITY_INCIDENT_CROSS_TENANT",
+                    resource_type="TENANT",
+                    resource_id=str(target_id),
+                    tenant_id=caller_tenant,
+                    status=AuditActionStatus.DENIED,
+                    metadata_json={
+                        "event": "CROSS_TENANT_READ_VIOLATION",
+                        "caller_tenant": caller_tenant,
+                        "target_tenant": str(target_id),
+                        "endpoint": self.request.path,
+                    },
+                )
+                from rest_framework.exceptions import PermissionDenied
+
+                raise PermissionDenied(
+                    detail={
+                        "error_code": "FORBIDDEN_CROSS_TENANT_ACCESS",
+                        "message_en": f"Access denied: Caller tenant '{caller_tenant}' cannot access foreign tenant '{target_id}'.",
+                        "message_bn": f"অনুমতি নেই: কলার টেন্যান্ট '{caller_tenant}' অন্য টেন্যান্ট '{target_id}'-এ প্রবেশ করতে পারে না।",
+                    }
+                )
+        return super().get_object()
+
+    def create(self, request, *args, **kwargs):
+        if not self._is_superadmin(request):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": "Only Platform Super Admin is authorized to provision new tenant accounts.",
+                    "message_bn": "শুধুমাত্র প্ল্যাটফর্ম সুপার অ্যাডমিনের নতুন টেন্যান্ট অ্যাকাউন্ট তৈরির অনুমতি আছে।",
+                }
+            )
+        return super().create(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        from rest_framework.exceptions import PermissionDenied
+
+        raise PermissionDenied(
+            detail={
+                "error_code": "ABSOLUTE_SYSTEM_BLOCK",
+                "message_en": "Absolute Block: Tenant accounts cannot be hard-deleted. Use transition-status to archive.",
+                "message_bn": "স্থায়ী নিষেধাজ্ঞা: টেন্যান্ট অ্যাকাউন্ট হার্ড-ডিলিট করা নিষিদ্ধ। আর্কাইভ করতে transition-status ব্যবহার করুন।",
+            }
+        )
+
+    @action(detail=True, methods=["post"], url_path="transition-status")
+    def transition_status(self, request, pk=None):
+        """Audited FSM state transition executed exclusively by Platform Super Admin."""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        if not self._is_superadmin(request):
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": "Only Platform Super Admin is authorized to transition tenant lifecycle status.",
+                    "message_bn": "শুধুমাত্র প্ল্যাটফর্ম সুপার অ্যাডমিনের টেন্যান্টের লাইফসাইকেল স্ট্যাটাস পরিবর্তনের অনুমতি আছে।",
+                }
+            )
+
+        tenant = self.get_object()
+        data = request.data or {}
+        target_status = data.get("target_status")
+        reason = data.get("reason", "").strip()
+
+        field_errors = {}
+        if not target_status:
+            field_errors["target_status"] = ["Field 'target_status' is required (e.g. SUSPENDED, ACTIVE, ARCHIVED)."]
+        if not reason or len(reason) < 5:
+            field_errors["reason"] = ["Field 'reason' is required and must be at least 5 characters long."]
+
+        if field_errors:
+            raise ValidationError(detail=field_errors)
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        try:
+            tenant.transition_status(target_status=target_status, operator_id=operator_id, reason=reason)
+        except Exception as err:
+            raise ValidationError(detail={"lifecycle_error": [str(err)]})
+
+        serializer = self.get_serializer(tenant)
+        return Response(
+            {
+                "success": True,
+                "code": "TENANT_STATUS_TRANSITIONED",
+                "message_en": f"Tenant '{tenant.tenant_id}' transitioned to '{tenant.status}'.",
+                "message_bn": f"টেন্যান্ট '{tenant.tenant_id}' সফলভাবে '{tenant.status}' স্ট্যাটাসে পরিবর্তিত হয়েছে।",
+                "data": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get", "patch"], url_path="canonical-settings")
+    def canonical_settings(self, request, pk=None):
+        """Inspects or updates canonical settings for this tenant."""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        tenant = self.get_object()
+        if request.method.lower() == "get":
+            return Response(
+                {
+                    "success": True,
+                    "code": "CANONICAL_SETTINGS_RETRIEVED",
+                    "message_en": "Canonical settings retrieved successfully.",
+                    "message_bn": "ক্যানোনিকাল সেটিংস সফলভাবে প্রদর্শিত হয়েছে।",
+                    "data": tenant.canonical_settings,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # PATCH update settings
+        caller_role = str(getattr(request.user, "role", "")).upper()
+        if not self._is_superadmin(request) and caller_role != "PHARMACY_OWNER":
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": "Only Tenant Owner or Super Admin can update canonical settings.",
+                    "message_bn": "শুধুমাত্র টেন্যান্ট মালিক অথবা সুপার অ্যাডমিন সেটিংস পরিবর্তন করতে পারেন।",
+                }
+            )
+
+        new_settings = request.data or {}
+        if not isinstance(new_settings, dict):
+            raise ValidationError(detail={"settings": ["Settings payload must be a JSON object."]})
+
+        if new_settings.get("allow_negative_stock") is True:
+            raise ValidationError(
+                detail={"allow_negative_stock": ["Clinical safety violation: allow_negative_stock must be false."]}
+            )
+
+        current_settings = dict(tenant.canonical_settings or {})
+        current_settings.update(new_settings)
+        tenant.canonical_settings = current_settings
+        tenant.save(update_fields=["canonical_settings", "updated_at"])
+
+        return Response(
+            {
+                "success": True,
+                "code": "CANONICAL_SETTINGS_UPDATED",
+                "message_en": "Canonical settings updated successfully.",
+                "message_bn": "ক্যানোনিকাল সেটিংস সফলভাবে আপডেট হয়েছে।",
+                "data": tenant.canonical_settings,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class BranchViewSet(viewsets.ModelViewSet):
