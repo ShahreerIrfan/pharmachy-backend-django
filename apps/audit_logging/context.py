@@ -58,6 +58,11 @@ class LogContextManager:
         return _CURRENT_CONTEXT.get()
 
     @classmethod
+    def get_request_id(cls) -> Optional[str]:
+        ctx = cls.get_context()
+        return ctx.request_id if ctx else None
+
+    @classmethod
     def get_context_dict(cls) -> Dict[str, Any]:
         ctx = cls.get_context()
         if ctx:

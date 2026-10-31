@@ -332,6 +332,13 @@ class TestTaxonomyRegistry:
                 TestMarker.CONTRACT,
                 [TestMarker.SECURITY, TestMarker.INTEGRATION, TestMarker.UNIT],
             ),
+            (
+                "P047",
+                "API Response Conventions",
+                "shared/tests/test_p047_api_response_conventions.py",
+                TestMarker.CONTRACT,
+                [TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

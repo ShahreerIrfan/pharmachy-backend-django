@@ -40,7 +40,13 @@ class ErrorPayload:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
+        data["success"] = False
+        data["code"] = self.error_code
+        data["request_id"] = self.correlation_id
+        data["retryable"] = self.is_retryable
+        data["message"] = self.message_en
         data["recovery_action"] = self.recovery_action.value
+        data["details"] = self.field_errors
         return data
 
 
@@ -273,7 +279,15 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
     from django.core.exceptions import (
         ValidationError as DjangoValidationError,
     )
+    from django.http import Http404
     from rest_framework import status
+    from rest_framework.exceptions import (
+        AuthenticationFailed,
+        MethodNotAllowed,
+        NotAuthenticated,
+        NotFound,
+        Throttled,
+    )
     from rest_framework.exceptions import (
         PermissionDenied as DRFPermissionDenied,
     )
@@ -297,11 +311,13 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
     # 1. Custom Domain Exception (PharmacyBaseException)
     if isinstance(exc, PharmacyBaseException):
         payload = exc.to_payload().to_dict()
+        payload["success"] = False
         payload["code"] = exc.error_code
+        payload["request_id"] = correlation_id
+        payload["correlation_id"] = correlation_id
         payload["message"] = exc.message_en
         payload["retryable"] = exc.is_retryable
         payload["details"] = exc.field_errors
-        payload["correlation_id"] = correlation_id
         return Response(payload, status=exc.http_status)
 
     # 2. DRF or Django Validation Errors
@@ -326,8 +342,10 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
             field_errs["non_field_errors"] = [str(raw_errs)]
 
         payload = {
+            "success": False,
             "error_code": "ERR_VALIDATION_FAILED",
             "code": "ERR_VALIDATION_FAILED",
+            "request_id": correlation_id,
             "correlation_id": correlation_id,
             "http_status": 422,
             "is_retryable": False,
@@ -342,11 +360,37 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
         }
         return Response(payload, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
-    # 3. Permission Denied Errors
+    # 3. Authentication Failures (401 Unauthorized)
+    if isinstance(exc, (NotAuthenticated, AuthenticationFailed)):
+        detail_msg = getattr(exc, "detail", "Authentication credentials were not provided or are invalid.")
+        if isinstance(detail_msg, dict):
+            detail_msg = str(detail_msg.get("detail", detail_msg))
+        payload = {
+            "success": False,
+            "error_code": "ERR_UNAUTHORIZED",
+            "code": "ERR_UNAUTHORIZED",
+            "request_id": correlation_id,
+            "correlation_id": correlation_id,
+            "http_status": 401,
+            "is_retryable": False,
+            "retryable": False,
+            "message": str(detail_msg),
+            "message_en": "Authentication credentials were not provided or are invalid.",
+            "message_bn": "প্রবেশাধিকার নিশ্চিত করতে প্রমাণীকরণ তথ্য প্রদান করা হয়নি বা সঠিক নয়।",
+            "recovery_action": RecoveryAction.REAUTHENTICATE.value,
+            "field_errors": {},
+            "details": {"error": str(exc), "detail": str(detail_msg)},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        return Response(payload, status=status.HTTP_401_UNAUTHORIZED)
+
+    # 4. Permission Denied Errors (403 Forbidden)
     if isinstance(exc, (DRFPermissionDenied, DjangoPermissionDenied)):
         payload = {
+            "success": False,
             "error_code": "ERR_PERMISSION_DENIED",
             "code": "ERR_PERMISSION_DENIED",
+            "request_id": correlation_id,
             "correlation_id": correlation_id,
             "http_status": 403,
             "is_retryable": False,
@@ -355,10 +399,95 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
             "message_en": "You do not have permission to perform this action.",
             "message_bn": "এই কাজটি সম্পাদন করার অনুমতি আপনার নেই।",
             "recovery_action": RecoveryAction.REQUEST_MANAGER_OVERRIDE.value,
+            "field_errors": {},
             "details": {"error": str(exc)},
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         }
         return Response(payload, status=status.HTTP_403_FORBIDDEN)
 
-    # Let default DRF handler process other exceptions (404, 405, etc.)
-    return exception_handler(exc, context)
+    # 5. Resource Not Found (404)
+    if isinstance(exc, (NotFound, Http404)):
+        payload = {
+            "success": False,
+            "error_code": "ERR_RESOURCE_NOT_FOUND",
+            "code": "ERR_RESOURCE_NOT_FOUND",
+            "request_id": correlation_id,
+            "correlation_id": correlation_id,
+            "http_status": 404,
+            "is_retryable": False,
+            "retryable": False,
+            "message": "The requested resource was not found.",
+            "message_en": "The requested resource was not found.",
+            "message_bn": "অনুরোধকৃত রিসোর্সটি খুঁজে পাওয়া যায়নি।",
+            "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+            "field_errors": {},
+            "details": {"error": str(exc)},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        return Response(payload, status=status.HTTP_404_NOT_FOUND)
+
+    # 6. Method Not Allowed (405)
+    if isinstance(exc, MethodNotAllowed):
+        payload = {
+            "success": False,
+            "error_code": "ERR_METHOD_NOT_ALLOWED",
+            "code": "ERR_METHOD_NOT_ALLOWED",
+            "request_id": correlation_id,
+            "correlation_id": correlation_id,
+            "http_status": 405,
+            "is_retryable": False,
+            "retryable": False,
+            "message": f"Method '{getattr(exc, 'method', 'REQUEST')}' not allowed.",
+            "message_en": f"Method '{getattr(exc, 'method', 'REQUEST')}' not allowed.",
+            "message_bn": "অনুরোধকৃত মেথডটি অনুমোদিত নয়।",
+            "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+            "field_errors": {},
+            "details": {"error": str(exc)},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        return Response(payload, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    # 7. Throttled / Rate Limited (429)
+    if isinstance(exc, Throttled):
+        payload = {
+            "success": False,
+            "error_code": "ERR_RATE_LIMIT_EXCEEDED",
+            "code": "ERR_RATE_LIMIT_EXCEEDED",
+            "request_id": correlation_id,
+            "correlation_id": correlation_id,
+            "http_status": 429,
+            "is_retryable": True,
+            "retryable": True,
+            "message": "Request rate limit exceeded. Please retry later.",
+            "message_en": "Request rate limit exceeded. Please retry later.",
+            "message_bn": "অনুরোধের সীমা অতিক্রম করেছে। কিছুক্ষণ পর পুনরায় চেষ্টা করুন।",
+            "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+            "field_errors": {},
+            "details": {"wait_seconds": getattr(exc, "wait", None)},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        return Response(payload, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+    # 8. Let default DRF handler process any unhandled exceptions, then standardize
+    response = exception_handler(exc, context)
+    if response is not None and isinstance(response.data, dict):
+        if "error_code" not in response.data and "code" not in response.data:
+            detail_val = response.data.get("detail", str(exc))
+            response.data = {
+                "success": False,
+                "error_code": "ERR_HTTP_EXCEPTION",
+                "code": "ERR_HTTP_EXCEPTION",
+                "request_id": correlation_id,
+                "correlation_id": correlation_id,
+                "http_status": response.status_code,
+                "is_retryable": False,
+                "retryable": False,
+                "message": str(detail_val),
+                "message_en": str(detail_val),
+                "message_bn": "একটি অপ্রত্যাশিত ত্রুটি ঘটেছে।",
+                "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+                "field_errors": {},
+                "details": response.data,
+                "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+            }
+    return response

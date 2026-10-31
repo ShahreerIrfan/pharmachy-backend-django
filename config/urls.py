@@ -14,6 +14,7 @@ from rest_framework.routers import DefaultRouter
 from apps.audit_logging.views import AuditLogEntryViewSet
 from apps.build_pipeline.views import BuildSmokeViewSet
 from apps.core.views import (
+    ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
     BatchStockViewSet,
     BranchViewSet,
@@ -63,6 +64,7 @@ router.register("pipeline/smoke", BuildSmokeViewSet, basename="build-smoke")
 router.register("environment/profile", EnvironmentProfileViewSet, basename="environment-profile")
 router.register("identity/users", PharmacyUserViewSet, basename="identity-user")
 router.register("validation", ValidationContractViewSet, basename="validation")
+router.register("conventions", ApiResponseConventionViewSet, basename="conventions")
 
 
 def health_check(request):

@@ -10,10 +10,12 @@ from decimal import Decimal
 
 from django.core.cache import cache
 from django.utils import timezone
-from rest_framework import permissions, status, viewsets
+from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from apps.core.errors import CrossTenantViolationError
 from apps.core.models import (
     AsyncJobRecord,
     BatchStock,
@@ -30,6 +32,8 @@ from apps.core.models import (
     SubscriptionRecord,
     Tenant,
 )
+from apps.core.pagination import StandardPagination
+from apps.core.responses import StandardResponseMixin
 from apps.core.serializers import (
     AsyncJobRecordSerializer,
     BatchStockSerializer,
@@ -66,12 +70,22 @@ class MedicineProductViewSet(viewsets.ModelViewSet):
     queryset = MedicineProduct.objects.all()
     serializer_class = MedicineProductSerializer
     permission_classes = [permissions.AllowAny]
+    pagination_class = StandardPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ["brand_name", "generic_name", "manufacturer"]
+    ordering_fields = ["brand_name", "mrp_unit", "created_at"]
+    ordering = ["brand_name"]
 
 
 class BatchStockViewSet(viewsets.ModelViewSet):
     queryset = BatchStock.objects.all()
     serializer_class = BatchStockSerializer
     permission_classes = [permissions.AllowAny]
+    pagination_class = StandardPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ["batch_number", "product__brand_name"]
+    ordering_fields = ["expiry_date", "quantity", "created_at"]
+    ordering = ["expiry_date"]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -85,6 +99,11 @@ class SaleInvoiceViewSet(viewsets.ModelViewSet):
     queryset = SaleInvoice.objects.all()
     serializer_class = SaleInvoiceSerializer
     permission_classes = [permissions.AllowAny]
+    pagination_class = StandardPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ["invoice_id", "customer_name", "customer_phone"]
+    ordering_fields = ["created_at", "total_amount", "gross_total"]
+    ordering = ["-created_at"]
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -388,4 +407,146 @@ class ValidationContractViewSet(viewsets.ViewSet):
                 "message_bn": "কমান্ডের তথ্য সফলভাবে সার্ভার ভ্যালিডেশন কন্ট্রাক্ট দ্বারা যাচাই করা হয়েছে।",
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class ApiResponseConventionViewSet(viewsets.ViewSet, StandardResponseMixin):
+    """
+    Dedicated viewset demonstrating and verifying canonical API response conventions (ADR-0047).
+    Validates pagination, filtering, standardized envelopes, machine codes, request tracing,
+    and localized bilingual descriptions.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    @action(detail=False, methods=["get"], url_path="paginated-medicines")
+    def paginated_medicines(self, request):
+        """
+        Returns paginated pharmaceutical catalog wrapped in canonical ADR-0047 envelope.
+        Supports search keyword query (?search=) and ordering (?ordering=).
+        """
+        queryset = MedicineProduct.objects.all()
+        search_query = request.query_params.get("search", "").strip()
+        if search_query:
+            from django.db.models import Q
+
+            queryset = queryset.filter(
+                Q(brand_name__icontains=search_query)
+                | Q(generic_name__icontains=search_query)
+                | Q(manufacturer__icontains=search_query)
+            )
+
+        ordering = request.query_params.get("ordering", "brand_name")
+        valid_orderings = {"brand_name", "-brand_name", "mrp_unit", "-mrp_unit", "created_at", "-created_at"}
+        if ordering in valid_orderings:
+            queryset = queryset.order_by(ordering)
+
+        paginator = StandardPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        if page is not None:
+            serializer = MedicineProductSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        serializer = MedicineProductSerializer(queryset, many=True)
+        return self.success_response(
+            data=serializer.data,
+            code="RESOURCE_FETCHED",
+            message_en="Complete pharmaceutical product catalog retrieved.",
+            message_bn="সম্পূর্ণ ঔষধ ক্যাটালগ তথ্য লোড করা হয়েছে।",
+        )
+
+    @action(detail=False, methods=["get"], url_path=r"medicine-detail/(?P<pk>[^/.]+)")
+    def medicine_detail(self, request, pk=None):
+        """Returns single pharmaceutical product wrapped in standardized ADR-0047 envelope."""
+        try:
+            medicine = MedicineProduct.objects.get(pk=pk)
+            serializer = MedicineProductSerializer(medicine)
+            return self.success_response(
+                data=serializer.data,
+                code="RESOURCE_FETCHED",
+                message_en=f"Retrieved medicine '{medicine.brand_name}' successfully.",
+                message_bn=f"ঔষধ '{medicine.brand_name}' এর তথ্য সফলভাবে পাওয়া গেছে।",
+            )
+        except MedicineProduct.DoesNotExist:
+            from rest_framework.exceptions import NotFound
+
+            raise NotFound(detail=f"Medicine product with ID '{pk}' not found.")
+
+    @action(detail=False, methods=["post"], url_path="validate-input")
+    def validate_input(self, request):
+        """
+        Demonstrates validation rejection complying with ADR-0047 & ADR-0014 error envelope.
+        Requires non-empty 'item_name', positive integer 'quantity', and positive 'unit_price'.
+        """
+        item_name = request.data.get("item_name")
+        quantity = request.data.get("quantity")
+        unit_price = request.data.get("unit_price")
+
+        field_errors = {}
+        if not item_name or not str(item_name).strip():
+            field_errors["item_name"] = ["Field 'item_name' is required and cannot be blank."]
+        if quantity is None:
+            field_errors["quantity"] = ["Field 'quantity' is required."]
+        else:
+            try:
+                qty_val = int(quantity)
+                if qty_val <= 0:
+                    field_errors["quantity"] = ["Quantity must be a positive integer strictly greater than zero."]
+            except (ValueError, TypeError):
+                field_errors["quantity"] = ["Quantity must be a valid integer."]
+
+        if unit_price is None:
+            field_errors["unit_price"] = ["Field 'unit_price' is required."]
+        else:
+            try:
+                price_dec = Decimal(str(unit_price))
+                if price_dec <= Decimal("0.00"):
+                    field_errors["unit_price"] = ["Unit price must be strictly greater than zero BDT."]
+            except Exception:
+                field_errors["unit_price"] = ["Unit price must be a valid decimal monetary string."]
+
+        if field_errors:
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError(detail=field_errors)
+
+        return self.success_response(
+            data={"item_name": item_name, "quantity": quantity, "unit_price": str(unit_price)},
+            code="RESOURCE_VALIDATED",
+            message_en="Input validated successfully.",
+            message_bn="প্রদত্ত তথ্য সফলভাবে যাচাই করা হয়েছে।",
+        )
+
+    @action(
+        detail=False, methods=["get"], url_path="unauthorized-access", permission_classes=[permissions.IsAuthenticated]
+    )
+    def unauthorized_access(self, request):
+        """Demonstrates 401 Unauthorized envelope for unauthenticated callers."""
+        return self.success_response(
+            data={"user": str(request.user)},
+            code="AUTHORIZED",
+            message_en="User is authenticated.",
+            message_bn="ব্যবহারকারী অনুমোদিত।",
+        )
+
+    @action(detail=False, methods=["get"], url_path="cross-tenant-access")
+    def cross_tenant_access(self, request):
+        """
+        Demonstrates cross-tenant rejection complying with ADR-0047 (403 Forbidden).
+        Validates caller's tenant matches requested target tenant.
+        """
+        caller_tenant = request.query_params.get("caller_tenant_id", "tenant-dhaka-central")
+        target_tenant = request.query_params.get("target_tenant_id", "tenant-chittagong-care")
+
+        if caller_tenant != target_tenant:
+            raise CrossTenantViolationError(
+                message_en=f"Tenant '{caller_tenant}' is forbidden from accessing resources of tenant '{target_tenant}'.",
+                message_bn=f"টেন্যান্ট '{caller_tenant}' অপর টেন্যান্ট '{target_tenant}' এর তথ্য দেখার অনুমতি রাখে না।",
+            )
+
+        return self.success_response(
+            data={"tenant_id": caller_tenant, "accessible": True},
+            code="TENANT_AUTHORIZED",
+            message_en="Tenant access verified.",
+            message_bn="টেন্যান্ট অ্যাক্সেস সফলভাবে যাচাই করা হয়েছে।",
         )
