@@ -115,6 +115,10 @@ class MedicineProduct(models.Model):
         ordering = ["brand_name"]
         verbose_name = "Medicine Product"
         verbose_name_plural = "Medicine Products"
+        indexes = [
+            models.Index(fields=["brand_name", "product_id"]),
+            models.Index(fields=["-created_at", "product_id"]),
+        ]
 
     def __str__(self) -> str:
         return f"{self.brand_name} {self.strength} ({self.generic_name}) - {self.manufacturer}"
@@ -197,6 +201,8 @@ class SaleInvoice(models.Model):
         unique_together = ("tenant", "invoice_number")
         indexes = [
             models.Index(fields=["tenant", "branch", "-created_at"]),
+            models.Index(fields=["tenant", "-created_at", "invoice_id"]),
+            models.Index(fields=["tenant", "customer_phone"]),
         ]
         verbose_name = "Sale Invoice"
         verbose_name_plural = "Sale Invoices"

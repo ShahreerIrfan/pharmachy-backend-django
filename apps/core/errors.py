@@ -269,6 +269,15 @@ class PrivacyRequestNotFoundError(PharmacyBaseException):
     default_message_bn = "অনুরোধকৃত ডেটা প্রাইভেসি আবেদন রেকর্ডটি খুঁজে পাওয়া যায়নি।"
 
 
+class InvalidCursorError(PharmacyBaseException):
+    error_code = "ERR_INVALID_CURSOR"
+    http_status = 422
+    is_retryable = False
+    recovery_action = RecoveryAction.CORRECT_INPUT_FIELDS
+    default_message_en = "The provided pagination cursor is invalid, expired, or malformed."
+    default_message_bn = "প্রদত্ত পেজিনেশন কার্সারটি অবৈধ, মেয়াদোত্তীর্ণ বা বিকৃত।"
+
+
 # Canonical registry of all specialized business exceptions
 CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     AuthenticationExpiredError,
@@ -290,6 +299,7 @@ CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     InvalidFileTypeError,
     PrivacyRetentionConflictError,
     PrivacyRequestNotFoundError,
+    InvalidCursorError,
 ]
 
 

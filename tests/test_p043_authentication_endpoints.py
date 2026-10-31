@@ -40,6 +40,16 @@ class BackendTestP043AuthenticationEndpoints(TestCase):
         self.phone = "+8801711223344"
         self.password = "DhanmondiPass2026!#"
 
+        from apps.core.models import Branch, Tenant
+        self.tenant, _ = Tenant.objects.get_or_create(
+            tenant_id=self.tenant_id,
+            defaults={"name": "Dhanmondi Rx", "subdomain": "dh-rx-43", "is_active": True},
+        )
+        self.branch, _ = Branch.objects.get_or_create(
+            branch_id=self.branch_id,
+            defaults={"tenant": self.tenant, "name": "Main Dispensary", "is_active": True},
+        )
+
         self.user = PharmacyUser.objects.create_user(
             email=self.email,
             phone_number=self.phone,

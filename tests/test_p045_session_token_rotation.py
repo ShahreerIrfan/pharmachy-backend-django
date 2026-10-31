@@ -39,6 +39,24 @@ class BackendTestP045SessionTokenRotation(TestCase):
         self.tenant_b = "tenant-uttara-pharma"
         self.password = "ValidSessionPass2026!#"
 
+        from apps.core.models import Branch, Tenant
+        self.t_a, _ = Tenant.objects.get_or_create(
+            tenant_id=self.tenant_a,
+            defaults={"name": "Dhanmondi Care", "subdomain": "dh-care-45", "is_active": True},
+        )
+        self.b_a, _ = Branch.objects.get_or_create(
+            branch_id="b-dhanmondi-01",
+            defaults={"tenant": self.t_a, "name": "Main Dispensary", "is_active": True},
+        )
+        self.t_b, _ = Tenant.objects.get_or_create(
+            tenant_id=self.tenant_b,
+            defaults={"name": "Uttara Pharma", "subdomain": "ut-pharma-45", "is_active": True},
+        )
+        self.b_b, _ = Branch.objects.get_or_create(
+            branch_id="b-uttara-01",
+            defaults={"tenant": self.t_b, "name": "Uttara Dispensary", "is_active": True},
+        )
+
         self.user_a = PharmacyUser.objects.create_user(
             email="pharmacist@dhanmondicare.bd",
             phone_number="+8801713000001",

@@ -32,7 +32,12 @@ from apps.core.models import (
     SubscriptionRecord,
     Tenant,
 )
-from apps.core.pagination import StandardPagination
+from apps.core.pagination import (
+    SafeAdaptivePagination,
+    StandardPagination,
+    UnicodePhoneticSearchFilter,
+    ValidatedQueryFilterBackend,
+)
 from apps.core.responses import StandardResponseMixin
 from apps.core.serializers import (
     AsyncJobRecordSerializer,
@@ -75,22 +80,45 @@ class MedicineProductViewSet(viewsets.ModelViewSet):
     queryset = MedicineProduct.objects.all()
     serializer_class = MedicineProductSerializer
     permission_classes = [permissions.AllowAny]
-    pagination_class = StandardPagination
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    pagination_class = SafeAdaptivePagination
+    filter_backends = [
+        ValidatedQueryFilterBackend,
+        DjangoFilterBackend,
+        UnicodePhoneticSearchFilter,
+        filters.OrderingFilter,
+    ]
     search_fields = ["brand_name", "generic_name", "manufacturer"]
-    ordering_fields = ["brand_name", "mrp_unit", "created_at"]
-    ordering = ["brand_name"]
+    ordering_fields = ["brand_name", "mrp_unit", "created_at", "product_id"]
+    ordering = ["brand_name", "product_id"]
+    cursor_ordering = "-created_at"
+    allowed_filter_fields = {
+        "brand_name",
+        "generic_name",
+        "manufacturer",
+        "dosage_form",
+        "strength",
+        "requires_cold_chain",
+        "min_mrp",
+        "max_mrp",
+    }
 
 
 class BatchStockViewSet(viewsets.ModelViewSet):
     queryset = BatchStock.objects.all()
     serializer_class = BatchStockSerializer
     permission_classes = [permissions.AllowAny]
-    pagination_class = StandardPagination
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    pagination_class = SafeAdaptivePagination
+    filter_backends = [
+        ValidatedQueryFilterBackend,
+        DjangoFilterBackend,
+        UnicodePhoneticSearchFilter,
+        filters.OrderingFilter,
+    ]
     search_fields = ["batch_number", "product__brand_name"]
     ordering_fields = ["expiry_date", "quantity", "created_at"]
     ordering = ["expiry_date"]
+    cursor_ordering = "expiry_date"
+    allowed_filter_fields = {"batch_number", "product_id", "status", "tenant_id", "branch_id"}
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -104,18 +132,49 @@ class SaleInvoiceViewSet(viewsets.ModelViewSet):
     queryset = SaleInvoice.objects.all()
     serializer_class = SaleInvoiceSerializer
     permission_classes = [permissions.AllowAny]
-    pagination_class = StandardPagination
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ["invoice_id", "customer_name", "customer_phone"]
-    ordering_fields = ["created_at", "total_amount", "gross_total"]
-    ordering = ["-created_at"]
+    pagination_class = SafeAdaptivePagination
+    filter_backends = [
+        ValidatedQueryFilterBackend,
+        DjangoFilterBackend,
+        UnicodePhoneticSearchFilter,
+        filters.OrderingFilter,
+    ]
+    search_fields = ["invoice_id", "invoice_number", "customer_name", "customer_phone"]
+    ordering_fields = ["created_at", "total_amount", "gross_total", "invoice_id"]
+    ordering = ["-created_at", "-invoice_id"]
+    cursor_ordering = "-created_at"
+    allowed_filter_fields = {
+        "customer_name",
+        "customer_phone",
+        "payment_method",
+        "status",
+        "tenant_id",
+        "branch_id",
+        "start_date",
+        "end_date",
+    }
 
     def get_queryset(self):
         qs = super().get_queryset()
-        tenant_id = self.request.query_params.get("tenant_id")
-        if tenant_id:
-            qs = qs.filter(tenant_id=tenant_id)
-        return qs
+        trusted_tenant_id = getattr(self.request, "tenant_id", None)
+        query_tenant_id = self.request.query_params.get("tenant_id")
+
+        if trusted_tenant_id:
+            if query_tenant_id and query_tenant_id.strip() != trusted_tenant_id:
+                raise CrossTenantViolationError(
+                    field_errors={"tenant_id": [f"Supplied tenant '{query_tenant_id}' does not match trusted tenant '{trusted_tenant_id}'."]},
+                    message_en=f"Cross-tenant access violation: Cannot query invoices for foreign tenant '{query_tenant_id}'.",
+                    message_bn="অন্য ফার্মেসির তথ্যে প্রবেশাধিকার কঠোরভাবে নিষিদ্ধ।",
+                )
+            return qs.filter(tenant_id=trusted_tenant_id)
+
+        if query_tenant_id:
+            return qs.filter(tenant_id=query_tenant_id)
+
+        if self.request.user and self.request.user.is_authenticated and self.request.user.is_superuser:
+            return qs
+
+        return qs.none()
 
     @action(detail=False, methods=["post"], url_path="checkout", throttle_classes=[SensitiveMutationRateThrottle])
     def checkout(self, request):

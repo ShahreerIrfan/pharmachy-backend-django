@@ -139,8 +139,8 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "EXCEPTION_HANDLER": "apps.core.errors.custom_drf_exception_handler",
-    # ADR-0047: Standardized DRF Pagination & Filtering
-    "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.StandardPagination",
+    # ADR-0047, ADR-0053: Standardized DRF Pagination & Filtering
+    "DEFAULT_PAGINATION_CLASS": "apps.core.pagination.SafeAdaptivePagination",
     "PAGE_SIZE": 20,
     "DEFAULT_FILTER_BACKENDS": [
         "django_filters.rest_framework.DjangoFilterBackend",
