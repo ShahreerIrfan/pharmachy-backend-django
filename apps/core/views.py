@@ -1445,3 +1445,204 @@ class SoftDeletionAndArchivalViewSet(viewsets.ViewSet):
         )
 
         return Response({"success": True}, status=status.HTTP_200_OK)
+
+
+class AsyncTaskIdempotencyViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0057
+    Asynchronous Task Idempotency, Retry Controls, and Dead-Letter Queue (DLQ) API.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_tenant_id(self, request) -> str:
+        tenant_id = (
+            getattr(request, "tenant_id", None)
+            or request.headers.get("X-Tenant-Id")
+            or getattr(getattr(request, "user", None), "tenant_id", None)
+        )
+        if not tenant_id:
+            tenant_id = "default-tenant"
+        return str(tenant_id)
+
+    def _check_tenant_match(self, request, target_tenant: str | None) -> None:
+        if not target_tenant:
+            return
+        caller_tenant = self._get_tenant_id(request)
+        if str(target_tenant).strip() != caller_tenant.strip():
+            from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+            AuditLogEntry.objects.create(
+                action="SECURITY_INCIDENT_CROSS_TENANT",
+                resource_type="SECURITY_BARRIER",
+                tenant_id=caller_tenant,
+                status=AuditActionStatus.DENIED,
+                metadata_json={
+                    "event": "CROSS_TENANT_ASYNC_IDEMPOTENCY_VIOLATION",
+                    "caller_tenant": caller_tenant,
+                    "target_tenant": target_tenant,
+                    "endpoint": request.path,
+                },
+            )
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "FORBIDDEN_CROSS_TENANT_ACCESS",
+                    "message_en": f"Access denied: Caller tenant '{caller_tenant}' cannot operate on tenant '{target_tenant}'.",
+                    "message_bn": f"অনুমতি নেই: কলার টেন্যান্ট '{caller_tenant}' টার্গেট টেন্যান্ট '{target_tenant}'-এ কাজ করতে পারে না।",
+                }
+            )
+
+    @action(detail=False, methods=["post"], url_path="dispatch")
+    def dispatch_task(self, request):
+        """Dispatches an async task with idempotency verification."""
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.async_idempotency import AsyncTaskIdempotencyEngine
+
+        target_tenant = request.data.get("tenant_id") or self._get_tenant_id(request)
+        self._check_tenant_match(request, target_tenant)
+
+        idempotency_key = request.data.get("idempotency_key")
+        category = request.data.get("category")
+        task_name = request.data.get("task_name")
+        payload = request.data.get("payload", {})
+        branch_id = request.data.get("branch_id")
+        max_retries = int(request.data.get("max_retries", 3))
+        simulate_failure = bool(request.data.get("simulate_failure", False))
+
+        field_errors: dict[str, list[str]] = {}
+        if not idempotency_key or not str(idempotency_key).strip():
+            field_errors["idempotency_key"] = ["Field 'idempotency_key' is required."]
+        if not category:
+            field_errors["category"] = ["Field 'category' is required."]
+        if not task_name:
+            field_errors["task_name"] = ["Field 'task_name' is required."]
+
+        if field_errors:
+            raise ValidationError(detail=field_errors)
+
+        try:
+            result = AsyncTaskIdempotencyEngine.dispatch_task(
+                tenant_id=target_tenant,
+                idempotency_key=str(idempotency_key),
+                category=str(category),
+                task_name=str(task_name),
+                payload=payload if isinstance(payload, dict) else {},
+                branch_id=branch_id,
+                max_retries=max_retries,
+                simulate_failure=simulate_failure,
+            )
+        except Exception as err:
+            from apps.core.celery_boundary import AsyncBoundaryViolationError
+
+            if isinstance(err, AsyncBoundaryViolationError):
+                raise ValidationError(detail={"boundary_violation": [str(err)]})
+            raise ValidationError(detail={"dispatch_error": [str(err)]})
+
+        return Response(
+            {
+                "success": True,
+                "code": "TASK_CACHED_REPLAY" if result.get("cached") else "TASK_DISPATCHED",
+                "message_en": result.get("message_en"),
+                "message_bn": result.get("message_bn"),
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="retry-or-fail")
+    def retry_or_fail(self, request):
+        """Simulates/executes bounded retry counters and routes to DLQ on exhaustion."""
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.async_idempotency import AsyncTaskIdempotencyEngine
+
+        target_tenant = request.data.get("tenant_id") or self._get_tenant_id(request)
+        self._check_tenant_match(request, target_tenant)
+
+        job_id = request.data.get("job_id")
+        error_message = request.data.get("error_message", "Downstream webhook 503")
+
+        if not job_id:
+            raise ValidationError(detail={"job_id": ["Field 'job_id' is required."]})
+
+        try:
+            result = AsyncTaskIdempotencyEngine.record_retry_or_dead_letter(
+                job_id=str(job_id),
+                tenant_id=target_tenant,
+                error_message=str(error_message),
+            )
+        except Exception as err:
+            raise ValidationError(detail={"retry_error": [str(err)]})
+
+        return Response(
+            {
+                "success": True,
+                "code": "JOB_DEAD_LETTERED" if result.get("status") == "DEAD_LETTER" else "JOB_RETRY_SCHEDULED",
+                "message_en": result.get("message_en"),
+                "message_bn": result.get("message_bn"),
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["get"], url_path="dead-letters")
+    def list_dead_letters(self, request):
+        """Lists all dead-lettered jobs in the tenant's DLQ."""
+        from apps.core.async_idempotency import AsyncTaskIdempotencyEngine
+
+        target_tenant = request.query_params.get("tenant_id") or self._get_tenant_id(request)
+        self._check_tenant_match(request, target_tenant)
+
+        dlq_list = AsyncTaskIdempotencyEngine.list_dead_letters(tenant_id=target_tenant)
+        return Response(
+            {
+                "success": True,
+                "code": "DLQ_LIST_RETRIEVED",
+                "message_en": f"Retrieved {len(dlq_list)} dead-lettered tasks from DLQ.",
+                "message_bn": f"ডেড-লেটার কিউ থেকে {len(dlq_list)}টি ব্যর্থ টাস্ক পাওয়া গেছে।",
+                "data": {
+                    "total_dead_letters": len(dlq_list),
+                    "tasks": dlq_list,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="reprocess-dlq")
+    def reprocess_dead_letter(self, request):
+        """Re-queues and re-executes a dead-lettered task from the DLQ."""
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.async_idempotency import AsyncTaskIdempotencyEngine
+
+        target_tenant = request.data.get("tenant_id") or self._get_tenant_id(request)
+        self._check_tenant_match(request, target_tenant)
+
+        job_id = request.data.get("job_id")
+        if not job_id:
+            raise ValidationError(detail={"job_id": ["Field 'job_id' is required."]})
+
+        operator_id = str(getattr(getattr(request, "user", None), "user_id", None) or request.user)
+
+        try:
+            result = AsyncTaskIdempotencyEngine.reprocess_dead_letter(
+                job_id=str(job_id),
+                tenant_id=target_tenant,
+                operator_id=operator_id,
+            )
+        except Exception as err:
+            raise ValidationError(detail={"dlq_reprocess_error": [str(err)]})
+
+        return Response(
+            {
+                "success": True,
+                "code": "DLQ_JOB_REPROCESSED",
+                "message_en": result.get("message_en"),
+                "message_bn": result.get("message_bn"),
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )

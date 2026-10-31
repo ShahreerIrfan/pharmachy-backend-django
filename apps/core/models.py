@@ -250,13 +250,15 @@ class JobStatus(models.TextChoices):
     SUCCESS = "SUCCESS", "Success"
     FAILED = "FAILED", "Failed"
     RETRYING = "RETRYING", "Retrying"
+    DEAD_LETTER = "DEAD_LETTER", "Dead Letter"
 
 
 class AsyncJobRecord(models.Model):
     """
     Audit log and lifecycle tracker for asynchronous background jobs executed by Celery and Redis.
-    Architecture Decision: ADR-0031
+    Architecture Decision: ADR-0031 & ADR-0057
     Restricted to NOTIFICATION, REMINDER, and DERIVED_ANALYTICS categories.
+    Enforces idempotency keys, bounded retries, and dead-letter queue routing.
     """
 
     job_id = models.CharField(max_length=64, primary_key=True)
@@ -265,6 +267,7 @@ class AsyncJobRecord(models.Model):
     category = models.CharField(max_length=32, choices=JobCategory.choices)
     task_name = models.CharField(max_length=255)
     status = models.CharField(max_length=32, choices=JobStatus.choices, default=JobStatus.PENDING, db_index=True)
+    idempotency_key = models.CharField(max_length=128, null=True, blank=True, db_index=True)
     payload = models.JSONField(default=dict, blank=True)
     result = models.JSONField(null=True, blank=True)
     error_message = models.TextField(blank=True)
@@ -272,12 +275,15 @@ class AsyncJobRecord(models.Model):
     max_retries = models.PositiveIntegerField(default=3)
     scheduled_at = models.DateTimeField(auto_now_add=True, db_index=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    dead_letter_reason = models.TextField(blank=True)
+    dead_lettered_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-scheduled_at"]
         indexes = [
             models.Index(fields=["tenant", "category", "status"]),
             models.Index(fields=["status", "scheduled_at"]),
+            models.Index(fields=["tenant", "idempotency_key"]),
         ]
         verbose_name = "Async Background Job Record"
         verbose_name_plural = "Async Background Job Records"

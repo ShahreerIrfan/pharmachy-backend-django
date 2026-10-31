@@ -16,6 +16,7 @@ from apps.build_pipeline.views import BuildSmokeViewSet
 from apps.core.views import (
     ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
+    AsyncTaskIdempotencyViewSet,
     BatchStockViewSet,
     BranchViewSet,
     ComplianceReminderViewSet,
@@ -80,6 +81,7 @@ router.register("privacy/requests", DataPrivacyViewSet, basename="privacy-reques
 router.register("exceptions", GlobalExceptionHandlingViewSet, basename="exceptions")
 router.register("standards/time-money", TimeMoneyStandardsViewSet, basename="standards-time-money")
 router.register("archival", SoftDeletionAndArchivalViewSet, basename="archival")
+router.register("async-tasks", AsyncTaskIdempotencyViewSet, basename="async-task")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
