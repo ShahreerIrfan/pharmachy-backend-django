@@ -635,3 +635,141 @@ class RateLimitPolicyViewSet(viewsets.ViewSet, StandardResponseMixin):
             message_en="Staff invitation dispatched within rate limit.",
             message_bn="স্টাফ আমন্ত্রণ রেট লিমিটের মধ্যে পাঠানো হয়েছে।",
         )
+
+
+class TenantContextViewSet(viewsets.ViewSet, StandardResponseMixin):
+    """
+    Dedicated viewset auditing and demonstrating trusted tenant context resolution (ADR-0049).
+    Resolves tenant and branch from trusted signed claims; never trusts client-supplied tenant IDs alone.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=["get"], url_path="current")
+    def current(self, request):
+        """Returns the active tenant and branch security context resolved by TenantContextMiddleware."""
+        context = getattr(request, "tenant_context", None)
+        if not context:
+            tenant_id = getattr(request, "tenant_id", None) or getattr(request.user, "tenant_id", None)
+            tenant = Tenant.objects.filter(tenant_id=tenant_id).first()
+            if not tenant:
+                raise CrossTenantViolationError(
+                    message_en="No active tenant context resolved for authenticated session.",
+                    message_bn="প্রমাণিত সেশনের জন্য কোনো সক্রিয় টেন্যান্ট পাওয়া যায়নি।",
+                )
+            context_data = {
+                "tenant_id": tenant.tenant_id,
+                "tenant_name": tenant.name,
+                "subdomain": tenant.subdomain,
+                "plan_tier": tenant.plan_tier,
+                "branch_id": getattr(request, "branch_id", None) or getattr(request.user, "branch_id", None),
+                "branch_name": getattr(getattr(request, "branch", None), "name", None),
+                "user_id": str(request.user.user_id),
+                "user_role": getattr(request.user, "role", "CASHIER"),
+                "resolution_source": "JWT_SIGNED_CLAIMS",
+                "is_active": tenant.is_active,
+            }
+        else:
+            context_data = context.to_dict()
+
+        return self.success_response(
+            data=context_data,
+            code="TENANT_CONTEXT_RESOLVED",
+            message_en="Tenant and active branch context resolved from trusted signed claims.",
+            message_bn="নির্ভরযোগ্য সাইনড তথ্য থেকে টেন্যান্ট ও সক্রিয় শাখা সফলভাবে নিশ্চিত করা হয়েছে।",
+        )
+
+    @action(detail=False, methods=["post"], url_path="validate-access")
+    def validate_access(self, request):
+        """
+        Validates target tenant and branch access against caller's trusted claims.
+        Rejects cross-tenant tampering attempts with 403 Forbidden.
+        """
+        target_tenant_id = request.data.get("target_tenant_id")
+        target_branch_id = request.data.get("target_branch_id")
+
+        if not target_tenant_id:
+            return self.error_response(
+                code="ERR_VALIDATION_FAILED",
+                message_en="Target tenant_id is required.",
+                message_bn="উদ্দিষ্ট টেন্যান্ট আইডি প্রদান করা আবশ্যক।",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+
+        caller_tenant_id = getattr(request, "tenant_id", None) or getattr(request.user, "tenant_id", None)
+        is_superadmin = (
+            getattr(request.user, "is_superuser", False) or getattr(request.user, "role", "") == "SUPERADMIN"
+        )
+
+        if target_tenant_id != caller_tenant_id and not is_superadmin:
+            raise CrossTenantViolationError(
+                message_en=(
+                    f"Cross-tenant access violation: Caller tenant '{caller_tenant_id}' "
+                    f"is forbidden from accessing resources of tenant '{target_tenant_id}'."
+                ),
+                message_bn=(
+                    f"অন্য ফার্মেসির তথ্যে প্রবেশাধিকার কঠোরভাবে নিষিদ্ধ। "
+                    f"আপনার টেন্যান্ট '{caller_tenant_id}' অপর টেন্যান্ট '{target_tenant_id}'-এর তথ্যে প্রবেশের অধিকার রাখে না।"
+                ),
+            )
+
+        # Validate branch if provided
+        if target_branch_id:
+            branch = Branch.objects.filter(branch_id=target_branch_id, tenant_id=caller_tenant_id).first()
+            if not branch:
+                raise CrossTenantViolationError(
+                    message_en=(
+                        f"Cross-branch access violation: Branch '{target_branch_id}' "
+                        f"does not belong to active tenant '{caller_tenant_id}'."
+                    ),
+                    message_bn=(f"শাখা প্রবেশাধিকার লঙ্ঘন: শাখা '{target_branch_id}' আপনার ফার্মেসির অন্তর্ভুক্ত নয়।"),
+                )
+
+        return self.success_response(
+            data={
+                "authorized": True,
+                "tenant_id": caller_tenant_id,
+                "branch_id": target_branch_id,
+            },
+            code="TENANT_ACCESS_AUTHORIZED",
+            message_en="Tenant and branch access authorization confirmed.",
+            message_bn="টেন্যান্ট ও শাখা প্রবেশাধিকার সফলভাবে অনুমোদিত।",
+        )
+
+    @action(detail=False, methods=["get"], url_path="branches")
+    def branches(self, request):
+        """Returns dispensary branches belonging strictly to the caller's active tenant."""
+        tenant_id = getattr(request, "tenant_id", None) or getattr(request.user, "tenant_id", None)
+        branch_list = list(
+            Branch.objects.filter(tenant_id=tenant_id, is_active=True).values(
+                "branch_id", "name", "license_number", "address", "is_active"
+            )
+        )
+        return self.success_response(
+            data=branch_list,
+            code="TENANT_BRANCHES_RETRIEVED",
+            message_en=f"Retrieved {len(branch_list)} active branches for tenant '{tenant_id}'.",
+            message_bn=f"টেন্যান্ট '{tenant_id}'-এর জন্য {len(branch_list)}টি সক্রিয় শাখা সফলভাবে পাওয়া গেছে।",
+        )
+
+    @action(detail=False, methods=["get"], url_path="policy", permission_classes=[permissions.AllowAny])
+    def policy(self, request):
+        """Returns the tenant context resolution policy matrix conforming to ADR-0049."""
+        policy_matrix = {
+            "adr": "ADR-0049",
+            "trust_hierarchy": [
+                "JWT_SIGNED_CLAIMS",
+                "SESSION_MEMBERSHIP",
+                "SUPERADMIN_OVERRIDE",
+            ],
+            "client_supplied_tenant_ids_allowed": False,
+            "superadmin_override_enabled": True,
+            "cross_tenant_violation_code": "ERR_CROSS_TENANT_VIOLATION",
+            "inactive_tenant_code": "ERR_TENANT_INACTIVE",
+        }
+        return self.success_response(
+            data=policy_matrix,
+            code="TENANT_POLICY_RETRIEVED",
+            message_en="Tenant context resolution policy matrix retrieved successfully.",
+            message_bn="টেন্যান্ট কনটেক্সট রেজোলিউশন নীতিমালা সফলভাবে লোড হয়েছে।",
+        )

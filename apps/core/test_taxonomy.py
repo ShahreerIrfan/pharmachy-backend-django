@@ -346,6 +346,13 @@ class TestTaxonomyRegistry:
                 TestMarker.SECURITY,
                 [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
             ),
+            (
+                "P049",
+                "Tenant Context Middleware",
+                "shared/tests/test_p049_tenant_context.py",
+                TestMarker.SECURITY,
+                [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

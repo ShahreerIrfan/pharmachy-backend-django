@@ -24,6 +24,8 @@ class RecoveryAction(str, Enum):
     CONNECT_FOR_LEASE_REFRESH = "CONNECT_FOR_LEASE_REFRESH"
     ABORT_SECURITY_INCIDENT = "ABORT_SECURITY_INCIDENT"
     CORRECT_INPUT_FIELDS = "CORRECT_INPUT_FIELDS"
+    CONTACT_SUPPORT = "CONTACT_SUPPORT"
+    SELECT_ACTIVE_BRANCH = "SELECT_ACTIVE_BRANCH"
 
 
 @dataclass(frozen=True)
@@ -185,6 +187,24 @@ class FieldValidationError(PharmacyBaseException):
     default_message_bn = "এক বা একাধিক তথ্যের মান সঠিক নয়।"
 
 
+class TenantInactiveError(PharmacyBaseException):
+    error_code = "ERR_TENANT_INACTIVE"
+    http_status = 403
+    is_retryable = False
+    recovery_action = RecoveryAction.CONTACT_SUPPORT
+    default_message_en = "This pharmacy tenant account is inactive or suspended."
+    default_message_bn = "এই ফার্মেসি টেন্যান্ট অ্যাকাউন্টটি নিষ্ক্রিয় বা স্থগিত করা হয়েছে।"
+
+
+class BranchNotFoundError(PharmacyBaseException):
+    error_code = "ERR_BRANCH_NOT_FOUND"
+    http_status = 404
+    is_retryable = False
+    recovery_action = RecoveryAction.SELECT_ACTIVE_BRANCH
+    default_message_en = "Active dispensary branch not found or does not belong to your tenant."
+    default_message_bn = "সক্রিয় শাখা খুঁজে পাওয়া যায়নি অথবা এটি আপনার ফার্মেসির অন্তর্ভুক্ত নয়।"
+
+
 # Canonical registry of all specialized business exceptions
 CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     AuthenticationExpiredError,
@@ -198,6 +218,8 @@ CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     DatabaseLockTimeoutError,
     OfflineLeaseExpiredError,
     FieldValidationError,
+    TenantInactiveError,
+    BranchNotFoundError,
 ]
 
 
