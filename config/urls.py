@@ -28,6 +28,7 @@ from apps.core.views import (
     TenantViewSet,
 )
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
+from apps.environment_governance.views import EnvironmentProfileViewSet
 from apps.quality_governance.views import (
     DefinitionOfDoneAuditViewSet,
     QualityIssueTicketViewSet,
@@ -55,6 +56,7 @@ router.register("releases", ReleaseManifestViewSet, basename="release")
 router.register("quality/issues", QualityIssueTicketViewSet, basename="quality-issue")
 router.register("quality/dod-audits", DefinitionOfDoneAuditViewSet, basename="dod-audit")
 router.register("pipeline/smoke", BuildSmokeViewSet, basename="build-smoke")
+router.register("environment/profile", EnvironmentProfileViewSet, basename="environment-profile")
 
 
 def health_check(request):

@@ -1,16 +1,17 @@
 """
-Django Settings for Bangladesh Multi-Tenant Pharmacy ERP & POS Cloud Authority API
-Architecture Decision: ADR-0004, ADR-0021 & ADR-0022
-Canonical Database: PostgreSQL 16
-Development / Offline Fallback: SQLite
+config.settings.base
+Architecture Decision: ADR-0004, ADR-0021, ADR-0022 & ADR-0041
+Shared foundation settings for Bangladesh Multi-Tenant Pharmacy ERP & POS Cloud Authority API.
 """
+
+from __future__ import annotations
 
 import os
 import sys
 from pathlib import Path
 
 # Paths
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 ROOT_DIR = BASE_DIR.parent
 
 # Ensure both BASE_DIR (standalone repository) and ROOT_DIR are on Python path
@@ -36,10 +37,6 @@ PythonRuntimeValidator.validate_runtime()
 if os.environ.get("ENV_VALIDATE_STRICT", "False").lower() in ("true", "1"):
     EnvironmentConfigValidator.validate()
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-dev-key-pharmacy-saas-2026-bangladesh")
-DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() in ("true", "1", "yes")
-ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")
-
 # Application Definition
 INSTALLED_APPS = [
     # Django Core
@@ -62,6 +59,7 @@ INSTALLED_APPS = [
     "apps.release_management",
     "apps.quality_governance",
     "apps.build_pipeline",
+    "apps.environment_governance",
 ]
 
 MIDDLEWARE = [
@@ -96,27 +94,6 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
-
-# Database Configuration (PostgreSQL canonical, SQLite fallback for local test/dev)
-DB_ENGINE = os.environ.get("DB_ENGINE", "sqlite")
-if DB_ENGINE == "postgres":
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("POSTGRES_DB", "pharmacy_erp_db"),
-            "USER": os.environ.get("POSTGRES_USER", "pharmacy_user"),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "pharmacy_secure_pass"),
-            "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
-            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
-        }
-    }
-else:
-    DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.sqlite3",
-            "NAME": BASE_DIR / "db.sqlite3",
-        }
-    }
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -158,11 +135,7 @@ SPECTACULAR_SETTINGS = {
     "SERVE_INCLUDE_SCHEMA": False,
 }
 
-# CORS Configuration
-CORS_ALLOW_ALL_ORIGINS = DEBUG
-
 # Redis & Celery Asynchronous Infrastructure (ADR-0031)
-# Scoped strictly to: NOTIFICATION, REMINDER, and DERIVED_ANALYTICS.
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL

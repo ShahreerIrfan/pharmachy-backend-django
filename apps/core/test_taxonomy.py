@@ -290,6 +290,13 @@ class TestTaxonomyRegistry:
                 TestMarker.INTEGRATION,
                 [TestMarker.CONTRACT, TestMarker.UNIT, TestMarker.SECURITY],
             ),
+            (
+                "P041",
+                "Django Project Modular Settings",
+                "shared/tests/test_p041_modular_settings.py",
+                TestMarker.SECURITY,
+                [TestMarker.INTEGRATION, TestMarker.CONTRACT, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:
