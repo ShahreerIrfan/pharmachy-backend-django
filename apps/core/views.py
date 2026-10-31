@@ -13,6 +13,7 @@ from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import filters, permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
 from apps.core.errors import CrossTenantViolationError
@@ -268,6 +269,7 @@ class TenantViewSet(viewsets.ModelViewSet):
     def suspend_tenant(self, request, pk=None):
         """Audited tenant suspension executed exclusively by Platform Super Admin."""
         from rest_framework.exceptions import PermissionDenied, ValidationError
+
         from apps.core.platform_console import PlatformConsoleService
 
         if not self._is_superadmin(request):
@@ -301,6 +303,7 @@ class TenantViewSet(viewsets.ModelViewSet):
     def restore_tenant(self, request, pk=None):
         """Audited tenant restoration executed exclusively by Platform Super Admin."""
         from rest_framework.exceptions import PermissionDenied, ValidationError
+
         from apps.core.platform_console import PlatformConsoleService
 
         if not self._is_superadmin(request):
@@ -413,7 +416,178 @@ class MedicineProductViewSet(viewsets.ModelViewSet):
         "requires_cold_chain",
         "min_mrp",
         "max_mrp",
+        "curation_status",
+        "dgda_dar_number",
+        "is_prescription_only",
+        "is_narcotic",
+        "is_antibiotic",
     }
+
+    def _require_platform_operator(self, request):
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            raise PermissionDenied("Authentication credentials were not provided.")
+        is_platform = getattr(user, "is_superuser", False) or str(getattr(user, "role", "")).upper() in [
+            "SUPERADMIN",
+            "SUPER_ADMIN",
+            "PLATFORM_OPERATOR",
+        ]
+        if not is_platform:
+            raise PermissionDenied(
+                detail={
+                    "error_code": "PLATFORM_CATALOG_OWNERSHIP_PROTECTED",
+                    "message_en": (
+                        "Global medicine catalog master records are centrally owned by platform administrators. "
+                        "Tenants cannot modify master products."
+                    ),
+                    "message_bn": "গ্লোবাল মেডিসিন ক্যাটালগ কেন্দ্রীয়ভাবে সুরক্ষিত। কোনো ফার্মেসি এটি পরিবর্তন বা মুছতে পারবে না।",
+                }
+            )
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = getattr(self.request, "user", None)
+        is_platform = (
+            user
+            and user.is_authenticated
+            and (
+                getattr(user, "is_superuser", False)
+                or str(getattr(user, "role", "")).upper() in ["SUPERADMIN", "SUPER_ADMIN", "PLATFORM_OPERATOR"]
+            )
+        )
+        if not is_platform:
+            from apps.core.models import MedicineCurationStatus
+
+            qs = qs.filter(curation_status__in=[MedicineCurationStatus.APPROVED, MedicineCurationStatus.DEPRECATED])
+        return qs
+
+    def perform_create(self, serializer):
+        self._require_platform_operator(self.request)
+        instance = serializer.save(curated_by=self.request.user)
+        import uuid
+
+        from apps.core.models import MedicineCurationHistory
+
+        MedicineCurationHistory.objects.create(
+            history_id=f"cur-{uuid.uuid4().hex[:12]}",
+            product=instance,
+            reviewer=self.request.user,
+            action="CREATED",
+            old_status="",
+            new_status=instance.curation_status,
+            version_number=instance.version_number,
+            notes=f"Master product '{instance.product_id}' created in central catalog.",
+        )
+
+    def perform_update(self, serializer):
+        self._require_platform_operator(self.request)
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        self._require_platform_operator(self.request)
+        super().perform_destroy(instance)
+
+    @action(detail=True, methods=["post"], url_path="approve")
+    def approve(self, request, pk=None):
+        """Regulatory approval of master medicine formulation with DGDA DAR number."""
+        self._require_platform_operator(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from apps.core.global_medicine_service import GlobalMedicineCatalogService
+
+        data = request.data or {}
+        try:
+            result = GlobalMedicineCatalogService.approve_master_product(
+                reviewer=request.user,
+                product_id=pk,
+                dgda_dar_number=data.get("dgda_dar_number"),
+                notes=data.get("notes", ""),
+            )
+        except DjangoValidationError as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"error": list(err.messages)}
+            raise ValidationError(detail=err_dict)
+
+        return Response(
+            {
+                "success": True,
+                "code": "GLOBAL_MEDICINE_APPROVED",
+                "message_en": f"Master product '{pk}' approved and published across all tenants.",
+                "message_bn": f"মাস্টার ওষুধ '{pk}' অনুমোদিত ও সকল ফার্মেসির জন্য প্রকাশিত হয়েছে।",
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"], url_path="recall")
+    def recall(self, request, pk=None):
+        """DGDA regulatory recall order immediately blacklisting sales."""
+        self._require_platform_operator(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from apps.core.global_medicine_service import GlobalMedicineCatalogService
+
+        data = request.data or {}
+        try:
+            result = GlobalMedicineCatalogService.recall_master_product(
+                reviewer=request.user,
+                product_id=pk,
+                recall_reason=data.get("recall_reason", ""),
+                regulatory_order_ref=data.get("regulatory_order_ref", ""),
+            )
+        except DjangoValidationError as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"error": list(err.messages)}
+            raise ValidationError(detail=err_dict)
+
+        return Response(
+            {
+                "success": True,
+                "code": "GLOBAL_MEDICINE_RECALLED",
+                "message_en": f"Master product '{pk}' recalled per regulatory directive.",
+                "message_bn": f"মাস্টার ওষুধ '{pk}' ডিজিডিএ নির্দেশে প্রত্যাহার করা হয়েছে।",
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"], url_path="deprecate")
+    def deprecate(self, request, pk=None):
+        """Deprecates an obsolete master formulation."""
+        self._require_platform_operator(request)
+        from apps.core.global_medicine_service import GlobalMedicineCatalogService
+
+        data = request.data or {}
+        result = GlobalMedicineCatalogService.deprecate_master_product(
+            reviewer=request.user,
+            product_id=pk,
+            reason=data.get("reason", ""),
+        )
+        return Response(
+            {
+                "success": True,
+                "code": "GLOBAL_MEDICINE_DEPRECATED",
+                "message_en": f"Master product '{pk}' deprecated.",
+                "message_bn": f"মাস্টার ওষুধ '{pk}' বাতিলযোগ্য হিসেবে চিহ্নিত হয়েছে।",
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get"], url_path="curation-history")
+    def curation_history(self, request, pk=None):
+        """Retrieves audit timeline of review actions on this master product."""
+        from apps.core.global_medicine_service import GlobalMedicineCatalogService
+
+        history = GlobalMedicineCatalogService.get_curation_history(product_id=pk)
+        return Response(
+            {
+                "success": True,
+                "code": "MEDICINE_CURATION_HISTORY_RETRIEVED",
+                "message_en": f"Retrieved {len(history)} curation event(s).",
+                "message_bn": f"{len(history)}টি কিউরেশন ইভেন্ট প্রাপ্ত হয়েছে।",
+                "data": {"product_id": pk, "history": history},
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class BatchStockViewSet(viewsets.ModelViewSet):

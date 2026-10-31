@@ -88,6 +88,8 @@ class BranchSerializer(serializers.ModelSerializer):
 
 
 class MedicineProductSerializer(serializers.ModelSerializer):
+    status_chip = serializers.SerializerMethodField()
+
     class Meta:
         model = MedicineProduct
         fields = [
@@ -102,9 +104,25 @@ class MedicineProductSerializer(serializers.ModelSerializer):
             "requires_cold_chain",
             "min_temp_celsius",
             "max_temp_celsius",
+            "dgda_dar_number",
+            "regulatory_source",
+            "curation_status",
+            "version_number",
+            "immutable_version_hash",
+            "is_prescription_only",
+            "is_narcotic",
+            "is_antibiotic",
+            "status_chip",
+            "reviewed_at",
+            "curation_notes",
             "created_at",
         ]
-        read_only_fields = ["created_at"]
+        read_only_fields = ["created_at", "version_number", "immutable_version_hash", "status_chip", "reviewed_at"]
+
+    def get_status_chip(self, obj):
+        from apps.core.global_medicine_service import GlobalMedicineCatalogService
+
+        return GlobalMedicineCatalogService.resolve_status_chip(obj.curation_status)
 
     def validate_mrp_unit(self, value):
         return validate_money_decimal(value, "mrp_unit", min_value=Decimal("0.01"))

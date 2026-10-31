@@ -510,6 +510,49 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.TENANT,
         min_plan=PlanTier.BASIC,
     ),
+    # 14. Global Centrally Curated Medicine Master Catalogue (ADR-0070)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/(?:products|medicines)/(?:[^/]+/(?:curation-history/)?)?$",
+        method="GET",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PLATFORM_OPERATOR,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.STAFF_PHARMACIST,
+            UserRole.CASHIER,
+        ],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/(?:products|medicines)/(?:[^/]+/(?:approve|recall|deprecate)/?)?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/(?:products|medicines)/[^/]+/?$",
+        method="PUT",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/(?:products|medicines)/[^/]+/?$",
+        method="PATCH",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/(?:products|medicines)/[^/]+/?$",
+        method="DELETE",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
 ]
 
 

@@ -199,8 +199,21 @@ class Branch(models.Model):
         return f"{self.name} [{self.license_number}] ({self.tenant_id})"
 
 
+class MedicineCurationStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    UNDER_REVIEW = "UNDER_REVIEW", "Under Regulatory Review"
+    APPROVED = "APPROVED", "Approved & Published"
+    DEPRECATED = "DEPRECATED", "Deprecated"
+    RECALLED = "RECALLED", "DGDA Recalled / Blacklisted"
+
+
 class MedicineProduct(models.Model):
-    """Global or tenant-accessible pharmaceutical product catalog with DGDA classification."""
+    """
+    Architecture Decision: ADR-0004 & ADR-0070
+    Global, centrally curated pharmaceutical master product catalog with DGDA regulatory metadata.
+    Tenant staff have read-only access to published master records.
+    Mutations and review lifecycle are strictly restricted to platform super administrators.
+    """
 
     product_id = models.CharField(max_length=64, primary_key=True)
     brand_name = models.CharField(max_length=255, db_index=True)
@@ -223,7 +236,39 @@ class MedicineProduct(models.Model):
     requires_cold_chain = models.BooleanField(default=False)
     min_temp_celsius = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     max_temp_celsius = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+
+    # ADR-0070: Centralized Curation, Review Lifecycle & Regulatory Provenance
+    dgda_dar_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    regulatory_source = models.CharField(max_length=128, default="DGDA_BANGLADESH")
+    curation_status = models.CharField(
+        max_length=32,
+        choices=MedicineCurationStatus.choices,
+        default=MedicineCurationStatus.APPROVED,
+        db_index=True,
+    )
+    version_number = models.PositiveIntegerField(default=1)
+    immutable_version_hash = models.CharField(max_length=64, blank=True, default="")
+    is_prescription_only = models.BooleanField(default=False, db_index=True)
+    is_narcotic = models.BooleanField(default=False, db_index=True)
+    is_antibiotic = models.BooleanField(default=False, db_index=True)
+    curated_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="curated_medicine_products",
+    )
+    reviewed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_medicine_products",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    curation_notes = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["brand_name"]
@@ -232,10 +277,54 @@ class MedicineProduct(models.Model):
         indexes = [
             models.Index(fields=["brand_name", "product_id"]),
             models.Index(fields=["-created_at", "product_id"]),
+            models.Index(fields=["curation_status", "dgda_dar_number"]),
         ]
 
+    def compute_version_hash(self) -> str:
+        import hashlib
+
+        raw = (
+            f"{self.dgda_dar_number}|{self.brand_name}|{self.generic_name}|"
+            f"{self.dosage_form}|{self.strength}|{self.manufacturer}|{self.version_number}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def save(self, *args, **kwargs):
+        if not self.immutable_version_hash or "update_fields" not in kwargs:
+            self.immutable_version_hash = self.compute_version_hash()
+        super().save(*args, **kwargs)
+
     def __str__(self) -> str:
-        return f"{self.brand_name} {self.strength} ({self.generic_name}) - {self.manufacturer}"
+        dar = f" [{self.dgda_dar_number}]" if self.dgda_dar_number else ""
+        return f"{self.brand_name} {self.strength} ({self.generic_name}) - {self.manufacturer}{dar}"
+
+
+class MedicineCurationHistory(models.Model):
+    """
+    Architecture Decision: ADR-0070
+    Audited history of regulatory reviews, status changes, and version increments on global medicine master.
+    """
+
+    history_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(MedicineProduct, on_delete=models.CASCADE, related_name="curation_history")
+    reviewer = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="medicine_curation_events",
+    )
+    action = models.CharField(max_length=64)
+    old_status = models.CharField(max_length=32, blank=True, default="")
+    new_status = models.CharField(max_length=32)
+    version_number = models.PositiveIntegerField(default=1)
+    notes = models.TextField(blank=True, default="")
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+        verbose_name = "Medicine Curation History"
+        verbose_name_plural = "Medicine Curation Histories"
 
 
 class BatchStock(models.Model):
