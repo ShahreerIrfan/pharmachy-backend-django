@@ -30,6 +30,7 @@ from apps.core.views import (
     PrescriptionRecordViewSet,
     RateLimitPolicyViewSet,
     SaleInvoiceViewSet,
+    SecurityBaselineViewSet,
     SoftDeletionAndArchivalViewSet,
     StaffMemberViewSet,
     SubscriptionRecordViewSet,
@@ -87,6 +88,7 @@ router.register("archival", SoftDeletionAndArchivalViewSet, basename="archival")
 router.register("async-tasks", AsyncTaskIdempotencyViewSet, basename="async-task")
 router.register("health/diagnostics", HealthDiagnosticsViewSet, basename="health-diagnostics")
 router.register("permissions/matrix", EndpointPermissionMatrixViewSet, basename="permission-matrix")
+router.register("security/baseline", SecurityBaselineViewSet, basename="security-baseline")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

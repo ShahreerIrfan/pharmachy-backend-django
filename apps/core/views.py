@@ -1850,3 +1850,146 @@ class EndpointPermissionMatrixViewSet(viewsets.ViewSet):
             },
             status=http_status,
         )
+
+
+class SecurityBaselineViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0060
+    DRF ViewSet for Backend Smoke and Security Baseline Verification.
+    Audits the 7 Foundational Security Pillars:
+      1. Authentication Gate
+      2. Authorization & Least-Privilege Gate
+      3. Input Validation Gate
+      4. Multi-Tenant & Branch Scoping Gate
+      5. Audit Trail Persistence Gate
+      6. Data Privacy & Field Masking Gate
+      7. Database Migration Integrity Gate
+    RBAC: Restricted to Admins, Owners, Branch Managers, and Auditors.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_tenant_id(self, request) -> str:
+        tenant_id = (
+            getattr(request, "tenant_id", None)
+            or request.headers.get("X-Tenant-Id")
+            or getattr(getattr(request, "user", None), "tenant_id", None)
+        )
+        if not tenant_id:
+            tenant_id = "default-tenant"
+        return str(tenant_id)
+
+    def _check_tenant_match(self, request, target_tenant: str | None) -> None:
+        if not target_tenant:
+            return
+        caller_tenant = self._get_tenant_id(request)
+        if str(target_tenant).strip() != caller_tenant.strip():
+            from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+            AuditLogEntry.objects.create(
+                action="SECURITY_INCIDENT_CROSS_TENANT",
+                resource_type="SECURITY_BARRIER",
+                tenant_id=caller_tenant,
+                status=AuditActionStatus.DENIED,
+                metadata_json={
+                    "event": "CROSS_TENANT_SECURITY_BASELINE_VIOLATION",
+                    "caller_tenant": caller_tenant,
+                    "target_tenant": target_tenant,
+                    "endpoint": request.path,
+                },
+            )
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "FORBIDDEN_CROSS_TENANT_ACCESS",
+                    "message_en": f"Access denied: Caller tenant '{caller_tenant}' cannot access security baseline for tenant '{target_tenant}'.",
+                    "message_bn": f"অনুমতি নেই: কলার টেন্যান্ট '{caller_tenant}' টার্গেট টেন্যান্ট '{target_tenant}'-এর সিকিউরিটি বেসলাইন পরীক্ষা করতে পারে না।",
+                }
+            )
+
+    def _check_operator_rbac(self, request) -> None:
+        user_role = str(getattr(getattr(request, "user", None), "role", "") or "").upper().strip()
+        allowed_roles = {"SUPERADMIN", "PLATFORM_OPERATOR", "PHARMACY_OWNER", "BRANCH_MANAGER", "AUDITOR"}
+        is_superuser = bool(getattr(getattr(request, "user", None), "is_superuser", False))
+
+        if not is_superuser and user_role not in allowed_roles:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": f"Role '{user_role}' is not authorized to trigger or inspect security baselines.",
+                    "message_bn": f"'{user_role}' রোলের ব্যবহারকারীর সিকিউরিটি বেসলাইন পরিদর্শন বা চালানোর অনুমতি নেই।",
+                }
+            )
+
+    @action(detail=False, methods=["get"], url_path="summary")
+    def get_summary(self, request):
+        """Returns security posture summary for the caller tenant."""
+        from apps.core.security_baseline import BackendSecurityBaselineEngine
+
+        self._check_operator_rbac(request)
+        target_tenant = request.query_params.get("tenant_id")
+        if target_tenant:
+            self._check_tenant_match(request, target_tenant)
+        tenant_id = target_tenant or self._get_tenant_id(request)
+
+        summary = BackendSecurityBaselineEngine.get_security_posture_summary(tenant_id=tenant_id)
+        return Response(
+            {
+                "success": True,
+                "code": "SECURITY_BASELINE_SUMMARY_RETRIEVED",
+                "message_en": "Security posture summary retrieved successfully.",
+                "message_bn": "সিকিউরিটি বেসলাইন সামারি সফলভাবে প্রদর্শিত হয়েছে।",
+                "data": summary,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="run-suite")
+    def run_suite(self, request):
+        """
+        Executes end-to-end backend security baseline smoke sweep.
+        Validates target_suite and parameters.
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.security_baseline import BackendSecurityBaselineEngine
+
+        self._check_operator_rbac(request)
+
+        data = request.data or {}
+        target_suite = data.get("target_suite", "backend-security-baseline-suite")
+        fast_mode = data.get("fast_mode", True)
+        target_tenant = data.get("tenant_id") or request.query_params.get("tenant_id")
+
+        field_errors: dict[str, list[str]] = {}
+        if target_suite and target_suite not in ["backend-security-baseline-suite", "security_smoke"]:
+            field_errors["target_suite"] = ["Invalid target_suite. Must be 'backend-security-baseline-suite'."]
+        if not isinstance(fast_mode, bool):
+            field_errors["fast_mode"] = ["Field 'fast_mode' must be a boolean."]
+
+        if field_errors:
+            raise ValidationError(detail=field_errors)
+
+        if target_tenant:
+            self._check_tenant_match(request, target_tenant)
+        tenant_id = target_tenant or self._get_tenant_id(request)
+
+        results = BackendSecurityBaselineEngine.run_security_baseline_suite(
+            tenant_id=tenant_id,
+            caller_user=request.user,
+            fast_mode=fast_mode,
+        )
+
+        return Response(
+            {
+                "success": results["overall_status"] == "PASSED",
+                "code": "SECURITY_BASELINE_SUITE_EXECUTED",
+                "message_en": "Backend security baseline smoke suite executed successfully.",
+                "message_bn": "ব্যাকএন্ড সিকিউরিটি বেসলাইন স্মোক সুইট সফলভাবে সম্পন্ন হয়েছে।",
+                "data": results,
+            },
+            status=status.HTTP_200_OK,
+        )
