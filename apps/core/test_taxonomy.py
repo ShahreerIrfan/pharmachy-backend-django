@@ -283,6 +283,13 @@ class TestTaxonomyRegistry:
                 TestMarker.CONTRACT,
                 [TestMarker.INTEGRATION, TestMarker.UNIT, TestMarker.SECURITY],
             ),
+            (
+                "P040",
+                "Automated Build Smoke Pipeline",
+                "shared/tests/test_p040_automated_build_smoke.py",
+                TestMarker.INTEGRATION,
+                [TestMarker.CONTRACT, TestMarker.UNIT, TestMarker.SECURITY],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

@@ -12,6 +12,7 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, Spec
 from rest_framework.routers import DefaultRouter
 
 from apps.audit_logging.views import AuditLogEntryViewSet
+from apps.build_pipeline.views import BuildSmokeViewSet
 from apps.core.views import (
     AsyncJobRecordViewSet,
     BatchStockViewSet,
@@ -53,6 +54,7 @@ router.register("secrets", TenantSecretViewSet, basename="tenant-secret")
 router.register("releases", ReleaseManifestViewSet, basename="release")
 router.register("quality/issues", QualityIssueTicketViewSet, basename="quality-issue")
 router.register("quality/dod-audits", DefinitionOfDoneAuditViewSet, basename="dod-audit")
+router.register("pipeline/smoke", BuildSmokeViewSet, basename="build-smoke")
 
 
 def health_check(request):
