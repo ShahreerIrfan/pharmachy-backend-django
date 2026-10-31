@@ -419,16 +419,16 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.GLOBAL,
         min_plan=PlanTier.BASIC,
     ),
-    # 11. Platform Super Admin Console (ADR-0063 & ADR-0064)
+    # 11. Platform Super Admin Console (ADR-0063, ADR-0064, ADR-0066 & ADR-0067)
     EndpointPermissionRule(
-        path_pattern=r"^/api/v2/platform/console/(?:metrics|kpis|tenants|actions)(?:/[^/]+)?/?$",
+        path_pattern=r"^/api/v2/platform/console/(?:metrics|kpis|tenants|actions)(?:/[^/]+)*/?$",
         method="GET",
         allowed_roles=[UserRole.SUPERADMIN],
         scope=ScopeLevel.GLOBAL,
         min_plan=PlanTier.BASIC,
     ),
     EndpointPermissionRule(
-        path_pattern=r"^/api/v2/platform/console/actions/?$",
+        path_pattern=r"^/api/v2/platform/console/(?:actions|tenants/[^/]+/(?:suspend|restore))/?$",
         method="POST",
         allowed_roles=[UserRole.SUPERADMIN],
         scope=ScopeLevel.GLOBAL,

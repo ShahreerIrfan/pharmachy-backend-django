@@ -264,6 +264,70 @@ class TenantViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+    @action(detail=True, methods=["post"], url_path="suspend")
+    def suspend_tenant(self, request, pk=None):
+        """Audited tenant suspension executed exclusively by Platform Super Admin."""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+        from apps.core.platform_console import PlatformConsoleService
+
+        if not self._is_superadmin(request):
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": "Only Platform Super Admin is authorized to suspend tenants.",
+                    "message_bn": "শুধুমাত্র প্ল্যাটফর্ম সুপার অ্যাডমিনের টেন্যান্ট স্থগিত করার অনুমতি আছে।",
+                }
+            )
+
+        tenant = self.get_object()
+        data = request.data or {}
+        reason = data.get("reason", "").strip()
+        reason_code = data.get("reason_code", "ADMIN_MANUAL")
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+
+        try:
+            result = PlatformConsoleService.suspend_tenant(
+                tenant_id=tenant.tenant_id,
+                reason=reason,
+                operator_id=operator_id,
+                reason_code=reason_code,
+            )
+        except Exception as err:
+            raise ValidationError(detail={"suspension_error": [str(err)]})
+
+        return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="restore")
+    def restore_tenant(self, request, pk=None):
+        """Audited tenant restoration executed exclusively by Platform Super Admin."""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+        from apps.core.platform_console import PlatformConsoleService
+
+        if not self._is_superadmin(request):
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": "Only Platform Super Admin is authorized to restore tenants.",
+                    "message_bn": "শুধুমাত্র প্ল্যাটফর্ম সুপার অ্যাডমিনের টেন্যান্ট পুনর্বহাল করার অনুমতি আছে।",
+                }
+            )
+
+        tenant = self.get_object()
+        data = request.data or {}
+        reason = data.get("reason", "").strip()
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+
+        try:
+            result = PlatformConsoleService.restore_tenant(
+                tenant_id=tenant.tenant_id,
+                reason=reason,
+                operator_id=operator_id,
+            )
+        except Exception as err:
+            raise ValidationError(detail={"restoration_error": [str(err)]})
+
+        return Response(result, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=["get", "patch"], url_path="canonical-settings")
     def canonical_settings(self, request, pk=None):
         """Inspects or updates canonical settings for this tenant."""
@@ -2410,6 +2474,103 @@ class PlatformConsoleViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=False, methods=["get"], url_path=r"tenants/(?P<tenant_id>[^/.]+)/detail")
+    def tenant_detail(self, request, tenant_id=None):
+        """
+        Architecture Decision: ADR-0066
+        Returns 360-degree operational details and chronological audit timeline for a tenant.
+        Strictly excludes patient clinical records.
+        """
+        self._require_superadmin(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import NotFound
+
+        from apps.core.platform_console import PlatformConsoleService
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        try:
+            detail_data = PlatformConsoleService.get_tenant_detail_and_timeline(
+                tenant_id=tenant_id, operator_id=operator_id
+            )
+        except DjangoValidationError:
+            raise NotFound(
+                detail={
+                    "error_code": "TENANT_NOT_FOUND",
+                    "message_en": f"Tenant '{tenant_id}' does not exist on platform.",
+                    "message_bn": f"টেন্যান্ট '{tenant_id}' প্ল্যাটফর্মে পাওয়া যায়নি।",
+                }
+            )
+
+        return Response(
+            {
+                "success": True,
+                "code": "PLATFORM_TENANT_DETAIL_RETRIEVED",
+                "message_en": f"Detailed operations and audit timeline for tenant '{tenant_id}' retrieved.",
+                "message_bn": f"টেন্যান্ট '{tenant_id}'-এর অপারেশনাল বিস্তারিত ও অডিট টাইমলাইন প্রাপ্ত হয়েছে।",
+                "data": detail_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path=r"tenants/(?P<tenant_id>[^/.]+)/suspend")
+    def suspend_tenant(self, request, tenant_id=None):
+        """
+        Architecture Decision: ADR-0067
+        Suspends a tenant with mandatory reason and reason_code.
+        Revokes client leases and active sessions.
+        """
+        self._require_superadmin(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.platform_console import PlatformConsoleService
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        data = request.data or {}
+        reason = data.get("reason")
+        reason_code = data.get("reason_code", "ADMIN_MANUAL")
+
+        try:
+            result = PlatformConsoleService.suspend_tenant(
+                tenant_id=tenant_id,
+                reason=reason,
+                operator_id=operator_id,
+                reason_code=reason_code,
+            )
+        except DjangoValidationError as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"error": [str(err)]}
+            raise ValidationError(detail=err_dict)
+
+        return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path=r"tenants/(?P<tenant_id>[^/.]+)/restore")
+    def restore_tenant(self, request, tenant_id=None):
+        """
+        Architecture Decision: ADR-0067
+        Restores a suspended tenant to active status with mandatory reason.
+        """
+        self._require_superadmin(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.platform_console import PlatformConsoleService
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        data = request.data or {}
+        reason = data.get("reason")
+
+        try:
+            result = PlatformConsoleService.restore_tenant(
+                tenant_id=tenant_id,
+                reason=reason,
+                operator_id=operator_id,
+            )
+        except DjangoValidationError as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"error": [str(err)]}
+            raise ValidationError(detail=err_dict)
+
+        return Response(result, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["post"], url_path="actions")
     def execute_action(self, request):
