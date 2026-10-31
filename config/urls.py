@@ -26,6 +26,7 @@ from apps.core.views import (
     StaffMemberViewSet,
     SubscriptionRecordViewSet,
     TenantViewSet,
+    ValidationContractViewSet,
 )
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
 from apps.environment_governance.views import EnvironmentProfileViewSet
@@ -61,6 +62,7 @@ router.register("quality/dod-audits", DefinitionOfDoneAuditViewSet, basename="do
 router.register("pipeline/smoke", BuildSmokeViewSet, basename="build-smoke")
 router.register("environment/profile", EnvironmentProfileViewSet, basename="environment-profile")
 router.register("identity/users", PharmacyUserViewSet, basename="identity-user")
+router.register("validation", ValidationContractViewSet, basename="validation")
 
 
 def health_check(request):

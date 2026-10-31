@@ -1,8 +1,10 @@
 """
 Standardized Error Vocabulary, Correlation IDs & Actionable Feedback Language
-Architecture Decision: ADR-0014
+Architecture Decision: ADR-0014 & ADR-0046
 Provides machine error codes, correlation tracing, bilingual messages, and retryability flags.
 """
+
+from __future__ import annotations
 
 import datetime
 import uuid
@@ -221,6 +223,10 @@ def format_error_response(
         res = payload.to_dict()
         if correlation_id:
             res["correlation_id"] = correlation_id
+        res["code"] = exc.error_code
+        res["message"] = exc.message_en
+        res["retryable"] = exc.is_retryable
+        res["details"] = exc.field_errors
         return res
 
     # Generic or untrusted exception: sanitize and mask from external disclosure (NFR-09 & NFR-10)
@@ -235,6 +241,10 @@ def format_error_response(
         field_errors={},
     )
     res = safe_payload.to_dict()
+    res["code"] = "ERR_INTERNAL_SERVER_ERROR"
+    res["message"] = res["message_en"]
+    res["retryable"] = False
+    res["details"] = {}
     if include_debug:
         res["debug_detail"] = str(exc)
     return res
@@ -249,3 +259,106 @@ def process_api_exception(
     headers = incoming_headers or {}
     correlation_id = headers.get("X-Correlation-ID") or headers.get("x-correlation-id") or str(uuid.uuid4())
     return format_error_response(exc, correlation_id=correlation_id, include_debug=include_debug)
+
+
+def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None = None):
+    """
+    Standardized DRF exception handler conforming to ADR-0014 and ADR-0046.
+    Intercepts ValidationErrors, cross-tenant violations, and domain exceptions,
+    formatting them into machine-readable, localized, client-safe ErrorPayload responses.
+    """
+    from django.core.exceptions import (
+        PermissionDenied as DjangoPermissionDenied,
+    )
+    from django.core.exceptions import (
+        ValidationError as DjangoValidationError,
+    )
+    from rest_framework import status
+    from rest_framework.exceptions import (
+        PermissionDenied as DRFPermissionDenied,
+    )
+    from rest_framework.exceptions import (
+        ValidationError as DRFValidationError,
+    )
+    from rest_framework.response import Response
+    from rest_framework.views import exception_handler
+
+    request = context.get("request") if context else None
+    correlation_id = ""
+    if request:
+        correlation_id = (
+            request.META.get("HTTP_X_CORRELATION_ID")
+            or request.META.get("HTTP_X_REQUEST_ID")
+            or getattr(request, "request_id", "")
+        )
+    if not correlation_id:
+        correlation_id = str(uuid.uuid4())
+
+    # 1. Custom Domain Exception (PharmacyBaseException)
+    if isinstance(exc, PharmacyBaseException):
+        payload = exc.to_payload().to_dict()
+        payload["code"] = exc.error_code
+        payload["message"] = exc.message_en
+        payload["retryable"] = exc.is_retryable
+        payload["details"] = exc.field_errors
+        payload["correlation_id"] = correlation_id
+        return Response(payload, status=exc.http_status)
+
+    # 2. DRF or Django Validation Errors
+    if isinstance(exc, (DRFValidationError, DjangoValidationError)):
+        field_errs: dict[str, list[str]] = {}
+        if isinstance(exc, DRFValidationError):
+            raw_errs = exc.detail
+        elif hasattr(exc, "message_dict"):
+            raw_errs = exc.message_dict
+        else:
+            raw_errs = {"non_field_errors": list(exc.messages) if hasattr(exc, "messages") else [str(exc)]}
+
+        if isinstance(raw_errs, dict):
+            for f, err_list in raw_errs.items():
+                if isinstance(err_list, list):
+                    field_errs[f] = [str(e) for e in err_list]
+                else:
+                    field_errs[f] = [str(err_list)]
+        elif isinstance(raw_errs, list):
+            field_errs["non_field_errors"] = [str(e) for e in raw_errs]
+        else:
+            field_errs["non_field_errors"] = [str(raw_errs)]
+
+        payload = {
+            "error_code": "ERR_VALIDATION_FAILED",
+            "code": "ERR_VALIDATION_FAILED",
+            "correlation_id": correlation_id,
+            "http_status": 422,
+            "is_retryable": False,
+            "retryable": False,
+            "message": "One or more input fields failed validation.",
+            "message_en": "One or more input fields failed validation.",
+            "message_bn": "এক বা একাধিক তথ্যের মান সঠিক নয়।",
+            "recovery_action": RecoveryAction.CORRECT_INPUT_FIELDS.value,
+            "field_errors": field_errs,
+            "details": field_errs,
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        return Response(payload, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+    # 3. Permission Denied Errors
+    if isinstance(exc, (DRFPermissionDenied, DjangoPermissionDenied)):
+        payload = {
+            "error_code": "ERR_PERMISSION_DENIED",
+            "code": "ERR_PERMISSION_DENIED",
+            "correlation_id": correlation_id,
+            "http_status": 403,
+            "is_retryable": False,
+            "retryable": False,
+            "message": "You do not have permission to perform this action.",
+            "message_en": "You do not have permission to perform this action.",
+            "message_bn": "এই কাজটি সম্পাদন করার অনুমতি আপনার নেই।",
+            "recovery_action": RecoveryAction.REQUEST_MANAGER_OVERRIDE.value,
+            "details": {"error": str(exc)},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        return Response(payload, status=status.HTTP_403_FORBIDDEN)
+
+    # Let default DRF handler process other exceptions (404, 405, etc.)
+    return exception_handler(exc, context)

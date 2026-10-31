@@ -249,4 +249,3 @@ class LogoutAllResponseSerializer(serializers.Serializer):
     revoked_sessions_count = serializers.IntegerField()
     message_en = serializers.CharField()
     message_bn = serializers.CharField()
-

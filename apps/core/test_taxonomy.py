@@ -325,6 +325,13 @@ class TestTaxonomyRegistry:
                 TestMarker.SECURITY,
                 [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
             ),
+            (
+                "P046",
+                "Input Validation Contracts",
+                "shared/tests/test_p046_input_validation_contracts.py",
+                TestMarker.CONTRACT,
+                [TestMarker.SECURITY, TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

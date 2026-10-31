@@ -140,15 +140,11 @@ class AuthenticationViewSet(viewsets.ViewSet):
         refresh_jti = str(refresh.payload.get("jti", ""))
         token_family = str(uuid.uuid4())
         device_id = (
-            serializer.validated_data.get("device_id")
-            or request.META.get("HTTP_X_DEVICE_ID")
-            or "client-terminal"
+            serializer.validated_data.get("device_id") or request.META.get("HTTP_X_DEVICE_ID") or "client-terminal"
         )
         device_name = request.data.get("device_name") or request.META.get("HTTP_X_DEVICE_NAME", "")
         client_platform = (
-            request.data.get("client_platform")
-            or request.META.get("HTTP_X_CLIENT_PLATFORM")
-            or "DESKTOP_POS"
+            request.data.get("client_platform") or request.META.get("HTTP_X_CLIENT_PLATFORM") or "DESKTOP_POS"
         )
         ip_addr = request.META.get("REMOTE_ADDR")
         user_agent = request.META.get("HTTP_USER_AGENT", "")[:255]

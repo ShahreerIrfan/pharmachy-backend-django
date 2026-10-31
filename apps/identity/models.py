@@ -442,4 +442,3 @@ class UserSession(models.Model):
     def is_replayed_token(self, jti: str) -> bool:
         """Detects whether a presented refresh token JTI belongs to historical rotated tokens."""
         return bool(self.rotated_jtis and jti in self.rotated_jtis)
-

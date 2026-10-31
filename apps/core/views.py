@@ -34,6 +34,7 @@ from apps.core.serializers import (
     AsyncJobRecordSerializer,
     BatchStockSerializer,
     BranchSerializer,
+    CommandValidationSerializer,
     ComplianceReminderSerializer,
     DailyBranchAnalyticsSerializer,
     MedicineProductSerializer,
@@ -97,30 +98,24 @@ class SaleInvoiceViewSet(viewsets.ModelViewSet):
         """
         Executes synchronous counter checkout transaction with atomic row locking.
         Emits asynchronous receipt SMS and analytics refresh post-commit (ADR-0031).
+        Enforces strict server-side validation and referential integrity (ADR-0046).
         """
         serializer = SaleCheckoutRequestSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        serializer.is_valid(raise_exception=True)
 
         data = serializer.validated_data
-        try:
-            invoice = SynchronousSaleService.execute_checkout(
-                tenant_id=data["tenant_id"],
-                branch_id=data["branch_id"],
-                items_data=data["items"],
-                customer_name=data.get("customer_name", "Walk-in Customer"),
-                customer_phone=data.get("customer_phone", ""),
-                payment_method=data.get("payment_method", "CASH"),
-                discount_amount=data.get("discount_amount", Decimal("0.00")),
-                execute_async_inline=True,
-            )
-            out_serializer = SaleInvoiceSerializer(invoice)
-            return Response(out_serializer.data, status=status.HTTP_201_CREATED)
-        except Exception as err:
-            return Response(
-                {"error": str(err), "type": err.__class__.__name__},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        invoice = SynchronousSaleService.execute_checkout(
+            tenant_id=data["tenant_id"],
+            branch_id=data["branch_id"],
+            items_data=data["items"],
+            customer_name=data.get("customer_name", "Walk-in Customer"),
+            customer_phone=data.get("customer_phone", ""),
+            payment_method=data.get("payment_method", "CASH"),
+            discount_amount=data.get("discount_amount", Decimal("0.00")),
+            execute_async_inline=True,
+        )
+        out_serializer = SaleInvoiceSerializer(invoice)
+        return Response(out_serializer.data, status=status.HTTP_201_CREATED)
 
 
 class AsyncJobRecordViewSet(viewsets.ReadOnlyModelViewSet):
@@ -367,3 +362,30 @@ class PaymentTransactionViewSet(viewsets.ModelViewSet):
         if tender_type:
             qs = qs.filter(tender_type=tender_type.upper())
         return qs
+
+
+class ValidationContractViewSet(viewsets.ViewSet):
+    """
+    Dedicated endpoint for validating domain command contracts in real-time (ADR-0046).
+    Enables JavaFX Desktop POS and Flutter Mobile Manager to pre-validate commands against
+    server business rules before committing transactions.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    @action(detail=False, methods=["post"], url_path="validate-command")
+    def validate_command(self, request):
+        serializer = CommandValidationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated_payload = serializer.validate_command()
+        return Response(
+            {
+                "valid": True,
+                "command_type": serializer.validated_data["command_type"],
+                "tenant_id": serializer.validated_data["tenant_id"],
+                "validated_payload": validated_payload,
+                "message_en": "Command payload successfully verified against server validation contracts.",
+                "message_bn": "কমান্ডের তথ্য সফলভাবে সার্ভার ভ্যালিডেশন কন্ট্রাক্ট দ্বারা যাচাই করা হয়েছে।",
+            },
+            status=status.HTTP_200_OK,
+        )

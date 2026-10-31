@@ -24,28 +24,17 @@ from django.db import connection, transaction
 from django.db.utils import OperationalError
 from django.utils import timezone
 
+from apps.core.errors import (
+    BatchExpiredError,
+    InsufficientStockError,
+)
+from apps.core.errors import (
+    CrossTenantViolationError as CrossTenantOperationError,
+)
 from apps.core.models import (
     BatchStatus,
     BatchStock,
 )
-
-
-class InsufficientStockError(Exception):
-    """Raised when available stock is less than requested in concurrent allocation."""
-
-    pass
-
-
-class BatchExpiredError(Exception):
-    """Raised when an attempt is made to allocate from an expired batch."""
-
-    pass
-
-
-class CrossTenantOperationError(PermissionError):
-    """Raised when an operation attempts to allocate or lock stock across tenant boundaries."""
-
-    pass
 
 
 @dataclass
