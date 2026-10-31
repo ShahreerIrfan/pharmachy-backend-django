@@ -18,6 +18,10 @@ from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
 )
+from apps.core.support_ticket_views import (
+    PlatformSupportTicketViewSet,
+    TenantSupportTicketViewSet,
+)
 from apps.core.views import (
     ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
@@ -97,6 +101,8 @@ router.register("security/baseline", SecurityBaselineViewSet, basename="security
 router.register("platform/console", PlatformConsoleViewSet, basename="platform-console")
 router.register("platform/support-access", PlatformSupportAccessViewSet, basename="platform-support-access")
 router.register("tenants/support-access", TenantSupportAccessViewSet, basename="tenant-support-access")
+router.register("platform/support/tickets", PlatformSupportTicketViewSet, basename="platform-support-tickets")
+router.register("tenants/support/tickets", TenantSupportTicketViewSet, basename="tenant-support-tickets")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

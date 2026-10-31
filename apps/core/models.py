@@ -735,3 +735,141 @@ class SupportAccessGrant(models.Model):
     def __str__(self) -> str:
         bg = " [BREAK-GLASS]" if self.is_break_glass else ""
         return f"SupportGrant {self.grant_id} ({self.tenant_id}) [{self.scope}] {self.status}{bg}"
+
+
+class TicketStatus(models.TextChoices):
+    OPEN = "OPEN", "Open"
+    IN_PROGRESS = "IN_PROGRESS", "In Progress"
+    WAITING_ON_TENANT = "WAITING_ON_TENANT", "Waiting on Tenant"
+    RESOLVED = "RESOLVED", "Resolved"
+    CLOSED = "CLOSED", "Closed"
+
+
+class TicketPriority(models.TextChoices):
+    LOW = "LOW", "Low"
+    MEDIUM = "MEDIUM", "Medium"
+    HIGH = "HIGH", "High"
+    URGENT = "URGENT", "Urgent / Blocker"
+
+
+class TicketCategory(models.TextChoices):
+    BILLING = "BILLING", "Billing & Subscription"
+    HARDWARE_PRINTER = "HARDWARE_PRINTER", "Thermal Printer & Peripherals"
+    SYNC_OFFLINE = "SYNC_OFFLINE", "Offline POS & Cloud Sync"
+    INVENTORY_STOCK = "INVENTORY_STOCK", "Batch Stock & Unit Conversions"
+    REGULATORY_DGDA = "REGULATORY_DGDA", "DGDA Regulatory & Narcotics Logs"
+    GENERAL_SUPPORT = "GENERAL_SUPPORT", "General Inquiry & Support"
+
+
+class PlatformSupportTicket(models.Model):
+    """
+    Architecture Decision: ADR-0069
+    Platform support ticket system with tenant ownership, status, assignment,
+    internal notes, attachments, and audited action history.
+    """
+
+    ticket_id = models.CharField(max_length=64, primary_key=True)
+    ticket_number = models.CharField(max_length=32, unique=True, db_index=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="support_tickets")
+    branch = models.ForeignKey(Branch, on_delete=models.SET_NULL, null=True, blank=True, related_name="support_tickets")
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser", on_delete=models.CASCADE, related_name="created_support_tickets"
+    )
+    assigned_to = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assigned_support_tickets",
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField()
+    category = models.CharField(
+        max_length=32, choices=TicketCategory.choices, default=TicketCategory.GENERAL_SUPPORT, db_index=True
+    )
+    priority = models.CharField(
+        max_length=16, choices=TicketPriority.choices, default=TicketPriority.MEDIUM, db_index=True
+    )
+    status = models.CharField(max_length=32, choices=TicketStatus.choices, default=TicketStatus.OPEN, db_index=True)
+    resolution_summary = models.TextField(blank=True, default="")
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Platform Support Ticket"
+        verbose_name_plural = "Platform Support Tickets"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["assigned_to", "status"]),
+            models.Index(fields=["priority", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Ticket {self.ticket_number} ({self.tenant_id}) [{self.priority}] - {self.status}"
+
+
+class TicketMessage(models.Model):
+    """
+    Threaded message / note for a support ticket.
+    is_internal=True indicates private support operator notes, hidden from tenant users.
+    """
+
+    message_id = models.CharField(max_length=64, primary_key=True)
+    ticket = models.ForeignKey(PlatformSupportTicket, on_delete=models.CASCADE, related_name="messages")
+    author = models.ForeignKey("identity.PharmacyUser", on_delete=models.CASCADE, related_name="ticket_messages")
+    message_text = models.TextField()
+    is_internal = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        verbose_name = "Ticket Message"
+        verbose_name_plural = "Ticket Messages"
+
+
+class TicketAttachment(models.Model):
+    """
+    File attachment linked to a support ticket or specific message.
+    """
+
+    attachment_id = models.CharField(max_length=64, primary_key=True)
+    ticket = models.ForeignKey(PlatformSupportTicket, on_delete=models.CASCADE, related_name="attachments")
+    message = models.ForeignKey(
+        TicketMessage, on_delete=models.CASCADE, null=True, blank=True, related_name="attachments"
+    )
+    file_name = models.CharField(max_length=255)
+    file_url = models.CharField(max_length=512)
+    file_size_bytes = models.PositiveIntegerField(default=0)
+    mime_type = models.CharField(max_length=128, default="application/octet-stream")
+    uploaded_by = models.ForeignKey("identity.PharmacyUser", on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        verbose_name = "Ticket Attachment"
+        verbose_name_plural = "Ticket Attachments"
+
+
+class TicketActionHistory(models.Model):
+    """
+    Audited history of transitions, assignments, and status updates on a support ticket.
+    """
+
+    history_id = models.CharField(max_length=64, primary_key=True)
+    ticket = models.ForeignKey(PlatformSupportTicket, on_delete=models.CASCADE, related_name="action_history")
+    actor = models.ForeignKey(
+        "identity.PharmacyUser", on_delete=models.SET_NULL, null=True, blank=True, related_name="ticket_actions"
+    )
+    action = models.CharField(max_length=64)
+    old_value = models.CharField(max_length=255, blank=True, default="")
+    new_value = models.CharField(max_length=255, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-timestamp"]
+        verbose_name = "Ticket Action History"
+        verbose_name_plural = "Ticket Action Histories"
