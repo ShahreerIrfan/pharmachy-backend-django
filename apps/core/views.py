@@ -1646,3 +1646,73 @@ class AsyncTaskIdempotencyViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class HealthDiagnosticsViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0058
+    Authenticated System Health Diagnostics:
+    - Verifies operational telemetry without leaking secrets, credentials, or PII.
+    - Requires authenticated caller with tenant validation.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_tenant_id(self, request) -> str:
+        tenant_id = (
+            getattr(request, "tenant_id", None)
+            or request.headers.get("X-Tenant-Id")
+            or getattr(getattr(request, "user", None), "tenant_id", None)
+        )
+        if not tenant_id:
+            tenant_id = "default-tenant"
+        return str(tenant_id)
+
+    def _check_tenant_match(self, request, target_tenant: str | None) -> None:
+        if not target_tenant:
+            return
+        caller_tenant = self._get_tenant_id(request)
+        if str(target_tenant).strip() != caller_tenant.strip():
+            from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+            AuditLogEntry.objects.create(
+                action="SECURITY_INCIDENT_CROSS_TENANT",
+                resource_type="SECURITY_BARRIER",
+                tenant_id=caller_tenant,
+                status=AuditActionStatus.DENIED,
+                metadata_json={
+                    "event": "CROSS_TENANT_HEALTH_DIAGNOSTICS_VIOLATION",
+                    "caller_tenant": caller_tenant,
+                    "target_tenant": target_tenant,
+                    "endpoint": request.path,
+                },
+            )
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "FORBIDDEN_CROSS_TENANT_ACCESS",
+                    "message_en": f"Access denied: Caller tenant '{caller_tenant}' cannot access diagnostics for tenant '{target_tenant}'.",
+                    "message_bn": f"অনুমতি নেই: কলার টেন্যান্ট '{caller_tenant}' টার্গেট টেন্যান্ট '{target_tenant}'-এর ডায়াগনস্টিক দেখতে পারে না।",
+                }
+            )
+
+    @action(detail=False, methods=["get"], url_path="metrics")
+    def get_diagnostics(self, request):
+        """Returns sanitized diagnostic telemetry for authenticated operators."""
+        from apps.core.health import HealthDiagnosticEngine
+
+        target_tenant = request.query_params.get("tenant_id")
+        self._check_tenant_match(request, target_tenant)
+
+        diagnostics = HealthDiagnosticEngine.get_sanitized_diagnostics(tenant_id=target_tenant)
+        return Response(
+            {
+                "success": True,
+                "code": "HEALTH_DIAGNOSTICS_RETRIEVED",
+                "message_en": "Sanitized health diagnostics retrieved successfully without secret exposure.",
+                "message_bn": "গোপনীয় তথ্য গোপন রেখে স্বাস্থ্য পরীক্ষার ডায়াগনস্টিক তথ্য সফলভাবে প্রদর্শিত হয়েছে।",
+                "data": diagnostics,
+            },
+            status=status.HTTP_200_OK,
+        )

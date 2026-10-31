@@ -13,6 +13,7 @@ from rest_framework.routers import DefaultRouter
 
 from apps.audit_logging.views import AuditLogEntryViewSet
 from apps.build_pipeline.views import BuildSmokeViewSet
+from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
 from apps.core.views import (
     ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
@@ -22,6 +23,7 @@ from apps.core.views import (
     ComplianceReminderViewSet,
     DailyBranchAnalyticsViewSet,
     GlobalExceptionHandlingViewSet,
+    HealthDiagnosticsViewSet,
     MedicineProductViewSet,
     PaymentTransactionViewSet,
     PrescriptionRecordViewSet,
@@ -82,6 +84,7 @@ router.register("exceptions", GlobalExceptionHandlingViewSet, basename="exceptio
 router.register("standards/time-money", TimeMoneyStandardsViewSet, basename="standards-time-money")
 router.register("archival", SoftDeletionAndArchivalViewSet, basename="archival")
 router.register("async-tasks", AsyncTaskIdempotencyViewSet, basename="async-task")
+router.register("health/diagnostics", HealthDiagnosticsViewSet, basename="health-diagnostics")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
@@ -89,25 +92,14 @@ handler404 = "apps.core.errors.global_handler404"
 handler500 = "apps.core.errors.global_handler500"
 
 
-def health_check(request):
-    """Probes system readiness, database connectivity, and version."""
-    from apps.core.celery_boundary import AsyncJobBoundaryEnforcer
-
-    redis_status = AsyncJobBoundaryEnforcer.check_redis_status()
-    return JsonResponse(
-        {
-            "service": "pharmacy-saas-cloud-api",
-            "version": "2.0.0",
-            "status": "HEALTHY",
-            "timezone": "Asia/Dhaka",
-            "redis": redis_status,
-        }
-    )
-
-
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("health/", health_check, name="health-check"),
+    # Architecture Decision: ADR-0058 Liveness and Readiness Probes
+    path("health/live/", liveness_probe, name="health-live"),
+    path("health/ready/", readiness_probe, name="health-ready"),
+    path("health/", legacy_health_check, name="health-check"),
+    path("healthz", liveness_probe, name="healthz"),
+    path("readyz", readiness_probe, name="readyz"),
     path("api/v2/", include(router.urls)),
     # OpenAPI 3.0 Documentation Endpoints
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
