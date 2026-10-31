@@ -52,6 +52,11 @@ from apps.core.serializers import (
     TenantSerializer,
 )
 from apps.core.synchronous_sale_service import SynchronousSaleService
+from apps.core.throttling import (
+    SensitiveMutationRateThrottle,
+    TestStrictRateThrottle,
+    get_active_rate_limit_policies,
+)
 
 
 class TenantViewSet(viewsets.ModelViewSet):
@@ -112,7 +117,7 @@ class SaleInvoiceViewSet(viewsets.ModelViewSet):
             qs = qs.filter(tenant_id=tenant_id)
         return qs
 
-    @action(detail=False, methods=["post"], url_path="checkout")
+    @action(detail=False, methods=["post"], url_path="checkout", throttle_classes=[SensitiveMutationRateThrottle])
     def checkout(self, request):
         """
         Executes synchronous counter checkout transaction with atomic row locking.
@@ -549,4 +554,84 @@ class ApiResponseConventionViewSet(viewsets.ViewSet, StandardResponseMixin):
             code="TENANT_AUTHORIZED",
             message_en="Tenant access verified.",
             message_bn="টেন্যান্ট অ্যাক্সেস সফলভাবে যাচাই করা হয়েছে।",
+        )
+
+
+class RateLimitPolicyViewSet(viewsets.ViewSet, StandardResponseMixin):
+    """
+    Dedicated viewset auditing and demonstrating multi-tiered rate limiting (ADR-0048).
+    Provides introspection into rate limits and strict throttle test endpoints.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    @action(detail=False, methods=["get"], url_path="policy")
+    def policy(self, request):
+        """Returns the active rate limiting policy matrix conforming to rate_limit_policy.schema.json."""
+        policies = get_active_rate_limit_policies()
+        return self.success_response(
+            data=policies,
+            code="RATE_LIMIT_POLICY_RETRIEVED",
+            message_en="Active rate limit policies retrieved successfully.",
+            message_bn="সক্রিয় রেট লিমিট নীতিমালা সফলভাবে লোড হয়েছে।",
+        )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="test-auth-throttle",
+        throttle_classes=[TestStrictRateThrottle],
+    )
+    def test_auth_throttle(self, request):
+        """Demonstrates authentication throttling bucket."""
+        return self.success_response(
+            data={"attempt": "success", "scope": "auth_login"},
+            code="AUTH_THROTTLE_PASS",
+            message_en="Authentication attempt within rate limit.",
+            message_bn="প্রমাণীকরণ চেষ্টা রেট লিমিটের মধ্যে রয়েছে।",
+        )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="test-mutation-throttle",
+        throttle_classes=[TestStrictRateThrottle],
+    )
+    def test_mutation_throttle(self, request):
+        """Demonstrates sensitive mutation throttling bucket."""
+        return self.success_response(
+            data={"mutation": "accepted", "scope": "sensitive_mutation"},
+            code="MUTATION_THROTTLE_PASS",
+            message_en="Mutation operation accepted within rate limit.",
+            message_bn="মিউটেশন অপারেশন রেট লিমিটের মধ্যে গৃহীত হয়েছে।",
+        )
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="test-export-throttle",
+        throttle_classes=[TestStrictRateThrottle],
+    )
+    def test_export_throttle(self, request):
+        """Demonstrates bulk data export throttling bucket."""
+        return self.success_response(
+            data={"export": "generated", "scope": "data_export"},
+            code="EXPORT_THROTTLE_PASS",
+            message_en="Export query executed within rate limit.",
+            message_bn="এক্সপোর্ট কুয়েরি রেট লিমিটের মধ্যে কার্যকর হয়েছে।",
+        )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="test-invitation-throttle",
+        throttle_classes=[TestStrictRateThrottle],
+    )
+    def test_invitation_throttle(self, request):
+        """Demonstrates public staff invitation throttling bucket."""
+        return self.success_response(
+            data={"invitation": "dispatched", "scope": "public_invitation"},
+            code="INVITATION_THROTTLE_PASS",
+            message_en="Staff invitation dispatched within rate limit.",
+            message_bn="স্টাফ আমন্ত্রণ রেট লিমিটের মধ্যে পাঠানো হয়েছে।",
         )

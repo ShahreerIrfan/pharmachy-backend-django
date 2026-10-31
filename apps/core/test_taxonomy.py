@@ -339,6 +339,13 @@ class TestTaxonomyRegistry:
                 TestMarker.CONTRACT,
                 [TestMarker.INTEGRATION, TestMarker.UNIT],
             ),
+            (
+                "P048",
+                "Rate Limiting",
+                "shared/tests/test_p048_rate_limiting.py",
+                TestMarker.SECURITY,
+                [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

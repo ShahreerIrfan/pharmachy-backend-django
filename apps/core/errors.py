@@ -449,6 +449,7 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
 
     # 7. Throttled / Rate Limited (429)
     if isinstance(exc, Throttled):
+        wait_seconds = int(getattr(exc, "wait", 60) or 60)
         payload = {
             "success": False,
             "error_code": "ERR_RATE_LIMIT_EXCEEDED",
@@ -458,15 +459,17 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
             "http_status": 429,
             "is_retryable": True,
             "retryable": True,
-            "message": "Request rate limit exceeded. Please retry later.",
-            "message_en": "Request rate limit exceeded. Please retry later.",
-            "message_bn": "অনুরোধের সীমা অতিক্রম করেছে। কিছুক্ষণ পর পুনরায় চেষ্টা করুন।",
+            "message": f"Request rate limit exceeded. Please retry after {wait_seconds} seconds.",
+            "message_en": f"Request rate limit exceeded. Please retry after {wait_seconds} seconds.",
+            "message_bn": f"অনুরোধের সীমা অতিক্রম করেছে। অনুগ্রহ করে {wait_seconds} সেকেন্ড পর পুনরায় চেষ্টা করুন।",
             "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
             "field_errors": {},
-            "details": {"wait_seconds": getattr(exc, "wait", None)},
+            "details": {"wait_seconds": wait_seconds},
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         }
-        return Response(payload, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        res = Response(payload, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        res["Retry-After"] = str(wait_seconds)
+        return res
 
     # 8. Let default DRF handler process any unhandled exceptions, then standardize
     response = exception_handler(exc, context)

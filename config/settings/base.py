@@ -154,6 +154,10 @@ REST_FRAMEWORK = {
         "user": "1000/min",
         "auth_login": "10/min",
         "password_reset": "5/min",
+        "sensitive_mutation": "30/min",
+        "data_export": "10/min",
+        "public_invitation": "5/min",
+        "test_throttle": "3/min",
     },
 }
 

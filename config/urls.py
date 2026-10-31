@@ -23,6 +23,7 @@ from apps.core.views import (
     MedicineProductViewSet,
     PaymentTransactionViewSet,
     PrescriptionRecordViewSet,
+    RateLimitPolicyViewSet,
     SaleInvoiceViewSet,
     StaffMemberViewSet,
     SubscriptionRecordViewSet,
@@ -65,6 +66,7 @@ router.register("environment/profile", EnvironmentProfileViewSet, basename="envi
 router.register("identity/users", PharmacyUserViewSet, basename="identity-user")
 router.register("validation", ValidationContractViewSet, basename="validation")
 router.register("conventions", ApiResponseConventionViewSet, basename="conventions")
+router.register("rate-limits", RateLimitPolicyViewSet, basename="rate-limits")
 
 
 def health_check(request):
