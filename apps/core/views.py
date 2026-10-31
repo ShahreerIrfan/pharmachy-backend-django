@@ -1241,3 +1241,207 @@ class TimeMoneyStandardsViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class SoftDeletionAndArchivalViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0056
+    Regulatory Soft-Deletion and Archival Policy API:
+    - Enforces physical delete prohibition on posted financial, inventory, and dispensing records.
+    - Manages soft-delete lifecycle (archive, restore) for mutable catalogs.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_tenant_id(self, request) -> str:
+        tenant_id = (
+            getattr(request, "tenant_id", None)
+            or request.headers.get("X-Tenant-Id")
+            or getattr(getattr(request, "user", None), "tenant_id", None)
+        )
+        if not tenant_id:
+            tenant_id = "default-tenant"
+        return str(tenant_id)
+
+    def _check_tenant_match(self, request, target_tenant: str | None) -> None:
+        if not target_tenant:
+            return
+        caller_tenant = self._get_tenant_id(request)
+        if str(target_tenant).strip() != caller_tenant.strip():
+            from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+            AuditLogEntry.objects.create(
+                action="SECURITY_INCIDENT_CROSS_TENANT",
+                resource_type="SECURITY_BARRIER",
+                tenant_id=caller_tenant,
+                status=AuditActionStatus.DENIED,
+                metadata_json={
+                    "event": "CROSS_TENANT_ARCHIVAL_VIOLATION",
+                    "caller_tenant": caller_tenant,
+                    "target_tenant": target_tenant,
+                    "endpoint": request.path,
+                },
+            )
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "FORBIDDEN_CROSS_TENANT_ACCESS",
+                    "message_en": f"Access denied: Caller tenant '{caller_tenant}' cannot operate on tenant '{target_tenant}'.",
+                    "message_bn": f"অনুমতি নেই: কলার টেন্যান্ট '{caller_tenant}' টার্গেট টেন্যান্ট '{target_tenant}'-এ কাজ করতে পারে না।",
+                }
+            )
+
+    @action(detail=False, methods=["get"], url_path="policy")
+    def get_policy(self, request):
+        """Returns the centralized regulatory archival and retention policy matrix."""
+        from apps.core.archival import ArchivalEngine
+
+        target_tenant = request.query_params.get("tenant_id")
+        self._check_tenant_match(request, target_tenant)
+
+        policy_matrix = ArchivalEngine.get_policy_matrix()
+        return Response(
+            {
+                "success": True,
+                "code": "ARCHIVAL_POLICY_RETRIEVED",
+                "message_en": "Regulatory archival and soft-deletion policies retrieved successfully.",
+                "message_bn": "নিয়ন্ত্রক সংরক্ষণ ও সফট-ডিলিশন নীতিমালা সফলভাবে প্রাপ্ত হয়েছে।",
+                "data": {
+                    "total_policies": len(policy_matrix),
+                    "dgda_min_retention_days": 730,
+                    "financial_min_retention_days": 2555,
+                    "policies": policy_matrix,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="archive")
+    def archive_resource(self, request):
+        """Soft-deletes an eligible resource with an audited reason."""
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.archival import ArchivalEngine
+
+        target_tenant = request.data.get("tenant_id") or self._get_tenant_id(request)
+        self._check_tenant_match(request, target_tenant)
+
+        resource_type = request.data.get("resource_type")
+        resource_id = request.data.get("resource_id")
+        reason = request.data.get("reason", "")
+
+        field_errors: dict[str, list[str]] = {}
+        if not resource_type:
+            field_errors["resource_type"] = ["Field 'resource_type' is required."]
+        if not resource_id:
+            field_errors["resource_id"] = ["Field 'resource_id' is required."]
+        if not reason or len(str(reason).strip()) < 5:
+            field_errors["reason"] = ["Field 'reason' is required and must be at least 5 characters long."]
+
+        if field_errors:
+            raise ValidationError(detail=field_errors)
+
+        user_id = str(getattr(getattr(request, "user", None), "user_id", None) or request.user)
+
+        try:
+            result = ArchivalEngine.archive_resource(
+                resource_type=str(resource_type),
+                resource_id=str(resource_id),
+                tenant_id=target_tenant,
+                user_id=user_id,
+                reason=str(reason),
+            )
+        except (ValueError, TypeError) as err:
+            raise ValidationError(detail={"archival_error": [str(err)]})
+
+        return Response(
+            {
+                "success": True,
+                "code": "RESOURCE_ARCHIVED",
+                "message_en": result["message_en"],
+                "message_bn": result["message_bn"],
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="restore")
+    def restore_resource(self, request):
+        """Restores a soft-deleted resource to the active catalog."""
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.archival import ArchivalEngine
+
+        target_tenant = request.data.get("tenant_id") or self._get_tenant_id(request)
+        self._check_tenant_match(request, target_tenant)
+
+        resource_type = request.data.get("resource_type")
+        resource_id = request.data.get("resource_id")
+
+        field_errors: dict[str, list[str]] = {}
+        if not resource_type:
+            field_errors["resource_type"] = ["Field 'resource_type' is required."]
+        if not resource_id:
+            field_errors["resource_id"] = ["Field 'resource_id' is required."]
+
+        if field_errors:
+            raise ValidationError(detail=field_errors)
+
+        user_id = str(getattr(getattr(request, "user", None), "user_id", None) or request.user)
+
+        try:
+            result = ArchivalEngine.restore_resource(
+                resource_type=str(resource_type),
+                resource_id=str(resource_id),
+                tenant_id=target_tenant,
+                user_id=user_id,
+            )
+        except (ValueError, TypeError) as err:
+            raise ValidationError(detail={"restore_error": [str(err)]})
+
+        return Response(
+            {
+                "success": True,
+                "code": "RESOURCE_RESTORED",
+                "message_en": result["message_en"],
+                "message_bn": result["message_bn"],
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["delete", "post"], url_path="attempt-delete")
+    def attempt_destructive_delete(self, request):
+        """
+        Attempts a physical destructive deletion, which is strictly prohibited
+        for immutable regulatory records and triggers 409 Conflict.
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.archival import ArchivalEngine
+
+        target_tenant = (
+            request.data.get("tenant_id") or request.query_params.get("tenant_id") or self._get_tenant_id(request)
+        )
+        self._check_tenant_match(request, target_tenant)
+
+        resource_type = request.data.get("resource_type") or request.query_params.get("resource_type")
+        resource_id = request.data.get("resource_id") or request.query_params.get("resource_id")
+        reason = request.data.get("reason") or request.query_params.get("reason", "Direct destructive SQL delete")
+
+        if not resource_type or not resource_id:
+            raise ValidationError(detail={"resource": ["Fields 'resource_type' and 'resource_id' are required."]})
+
+        user_id = str(getattr(getattr(request, "user", None), "user_id", None) or request.user)
+
+        # Enforce prohibition
+        ArchivalEngine.enforce_no_destructive_delete(
+            resource_type=str(resource_type),
+            resource_id=str(resource_id),
+            tenant_id=target_tenant,
+            user_id=user_id,
+            reason=str(reason),
+        )
+
+        return Response({"success": True}, status=status.HTTP_200_OK)

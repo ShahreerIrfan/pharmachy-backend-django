@@ -26,6 +26,7 @@ from apps.core.views import (
     PrescriptionRecordViewSet,
     RateLimitPolicyViewSet,
     SaleInvoiceViewSet,
+    SoftDeletionAndArchivalViewSet,
     StaffMemberViewSet,
     SubscriptionRecordViewSet,
     TenantContextViewSet,
@@ -78,6 +79,7 @@ router.register("storage/download", SecureFileDownloadView, basename="secure-dow
 router.register("privacy/requests", DataPrivacyViewSet, basename="privacy-request")
 router.register("exceptions", GlobalExceptionHandlingViewSet, basename="exceptions")
 router.register("standards/time-money", TimeMoneyStandardsViewSet, basename="standards-time-money")
+router.register("archival", SoftDeletionAndArchivalViewSet, basename="archival")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

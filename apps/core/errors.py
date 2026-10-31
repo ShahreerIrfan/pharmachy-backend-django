@@ -219,14 +219,21 @@ class AuditImmutabilityError(PharmacyBaseException):
     default_message_bn = "অডিট লগ রেকর্ড অপরিবর্তনযোগ্য। পরিবর্তন বা মুছে ফেলা কঠোরভাবে নিষিদ্ধ।"
 
 
+class DestructiveDeleteForbiddenError(PharmacyBaseException):
+    error_code = "ERR_DESTRUCTIVE_DELETE_FORBIDDEN"
+    http_status = 409
+    is_retryable = False
+    recovery_action = RecoveryAction.ABORT_SECURITY_INCIDENT
+    default_message_en = "Destructive physical deletion of posted financial, inventory, dispensing, or audit records is strictly prohibited by pharmaceutical regulations. Use audited reversals or status transitions."
+    default_message_bn = "ঔষধ প্রশাসন ও আর্থিক নীতি অনুযায়ী চূড়ান্ত বিক্রয়, মজুত, প্রেসক্রিপশন বা অডিট রেকর্ড স্থায়ীভাবে মুছে ফেলা নিষিদ্ধ। অনুমোদিত রিভার্সাল বা বাতিলকরণ পদ্ধতি ব্যবহার করুন।"
+
+
 class StorageUrlExpiredError(PharmacyBaseException):
     error_code = "ERR_STORAGE_URL_EXPIRED"
     http_status = 403
     is_retryable = True
     recovery_action = RecoveryAction.RETRY_AFTER_BACKOFF
-    default_message_en = (
-        "The secure download URL for this file has expired. Please request a fresh signed link."
-    )
+    default_message_en = "The secure download URL for this file has expired. Please request a fresh signed link."
     default_message_bn = "ফাইল ডাউনলোডের লিঙ্কটির মেয়াদ শেষ হয়ে গেছে। অনুগ্রহ করে নতুন স্বাক্ষরিত লিঙ্কের জন্য অনুরোধ করুন।"
 
 
@@ -235,9 +242,7 @@ class FileQuarantinedError(PharmacyBaseException):
     http_status = 403
     is_retryable = False
     recovery_action = RecoveryAction.QUARANTINE_HOLD
-    default_message_en = (
-        "File access blocked: Attachment has been quarantined by antivirus security policy."
-    )
+    default_message_en = "File access blocked: Attachment has been quarantined by antivirus security policy."
     default_message_bn = "ফাইল প্রবেশাধিকার ব্লক করা হয়েছে: অ্যান্টিভাইরাস সিকিউরিটি পলিসি দ্বারা ফাইলটি কোয়ারেন্টাইন করা হয়েছে।"
 
 
@@ -260,7 +265,9 @@ class PrivacyRetentionConflictError(PharmacyBaseException):
     default_message_en = (
         "Data deletion request cannot be executed: Mandatory statutory retention is active under DGDA regulatory rules."
     )
-    default_message_bn = "তথ্য মুছে ফেলার অনুরোধটি কার্যকর করা যাবে না: ডিজিডিএ সরকারি বিধিমালা অনুযায়ী বাধ্যতামূলক রিটেনশন মেয়াদ বলবৎ রয়েছে।"
+    default_message_bn = (
+        "তথ্য মুছে ফেলার অনুরোধটি কার্যকর করা যাবে না: ডিজিডিএ সরকারি বিধিমালা অনুযায়ী বাধ্যতামূলক রিটেনশন মেয়াদ বলবৎ রয়েছে।"
+    )
 
 
 class PrivacyRequestNotFoundError(PharmacyBaseException):
@@ -351,6 +358,7 @@ CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     TenantInactiveError,
     BranchNotFoundError,
     AuditImmutabilityError,
+    DestructiveDeleteForbiddenError,
     StorageUrlExpiredError,
     FileQuarantinedError,
     InvalidFileTypeError,
