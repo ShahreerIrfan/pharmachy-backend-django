@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 if str(_BACKEND_DIR) not in sys.path:

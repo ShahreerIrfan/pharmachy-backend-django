@@ -205,6 +205,17 @@ class BranchNotFoundError(PharmacyBaseException):
     default_message_bn = "সক্রিয় শাখা খুঁজে পাওয়া যায়নি অথবা এটি আপনার ফার্মেসির অন্তর্ভুক্ত নয়।"
 
 
+class AuditImmutabilityError(PharmacyBaseException):
+    error_code = "ERR_AUDIT_IMMUTABLE"
+    http_status = 403
+    is_retryable = False
+    recovery_action = RecoveryAction.ABORT_SECURITY_INCIDENT
+    default_message_en = (
+        "Audit log records are immutable and append-only. Updates and deletions are strictly forbidden."
+    )
+    default_message_bn = "অডিট লগ রেকর্ড অপরিবর্তনযোগ্য। পরিবর্তন বা মুছে ফেলা কঠোরভাবে নিষিদ্ধ।"
+
+
 # Canonical registry of all specialized business exceptions
 CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     AuthenticationExpiredError,
@@ -220,6 +231,7 @@ CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     FieldValidationError,
     TenantInactiveError,
     BranchNotFoundError,
+    AuditImmutabilityError,
 ]
 
 
