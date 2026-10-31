@@ -150,6 +150,63 @@ class TenantViewSet(viewsets.ModelViewSet):
             )
         return super().create(request, *args, **kwargs)
 
+    @action(detail=False, methods=["post"], url_path="provision")
+    def provision_tenant(self, request):
+        """
+        Architecture Decision: ADR-0062
+        Atomic tenant onboarding endpoint executed exclusively by Platform Super Admin.
+        Creates Tenant, Default Branch, First Owner User, Subscription, and Audit Entry.
+        """
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        from apps.core.provisioning import TenantProvisioningEngine
+
+        if not self._is_superadmin(request):
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": "Only Platform Super Admin is authorized to provision new tenant accounts.",
+                    "message_bn": "শুধুমাত্র প্ল্যাটফর্ম সুপার অ্যাডমিনের নতুন টেন্যান্ট অ্যাকাউন্ট তৈরির অনুমতি আছে।",
+                }
+            )
+
+        data = request.data or {}
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        operator_email = getattr(request.user, "email", None)
+
+        try:
+            result = TenantProvisioningEngine.provision_tenant(
+                tenant_id=data.get("tenant_id"),
+                name=data.get("name"),
+                subdomain=data.get("subdomain"),
+                owner_email=data.get("owner_email"),
+                owner_phone=data.get("owner_phone"),
+                owner_name=data.get("owner_name"),
+                owner_password=data.get("owner_password"),
+                plan_tier=data.get("plan_tier", "STANDARD"),
+                branch_name=data.get("branch_name"),
+                branch_license=data.get("branch_license"),
+                branch_address=data.get("branch_address"),
+                is_trial=bool(data.get("is_trial", False)),
+                operator_id=operator_id,
+                operator_email=operator_email,
+            )
+        except DjangoValidationError as err:
+            err_detail = err.message_dict if hasattr(err, "message_dict") else {"error": list(err.messages)}
+            raise ValidationError(detail=err_detail)
+
+        return Response(
+            {
+                "success": True,
+                "code": "TENANT_PROVISIONED_SUCCESSFULLY",
+                "message_en": f"Tenant '{result['tenant_id']}' provisioned successfully with default branch and owner user.",
+                "message_bn": f"টেন্যান্ট '{result['tenant_id']}' ডিফল্ট শাখা ও ওনার ইউজারসহ সফলভাবে প্রভিশন করা হয়েছে।",
+                "data": result,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
     def destroy(self, request, *args, **kwargs):
         from rest_framework.exceptions import PermissionDenied
 
