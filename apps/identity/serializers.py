@@ -10,6 +10,7 @@ from rest_framework import serializers
 
 from apps.identity.models import (
     PharmacyUser,
+    UserSession,
     normalize_bangladesh_phone,
 )
 
@@ -94,7 +95,7 @@ class LoginRequestSerializer(serializers.Serializer):
         max_length=128, required=True, help_text="Email address or Bangladesh mobile number (+8801...)"
     )
     password = serializers.CharField(write_only=True, required=True)
-    device_id = serializers.CharField(max_length=64, required=False, default="client-terminal")
+    device_id = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
 
 
 PharmacyUserLoginSerializer = LoginRequestSerializer
@@ -190,3 +191,62 @@ class MfaDisableRequestSerializer(serializers.Serializer):
     """Validates password confirmation to disable voluntary MFA."""
 
     current_password = serializers.CharField(write_only=True, required=True)
+
+
+class UserSessionSerializer(serializers.ModelSerializer):
+    """
+    Serializes client device sessions conforming to user_session.schema.json (ADR-0045).
+    """
+
+    user_id = serializers.UUIDField(source="user.user_id", read_only=True)
+    is_current = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserSession
+        fields = [
+            "session_id",
+            "user_id",
+            "tenant_id",
+            "device_id",
+            "device_name",
+            "client_platform",
+            "ip_address",
+            "user_agent",
+            "is_active",
+            "is_current",
+            "last_seen_at",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_is_current(self, obj) -> bool:
+        request = self.context.get("request")
+        if not request:
+            return False
+        token_session_id = getattr(request, "auth_session_id", None)
+        if token_session_id:
+            return str(obj.session_id) == str(token_session_id)
+        current_jti = getattr(request, "auth_token_jti", None)
+        if current_jti:
+            return obj.current_refresh_jti == current_jti
+        return False
+
+
+class SessionRevokeResponseSerializer(serializers.Serializer):
+    """Serializes outcome of a single session termination."""
+
+    session_id = serializers.CharField()
+    status = serializers.CharField(default="SUCCESS")
+    revoked = serializers.BooleanField(default=True)
+    message_en = serializers.CharField()
+    message_bn = serializers.CharField()
+
+
+class LogoutAllResponseSerializer(serializers.Serializer):
+    """Serializes outcome of global multi-device logout."""
+
+    status = serializers.CharField(default="SUCCESS")
+    revoked_sessions_count = serializers.IntegerField()
+    message_en = serializers.CharField()
+    message_bn = serializers.CharField()
+

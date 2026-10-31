@@ -1,23 +1,24 @@
 """
 apps.identity.auth_views
-Architecture Decision: ADR-0043 & ADR-0044
+Architecture Decision: ADR-0043, ADR-0044 & ADR-0045
 REST ViewSets for Authentication, JWT Token Lifecycle, Multi-Factor Authentication (MFA),
-Profile, and Password Reset.
+Device Session Rotation, Replay Detection, and Global Logout.
 """
 
 from __future__ import annotations
 
 import hashlib
 import secrets
+import uuid
 from datetime import timedelta
 
 import pyotp
 from django.conf import settings
+from django.db import connection
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.identity.auth_backends import EmailOrPhoneModelBackend
@@ -26,11 +27,13 @@ from apps.identity.models import (
     PasswordResetToken,
     PharmacyUser,
     UserMfaDevice,
+    UserSession,
     normalize_bangladesh_phone,
 )
 from apps.identity.serializers import (
     LoginRequestSerializer,
     LoginResponseSerializer,
+    LogoutAllResponseSerializer,
     LogoutRequestSerializer,
     MfaActivateRequestSerializer,
     MfaChallengeResponseSerializer,
@@ -41,8 +44,10 @@ from apps.identity.serializers import (
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
     PharmacyUserSerializer,
+    SessionRevokeResponseSerializer,
     TokenRefreshRequestSerializer,
     UserProfileUpdateSerializer,
+    UserSessionSerializer,
 )
 
 
@@ -130,12 +135,43 @@ class AuthenticationViewSet(viewsets.ViewSet):
             }
             return Response(MfaChallengeResponseSerializer(challenge_payload).data, status=status.HTTP_200_OK)
 
-        # Generate JWT tokens with tenant/role claims
+        # Generate JWT tokens with tenant/role and session claims (ADR-0045)
         refresh = RefreshToken.for_user(user)
+        refresh_jti = str(refresh.payload.get("jti", ""))
+        token_family = str(uuid.uuid4())
+        device_id = (
+            serializer.validated_data.get("device_id")
+            or request.META.get("HTTP_X_DEVICE_ID")
+            or "client-terminal"
+        )
+        device_name = request.data.get("device_name") or request.META.get("HTTP_X_DEVICE_NAME", "")
+        client_platform = (
+            request.data.get("client_platform")
+            or request.META.get("HTTP_X_CLIENT_PLATFORM")
+            or "DESKTOP_POS"
+        )
+        ip_addr = request.META.get("REMOTE_ADDR")
+        user_agent = request.META.get("HTTP_USER_AGENT", "")[:255]
+
+        session = UserSession.objects.create(
+            user=user,
+            tenant_id=user.tenant_id,
+            device_id=device_id,
+            device_name=device_name,
+            client_platform=client_platform,
+            ip_address=ip_addr,
+            user_agent=user_agent,
+            current_refresh_jti=refresh_jti,
+            token_family=token_family,
+            is_active=True,
+        )
+
         refresh["email"] = user.email
         refresh["tenant_id"] = user.tenant_id
         refresh["branch_id"] = user.branch_id
         refresh["role"] = user.role
+        refresh["session_id"] = str(session.session_id)
+        refresh["device_id"] = device_id
 
         access_token = str(refresh.access_token)
         refresh_token = str(refresh)
@@ -153,7 +189,7 @@ class AuthenticationViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["post"])
     def logout(self, request):
         """
-        Blacklists the refresh token and closes the session.
+        Blacklists the refresh token and terminates the associated device session (ADR-0045).
         """
         serializer = LogoutRequestSerializer(data=request.data)
         if not serializer.is_valid():
@@ -170,7 +206,22 @@ class AuthenticationViewSet(viewsets.ViewSet):
         refresh_token = serializer.validated_data["refresh"]
         try:
             token = RefreshToken(refresh_token)
+            jti = str(token.payload.get("jti", ""))
+            session_id = token.payload.get("session_id")
             token.blacklist()
+
+            if session_id:
+                UserSession.objects.filter(session_id=session_id).update(
+                    is_active=False,
+                    revocation_reason="LOGOUT",
+                    revoked_at=timezone.now(),
+                )
+            elif jti:
+                UserSession.objects.filter(current_refresh_jti=jti).update(
+                    is_active=False,
+                    revocation_reason="LOGOUT",
+                    revoked_at=timezone.now(),
+                )
         except Exception:
             # Client-safe: if already blacklisted or expired, acknowledge logout cleanly
             pass
@@ -186,8 +237,8 @@ class AuthenticationViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["post"], url_path="token/refresh")
     def token_refresh(self, request):
         """
-        Refreshes JWT access token and rotates refresh token.
-        Replaying blacklisted tokens is strictly rejected.
+        Refreshes JWT access token, rotates refresh token, and enforces strict replay detection (ADR-0045).
+        If a previously rotated refresh token is presented again, terminates entire token family and session.
         """
         serializer = TokenRefreshRequestSerializer(data=request.data)
         if not serializer.is_valid():
@@ -202,27 +253,117 @@ class AuthenticationViewSet(viewsets.ViewSet):
             )
 
         raw_refresh = serializer.validated_data["refresh"]
+
+        # Parse token payload to extract JTI and session context even if blacklisted
+        token_jti = ""
+        session_id = None
+        token_user_id = None
+        try:
+            unvalidated_token = RefreshToken(raw_refresh, verify=False)
+            token_jti = str(unvalidated_token.payload.get("jti", ""))
+            session_id = unvalidated_token.payload.get("session_id")
+            token_user_id = unvalidated_token.payload.get("user_id")
+        except Exception:
+            pass
+
+        # Replay detection: check if this token JTI was already rotated in an active session (ADR-0045)
+        replayed_session = None
+        if token_jti:
+            if session_id:
+                cand = UserSession.objects.filter(session_id=session_id).first()
+                if cand and cand.is_replayed_token(token_jti):
+                    replayed_session = cand
+            elif token_user_id:
+                for cand in UserSession.objects.filter(user_id=token_user_id, is_active=True):
+                    if cand.is_replayed_token(token_jti):
+                        replayed_session = cand
+                        break
+            elif connection.vendor == "postgresql":
+                replayed_session = UserSession.objects.filter(
+                    rotated_jtis__contains=token_jti,
+                    is_active=True,
+                ).first()
+
+            if replayed_session:
+                # SECURITY BREACH: Token replay detected!
+                replayed_session.revoke(reason="REPLAY_ATTACK_DETECTED")
+                return Response(
+                    {
+                        "error_code": "TOKEN_REPLAY_DETECTED",
+                        "message_en": "Token replay attack detected. All active sessions in this family have been revoked.",
+                        "message_bn": "টোকেন রিপ্লে আক্রমণ সনাক্ত হয়েছে। এই সেশনের সকল অ্যাক্টিভ টোকেন বাতিল করা হয়েছে।",
+                        "details": {"session_id": str(replayed_session.session_id)},
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
         try:
             token = RefreshToken(raw_refresh)
-            access_str = str(token.access_token)
+            user_id = token.payload.get("user_id")
+            token_jti = str(token.payload.get("jti", ""))
+            session_id = token.payload.get("session_id") or session_id
+
+            user = PharmacyUser.objects.filter(user_id=user_id, is_archived=False, is_active=True).first()
+            if not user:
+                return Response(
+                    {
+                        "error_code": "USER_NOT_FOUND_OR_INACTIVE",
+                        "message_en": "User account is inactive or not found.",
+                        "message_bn": "ব্যবহারকারীর অ্যাকাউন্ট নিষ্ক্রিয় অথবা খুঁজে পাওয়া যায়নি।",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            session = None
+            if session_id:
+                session = UserSession.objects.filter(session_id=session_id, is_active=True).first()
+            if not session and token_jti:
+                session = UserSession.objects.filter(current_refresh_jti=token_jti, is_active=True).first()
+
+            if session and not session.is_active:
+                return Response(
+                    {
+                        "error_code": "SESSION_REVOKED",
+                        "message_en": "Session has been terminated. Please log in again.",
+                        "message_bn": "সেশন বাতিল করা হয়েছে। দয়া করে পুনরায় লগইন করুন।",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            # Device binding check if device_id is provided in request (body or X-Device-Id header)
+            req_device = request.data.get("device_id") or request.META.get("HTTP_X_DEVICE_ID")
+            if req_device and session and session.device_id and session.device_id != req_device:
+                return Response(
+                    {
+                        "error_code": "DEVICE_BINDING_MISMATCH",
+                        "message_en": "Device binding verification failed. Session is bound to a different terminal.",
+                        "message_bn": "ডিভাইস বাইন্ডিং যাচাইকরণ ব্যর্থ হয়েছে। সেশনটি অন্য টার্মিনালের সাথে যুক্ত।",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            # Rotate token
+            token.blacklist()
+
+            new_refresh = RefreshToken.for_user(user)
+            new_jti = str(new_refresh.payload.get("jti", ""))
+            new_refresh["email"] = user.email
+            new_refresh["tenant_id"] = user.tenant_id
+            new_refresh["branch_id"] = user.branch_id
+            new_refresh["role"] = user.role
+            if session:
+                new_refresh["session_id"] = str(session.session_id)
+                new_refresh["device_id"] = session.device_id
+                session.rotate_token(old_jti=token_jti, new_jti=new_jti)
+
             data = {
-                "access": access_str,
+                "access": str(new_refresh.access_token),
+                "refresh": str(new_refresh),
                 "token_type": "Bearer",
                 "expires_in": 900,
             }
-
-            if api_settings.ROTATE_REFRESH_TOKENS:
-                token.blacklist()
-                user_id = token.payload.get("user_id")
-                user = PharmacyUser.objects.filter(user_id=user_id, is_archived=False).first()
-                if user:
-                    new_refresh = RefreshToken.for_user(user)
-                    new_refresh["tenant_id"] = user.tenant_id
-                    new_refresh["branch_id"] = user.branch_id
-                    new_refresh["role"] = user.role
-                    data["refresh"] = str(new_refresh)
-
             return Response(data, status=status.HTTP_200_OK)
+
         except Exception as e:
             return Response(
                 {
@@ -595,12 +736,31 @@ class AuthenticationViewSet(viewsets.ViewSet):
                 device.last_used_at = timezone.now()
                 device.save(update_fields=["failed_attempts", "last_used_at", "updated_at"])
 
-            # Issue full JWT tokens
+            # Issue full JWT tokens and bind to UserSession (ADR-0045)
             refresh = RefreshToken.for_user(user)
+            refresh_jti = str(refresh.payload.get("jti", ""))
+            token_family = str(uuid.uuid4())
+            device_id = challenge.device_id or serializer.validated_data.get("device_id") or "client-terminal"
+
+            session = UserSession.objects.create(
+                user=user,
+                tenant_id=user.tenant_id,
+                device_id=device_id,
+                device_name=request.data.get("device_name", ""),
+                client_platform=request.data.get("client_platform", "DESKTOP_POS"),
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:255],
+                current_refresh_jti=refresh_jti,
+                token_family=token_family,
+                is_active=True,
+            )
+
             refresh["email"] = user.email
             refresh["tenant_id"] = user.tenant_id
             refresh["branch_id"] = user.branch_id
             refresh["role"] = user.role
+            refresh["session_id"] = str(session.session_id)
+            refresh["device_id"] = device_id
 
             access_token = str(refresh.access_token)
             refresh_token = str(refresh)
@@ -715,3 +875,111 @@ class AuthenticationViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=False, methods=["get"], url_path="sessions", permission_classes=[permissions.IsAuthenticated])
+    def sessions_list(self, request):
+        """
+        Lists active and recent client device sessions for the authenticated user (ADR-0045).
+        """
+        sessions = UserSession.objects.filter(
+            user=request.user,
+            tenant_id=request.user.tenant_id,
+        ).order_by("-is_active", "-last_seen_at")
+
+        serializer = UserSessionSerializer(sessions, many=True, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    @action(
+        detail=False,
+        methods=["post", "delete"],
+        url_path=r"sessions/(?P<session_id>[0-9a-fA-F-]+)/revoke",
+        permission_classes=[permissions.IsAuthenticated],
+    )
+    def session_revoke(self, request, session_id=None):
+        """
+        Revokes a specific device session and terminates its active refresh token.
+        Cross-tenant and unauthorized foreign user revocation is strictly blocked.
+        """
+        session = UserSession.objects.filter(session_id=session_id).first()
+        if not session:
+            return Response(
+                {
+                    "error_code": "SESSION_NOT_FOUND",
+                    "message_en": "Session record not found.",
+                    "message_bn": "সেশন রেকর্ড পাওয়া যায়নি।",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Cross-tenant security boundary check
+        if session.tenant_id != request.user.tenant_id:
+            return Response(
+                {
+                    "error_code": "CROSS_TENANT_SESSION_ACCESS_DENIED",
+                    "message_en": "Cross-tenant session access is strictly denied.",
+                    "message_bn": "ক্রস-টেন্যান্ট সেশন অ্যাক্সেস কঠোরভাবে নিষিদ্ধ।",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Ownership check
+        if session.user_id != request.user.user_id and not request.user.is_superuser:
+            return Response(
+                {
+                    "error_code": "FORBIDDEN_SESSION_REVOCATION",
+                    "message_en": "You are not authorized to revoke another user's session.",
+                    "message_bn": "আপনি অন্য ব্যবহারকারীর সেশন বাতিল করার জন্য অনুমোদিত নন।",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        session.revoke(reason="MANUAL_REVOCATION")
+
+        resp_data = {
+            "session_id": str(session.session_id),
+            "status": "SUCCESS",
+            "revoked": True,
+            "message_en": "Device session successfully revoked.",
+            "message_bn": "ডিভাইস সেশনটি সফলভাবে বাতিল করা হয়েছে।",
+        }
+        return Response(SessionRevokeResponseSerializer(resp_data).data, status=status.HTTP_200_OK)
+
+    @action(
+        detail=False,
+        methods=["delete"],
+        url_path=r"sessions/(?P<session_id>[0-9a-fA-F-]+)",
+        permission_classes=[permissions.IsAuthenticated],
+    )
+    def session_delete(self, request, session_id=None):
+        """Standard REST DELETE alias for session revocation."""
+        return self.session_revoke(request, session_id=session_id)
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="sessions/logout-all",
+        permission_classes=[permissions.IsAuthenticated],
+    )
+    def logout_all(self, request):
+        """
+        Terminates all active device sessions for the authenticated user and revokes all refresh tokens.
+        """
+        active_sessions = UserSession.objects.filter(
+            user=request.user,
+            tenant_id=request.user.tenant_id,
+            is_active=True,
+        )
+        count = active_sessions.count()
+        active_sessions.update(
+            is_active=False,
+            revocation_reason="LOGOUT_ALL",
+            revoked_at=timezone.now(),
+        )
+
+        resp_data = {
+            "status": "SUCCESS",
+            "revoked_sessions_count": count,
+            "message_en": f"Successfully revoked {count} active device session(s).",
+            "message_bn": f"সফলভাবে {count}টি সক্রিয় সেশন বাতিল করা হয়েছে।",
+        }
+        return Response(LogoutAllResponseSerializer(resp_data).data, status=status.HTTP_200_OK)

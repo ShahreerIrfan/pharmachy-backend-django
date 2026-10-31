@@ -376,3 +376,70 @@ class PasswordResetToken(models.Model):
 
     def is_valid(self) -> bool:
         return not self.is_used and timezone.now() < self.expires_at
+
+
+class UserSession(models.Model):
+    """
+    Active and historical client device session with token rotation and replay protection.
+    Architecture Decision: ADR-0045
+    """
+
+    session_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(PharmacyUser, on_delete=models.CASCADE, related_name="sessions")
+    tenant_id = models.CharField(max_length=64, db_index=True)
+    device_id = models.CharField(max_length=64, db_index=True, help_text="Client device identifier")
+    device_name = models.CharField(max_length=128, blank=True, default="")
+    client_platform = models.CharField(
+        max_length=32,
+        default="DESKTOP_POS",
+        choices=[
+            ("DESKTOP_POS", "Desktop POS"),
+            ("MOBILE_MANAGER", "Mobile Manager"),
+            ("WEB_ADMIN", "Web Admin"),
+        ],
+    )
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True, default="")
+    current_refresh_jti = models.CharField(max_length=64, db_index=True, blank=True, default="")
+    token_family = models.CharField(max_length=64, db_index=True, blank=True, default="")
+    rotated_jtis = models.JSONField(default=list, help_text="History of previously rotated refresh JTIs")
+    is_active = models.BooleanField(default=True, db_index=True)
+    revocation_reason = models.CharField(max_length=128, blank=True, default="")
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "identity_user_sessions"
+        ordering = ["-last_seen_at"]
+        indexes = [
+            models.Index(fields=["user", "is_active"]),
+            models.Index(fields=["tenant_id", "device_id"]),
+            models.Index(fields=["token_family"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Session-{self.session_id} for {self.user.email} on {self.device_id} (active={self.is_active})"
+
+    def revoke(self, reason: str = "LOGOUT") -> None:
+        """Revokes the active session and marks revocation reason."""
+        self.is_active = False
+        self.revocation_reason = reason
+        self.revoked_at = timezone.now()
+        self.save(update_fields=["is_active", "revocation_reason", "revoked_at", "updated_at"])
+
+    def rotate_token(self, old_jti: str, new_jti: str) -> None:
+        """Rotates refresh token JTI and appends previous token to rotated list."""
+        if self.rotated_jtis is None:
+            self.rotated_jtis = []
+        if old_jti and old_jti not in self.rotated_jtis:
+            self.rotated_jtis.append(old_jti)
+        self.current_refresh_jti = new_jti
+        self.last_seen_at = timezone.now()
+        self.save(update_fields=["rotated_jtis", "current_refresh_jti", "last_seen_at", "updated_at"])
+
+    def is_replayed_token(self, jti: str) -> bool:
+        """Detects whether a presented refresh token JTI belongs to historical rotated tokens."""
+        return bool(self.rotated_jtis and jti in self.rotated_jtis)
+

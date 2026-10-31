@@ -318,6 +318,13 @@ class TestTaxonomyRegistry:
                 TestMarker.SECURITY,
                 [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
             ),
+            (
+                "P045",
+                "Session and Token Rotation",
+                "shared/tests/test_p045_session_token_rotation.py",
+                TestMarker.SECURITY,
+                [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:
