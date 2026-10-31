@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     "apps.quality_governance",
     "apps.build_pipeline",
     "apps.environment_governance",
+    "apps.file_storage",
 ]
 
 MIDDLEWARE = [

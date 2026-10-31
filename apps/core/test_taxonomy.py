@@ -360,6 +360,13 @@ class TestTaxonomyRegistry:
                 TestMarker.SECURITY,
                 [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
             ),
+            (
+                "P051",
+                "File Storage Security",
+                "shared/tests/test_p051_file_storage_security.py",
+                TestMarker.SECURITY,
+                [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

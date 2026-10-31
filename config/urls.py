@@ -33,6 +33,7 @@ from apps.core.views import (
 )
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
 from apps.environment_governance.views import EnvironmentProfileViewSet
+from apps.file_storage.views import SecureFileDownloadView, SecureFileStorageViewSet
 from apps.identity.auth_views import AuthenticationViewSet
 from apps.identity.views import PharmacyUserViewSet
 from apps.quality_governance.views import (
@@ -69,6 +70,8 @@ router.register("validation", ValidationContractViewSet, basename="validation")
 router.register("conventions", ApiResponseConventionViewSet, basename="conventions")
 router.register("rate-limits", RateLimitPolicyViewSet, basename="rate-limits")
 router.register("tenant-context", TenantContextViewSet, basename="tenant-context")
+router.register("storage/files", SecureFileStorageViewSet, basename="secure-file")
+router.register("storage/download", SecureFileDownloadView, basename="secure-download")
 
 
 def health_check(request):

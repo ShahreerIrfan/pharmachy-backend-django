@@ -216,6 +216,39 @@ class AuditImmutabilityError(PharmacyBaseException):
     default_message_bn = "অডিট লগ রেকর্ড অপরিবর্তনযোগ্য। পরিবর্তন বা মুছে ফেলা কঠোরভাবে নিষিদ্ধ।"
 
 
+class StorageUrlExpiredError(PharmacyBaseException):
+    error_code = "ERR_STORAGE_URL_EXPIRED"
+    http_status = 403
+    is_retryable = True
+    recovery_action = RecoveryAction.RETRY_AFTER_BACKOFF
+    default_message_en = (
+        "The secure download URL for this file has expired. Please request a fresh signed link."
+    )
+    default_message_bn = "ফাইল ডাউনলোডের লিঙ্কটির মেয়াদ শেষ হয়ে গেছে। অনুগ্রহ করে নতুন স্বাক্ষরিত লিঙ্কের জন্য অনুরোধ করুন।"
+
+
+class FileQuarantinedError(PharmacyBaseException):
+    error_code = "ERR_FILE_QUARANTINED"
+    http_status = 403
+    is_retryable = False
+    recovery_action = RecoveryAction.QUARANTINE_HOLD
+    default_message_en = (
+        "File access blocked: Attachment has been quarantined by antivirus security policy."
+    )
+    default_message_bn = "ফাইল প্রবেশাধিকার ব্লক করা হয়েছে: অ্যান্টিভাইরাস সিকিউরিটি পলিসি দ্বারা ফাইলটি কোয়ারেন্টাইন করা হয়েছে।"
+
+
+class InvalidFileTypeError(PharmacyBaseException):
+    error_code = "ERR_INVALID_FILE_TYPE"
+    http_status = 422
+    is_retryable = False
+    recovery_action = RecoveryAction.CORRECT_INPUT_FIELDS
+    default_message_en = (
+        "Disallowed file type or malicious binary header detected. Only valid PDF, JPEG, PNG, and WebP are allowed."
+    )
+    default_message_bn = "নিষিদ্ধ ফাইল ফরম্যাট বা অনিরাপদ বাইনারি শনাক্ত হয়েছে। শুধুমাত্র বৈধ PDF, JPEG, PNG, এবং WebP ফাইল অনুমোদিত।"
+
+
 # Canonical registry of all specialized business exceptions
 CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     AuthenticationExpiredError,
@@ -232,6 +265,9 @@ CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     TenantInactiveError,
     BranchNotFoundError,
     AuditImmutabilityError,
+    StorageUrlExpiredError,
+    FileQuarantinedError,
+    InvalidFileTypeError,
 ]
 
 
