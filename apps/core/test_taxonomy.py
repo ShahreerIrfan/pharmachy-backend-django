@@ -297,6 +297,13 @@ class TestTaxonomyRegistry:
                 TestMarker.SECURITY,
                 [TestMarker.INTEGRATION, TestMarker.CONTRACT, TestMarker.UNIT],
             ),
+            (
+                "P042",
+                "Custom User Model and Identity",
+                "shared/tests/test_p042_custom_user_model.py",
+                TestMarker.SECURITY,
+                [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

@@ -1,0 +1,274 @@
+"""
+apps.identity.models
+Architecture Decision: ADR-0005 & ADR-0042
+Canonical Custom User Model for Bangladesh Multi-Tenant Pharmacy SaaS ERP & POS.
+"""
+
+from __future__ import annotations
+
+import re
+import uuid
+from typing import Optional
+
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
+from django.core.exceptions import ValidationError
+from django.db import models
+from django.utils import timezone
+
+
+def normalize_bangladesh_phone(raw_phone: str) -> str:
+    """
+    Normalizes Bangladesh mobile numbers to E.164 standard (+8801[3-9]\\d{8}).
+    Accepts raw formats like 01712345678, +8801712345678, 8801712345678, 01712-345678.
+    """
+    if not raw_phone:
+        raise ValidationError("Phone number is required.")
+
+    cleaned = re.sub(r"[\s\-\(\)]", "", str(raw_phone).strip())
+
+    if cleaned.startswith("+880"):
+        pass
+    elif cleaned.startswith("880"):
+        cleaned = "+" + cleaned
+    elif cleaned.startswith("01"):
+        cleaned = "+88" + cleaned
+    elif cleaned.startswith("1"):
+        cleaned = "+880" + cleaned
+    else:
+        raise ValidationError(f"Invalid Bangladesh phone number format: '{raw_phone}'. Must match +8801[3-9]XXXXXXXX.")
+
+    pattern = re.compile(r"^\+8801[3-9]\d{8}$")
+    if not pattern.match(cleaned):
+        raise ValidationError(
+            f"Invalid Bangladesh mobile operator prefix or length: '{cleaned}'. "
+            f"Valid operators: 013, 014, 015, 016, 017, 018, 019 (11 digits)."
+        )
+
+    return cleaned
+
+
+class UserRole(models.TextChoices):
+    SUPERADMIN = "SUPERADMIN", "Platform Super Administrator"
+    PLATFORM_OPERATOR = "PLATFORM_OPERATOR", "Platform Operator / DevOps"
+    PHARMACY_OWNER = "PHARMACY_OWNER", "Pharmacy Owner / Licensee"
+    BRANCH_MANAGER = "BRANCH_MANAGER", "Branch Manager"
+    STAFF_PHARMACIST = "STAFF_PHARMACIST", "Registered Pharmacist (DGDA/PCB)"
+    CASHIER = "CASHIER", "POS Terminal Cashier"
+    INVENTORY_CLERK = "INVENTORY_CLERK", "Warehouse & Inventory Clerk"
+    FINANCE_OFFICER = "FINANCE_OFFICER", "Finance & Accounts Officer"
+    AUDITOR = "AUDITOR", "External Regulatory Auditor"
+    INTEGRATION_AGENT = "INTEGRATION_AGENT", "Automated Device / API Service Agent"
+
+
+class ActivationStatus(models.TextChoices):
+    PENDING_VERIFICATION = "PENDING_VERIFICATION", "Pending Email/Phone Verification"
+    ACTIVE = "ACTIVE", "Active & Authorized"
+    SUSPENDED = "SUSPENDED", "Temporarily Suspended / Security Lockout"
+    DEACTIVATED = "DEACTIVATED", "Deactivated / Safely Archived"
+
+
+class PharmacyUserManager(BaseUserManager):
+    """
+    Custom user manager with email and phone normalization, safe deletion querysets,
+    and role-based creation.
+    """
+
+    def create_user(
+        self,
+        email: str,
+        phone_number: str,
+        password: Optional[str] = None,
+        **extra_fields,
+    ) -> PharmacyUser:
+        if not email:
+            raise ValueError("An email address must be provided.")
+        if not phone_number:
+            raise ValueError("A Bangladesh phone number must be provided.")
+
+        email = self.normalize_email(email).lower()
+        phone_number = normalize_bangladesh_phone(phone_number)
+
+        extra_fields.setdefault("activation_status", ActivationStatus.ACTIVE)
+        extra_fields.setdefault("is_active", True)
+        extra_fields.setdefault("is_staff", False)
+        extra_fields.setdefault("is_superuser", False)
+
+        user = self.model(email=email, phone_number=phone_number, **extra_fields)
+        if password:
+            user.set_password(password)
+        else:
+            user.set_unusable_password()
+
+        user.save(using=self._db)
+        return user
+
+    def create_superuser(
+        self,
+        email: str,
+        phone_number: str,
+        password: Optional[str] = None,
+        **extra_fields,
+    ) -> PharmacyUser:
+        extra_fields.setdefault("is_staff", True)
+        extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("role", UserRole.SUPERADMIN)
+        extra_fields.setdefault("activation_status", ActivationStatus.ACTIVE)
+        extra_fields.setdefault("tenant_id", "platform-system")
+
+        if extra_fields.get("is_staff") is not True:
+            raise ValueError("Superuser must have is_staff=True.")
+        if extra_fields.get("is_superuser") is not True:
+            raise ValueError("Superuser must have is_superuser=True.")
+
+        return self.create_user(email, phone_number, password, **extra_fields)
+
+    def active(self):
+        """Returns non-archived, actively authorized users."""
+        return self.get_queryset().filter(is_archived=False, activation_status=ActivationStatus.ACTIVE)
+
+    def all_with_archived(self):
+        """Returns all users including archived records for regulatory audits."""
+        return self.get_queryset()
+
+
+class PharmacyUser(AbstractBaseUser, PermissionsMixin):
+    """
+    Extensible custom user model conforming to ADR-0042.
+    Replaces default auth.User with tenant context, BD mobile policy, and safe deletion.
+    """
+
+    user_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.CharField(max_length=64, db_index=True, default="tenant-default")
+    branch_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+
+    email = models.EmailField(unique=True, db_index=True)
+    phone_number = models.CharField(max_length=20, unique=True, db_index=True)
+    full_name = models.CharField(max_length=255)
+    role = models.CharField(max_length=32, choices=UserRole.choices, default=UserRole.CASHIER, db_index=True)
+    pcb_registration_no = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Pharmacy Council of Bangladesh Grade-A/B Pharmacist Registration Number",
+    )
+
+    activation_status = models.CharField(
+        max_length=32,
+        choices=ActivationStatus.choices,
+        default=ActivationStatus.ACTIVE,
+        db_index=True,
+    )
+    is_active = models.BooleanField(default=True)
+    is_staff = models.BooleanField(default=False)
+    is_superuser = models.BooleanField(default=False)
+
+    # Safe deletion & archival audit trail (Hard DELETE forbidden)
+    is_archived = models.BooleanField(default=False, db_index=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    archived_by = models.CharField(max_length=100, blank=True, default="")
+    archival_reason = models.TextField(blank=True, default="")
+
+    # Authentication security metadata & lockouts
+    failed_login_attempts = models.PositiveIntegerField(default=0)
+    lockout_until = models.DateTimeField(null=True, blank=True)
+    last_login_ip = models.GenericIPAddressField(null=True, blank=True)
+    last_login_user_agent = models.TextField(blank=True, default="")
+    password_changed_at = models.DateTimeField(default=timezone.now)
+    mfa_enabled = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = PharmacyUserManager()
+
+    USERNAME_FIELD = "email"
+    REQUIRED_FIELDS = ["phone_number", "full_name"]
+
+    class Meta:
+        db_table = "identity_pharmacy_users"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["tenant_id", "role"]),
+            models.Index(fields=["phone_number"]),
+            models.Index(fields=["is_archived", "activation_status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.full_name} <{self.email}> [{self.role}] ({self.tenant_id})"
+
+    def clean(self):
+        super().clean()
+        if self.email:
+            self.email = self.email.lower().strip()
+        if self.phone_number:
+            self.phone_number = normalize_bangladesh_phone(self.phone_number)
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def delete(self, using=None, keep_parents=False, force_hard_delete=False):
+        """
+        Safe deletion rule: Overrides default delete to perform soft-deletion/archival.
+        Hard delete is only accessible if force_hard_delete=True is explicitly passed.
+        """
+        if force_hard_delete:
+            return super().delete(using=using, keep_parents=keep_parents)
+
+        self.is_archived = True
+        self.is_active = False
+        self.activation_status = ActivationStatus.DEACTIVATED
+        self.archived_at = timezone.now()
+        self.save(
+            update_fields=[
+                "is_archived",
+                "is_active",
+                "activation_status",
+                "archived_at",
+                "updated_at",
+            ]
+        )
+
+    def archive(self, by_user: str = "SYSTEM", reason: str = "") -> None:
+        """Explicit audited archival state transition."""
+        self.is_archived = True
+        self.is_active = False
+        self.activation_status = ActivationStatus.DEACTIVATED
+        self.archived_at = timezone.now()
+        self.archived_by = by_user
+        self.archival_reason = reason
+        self.save(
+            update_fields=[
+                "is_archived",
+                "is_active",
+                "activation_status",
+                "archived_at",
+                "archived_by",
+                "archival_reason",
+                "updated_at",
+            ]
+        )
+
+    def activate(self) -> None:
+        """Explicit activation state transition."""
+        self.activation_status = ActivationStatus.ACTIVE
+        self.is_active = True
+        self.is_archived = False
+        self.failed_login_attempts = 0
+        self.lockout_until = None
+        self.save(
+            update_fields=[
+                "activation_status",
+                "is_active",
+                "is_archived",
+                "failed_login_attempts",
+                "lockout_until",
+                "updated_at",
+            ]
+        )
+
+    def suspend(self, reason: str = "") -> None:
+        """Suspends user access due to security violation or administrative review."""
+        self.activation_status = ActivationStatus.SUSPENDED
+        self.is_active = False
+        self.save(update_fields=["activation_status", "is_active", "updated_at"])

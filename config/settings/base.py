@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     "corsheaders",
     "drf_spectacular",
     # SaaS Core & Modular Monolith Bounded Contexts
+    "apps.identity",
     "apps.core",
     "apps.audit_logging",
     "apps.developer_toolchain",
@@ -116,6 +117,13 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# ADR-0042: Custom User Model & Dual-Identifier Authentication
+AUTH_USER_MODEL = "identity.PharmacyUser"
+AUTHENTICATION_BACKENDS = [
+    "apps.identity.auth_backends.EmailOrPhoneModelBackend",
+    "django.contrib.auth.backends.ModelBackend",
+]
 
 # Django REST Framework
 REST_FRAMEWORK = {
