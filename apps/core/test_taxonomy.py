@@ -276,6 +276,13 @@ class TestTaxonomyRegistry:
                 TestMarker.CONTRACT,
                 [TestMarker.INTEGRATION, TestMarker.UNIT, TestMarker.SECURITY],
             ),
+            (
+                "P039",
+                "Issue Templates and Definition of Done",
+                "shared/tests/test_p039_issue_templates_and_dod.py",
+                TestMarker.CONTRACT,
+                [TestMarker.INTEGRATION, TestMarker.UNIT, TestMarker.SECURITY],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

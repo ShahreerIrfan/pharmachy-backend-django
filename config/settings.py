@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     "apps.developer_toolchain",
     "apps.secrets_vault",
     "apps.release_management",
+    "apps.quality_governance",
 ]
 
 MIDDLEWARE = [

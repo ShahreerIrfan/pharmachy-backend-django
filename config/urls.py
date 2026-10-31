@@ -27,6 +27,10 @@ from apps.core.views import (
     TenantViewSet,
 )
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
+from apps.quality_governance.views import (
+    DefinitionOfDoneAuditViewSet,
+    QualityIssueTicketViewSet,
+)
 from apps.release_management.views import ReleaseManifestViewSet
 from apps.secrets_vault.views import TenantSecretViewSet
 
@@ -47,6 +51,8 @@ router.register("audit-logs", AuditLogEntryViewSet, basename="audit-log")
 router.register("developer/quickstart", DeveloperQuickstartViewSet, basename="developer-quickstart")
 router.register("secrets", TenantSecretViewSet, basename="tenant-secret")
 router.register("releases", ReleaseManifestViewSet, basename="release")
+router.register("quality/issues", QualityIssueTicketViewSet, basename="quality-issue")
+router.register("quality/dod-audits", DefinitionOfDoneAuditViewSet, basename="dod-audit")
 
 
 def health_check(request):
