@@ -367,6 +367,13 @@ class TestTaxonomyRegistry:
                 TestMarker.SECURITY,
                 [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
             ),
+            (
+                "P052",
+                "Data Privacy Operations",
+                "shared/tests/test_p052_data_privacy_operations.py",
+                TestMarker.SECURITY,
+                [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

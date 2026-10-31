@@ -249,6 +249,26 @@ class InvalidFileTypeError(PharmacyBaseException):
     default_message_bn = "নিষিদ্ধ ফাইল ফরম্যাট বা অনিরাপদ বাইনারি শনাক্ত হয়েছে। শুধুমাত্র বৈধ PDF, JPEG, PNG, এবং WebP ফাইল অনুমোদিত।"
 
 
+class PrivacyRetentionConflictError(PharmacyBaseException):
+    error_code = "ERR_PRIVACY_RETENTION_CONFLICT"
+    http_status = 409
+    is_retryable = False
+    recovery_action = RecoveryAction.ABORT_SECURITY_INCIDENT
+    default_message_en = (
+        "Data deletion request cannot be executed: Mandatory statutory retention is active under DGDA regulatory rules."
+    )
+    default_message_bn = "তথ্য মুছে ফেলার অনুরোধটি কার্যকর করা যাবে না: ডিজিডিএ সরকারি বিধিমালা অনুযায়ী বাধ্যতামূলক রিটেনশন মেয়াদ বলবৎ রয়েছে।"
+
+
+class PrivacyRequestNotFoundError(PharmacyBaseException):
+    error_code = "ERR_PRIVACY_REQUEST_NOT_FOUND"
+    http_status = 404
+    is_retryable = False
+    recovery_action = RecoveryAction.CORRECT_INPUT_FIELDS
+    default_message_en = "The specified data privacy request record was not found."
+    default_message_bn = "অনুরোধকৃত ডেটা প্রাইভেসি আবেদন রেকর্ডটি খুঁজে পাওয়া যায়নি।"
+
+
 # Canonical registry of all specialized business exceptions
 CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     AuthenticationExpiredError,
@@ -268,6 +288,8 @@ CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     StorageUrlExpiredError,
     FileQuarantinedError,
     InvalidFileTypeError,
+    PrivacyRetentionConflictError,
+    PrivacyRequestNotFoundError,
 ]
 
 

@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     "apps.build_pipeline",
     "apps.environment_governance",
     "apps.file_storage",
+    "apps.data_privacy",
 ]
 
 MIDDLEWARE = [

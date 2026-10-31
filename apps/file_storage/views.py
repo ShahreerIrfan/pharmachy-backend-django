@@ -153,11 +153,11 @@ class SecureFileStorageViewSet(viewsets.ModelViewSet, StandardResponseMixin):
         serializer = SecureFileUploadSerializer(data=request.data)
         if not serializer.is_valid():
             return self.error_response(
-                code="ERR_VALIDATION_FAILED",
+                error_code="ERR_VALIDATION_FAILED",
                 message_en="File upload validation failed.",
                 message_bn="ফাইল আপলোড তথ্যের মান সঠিক নয়।",
                 field_errors=serializer.errors,
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                http_status=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
         uploaded_file = serializer.validated_data["file"]

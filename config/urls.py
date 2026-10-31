@@ -31,6 +31,7 @@ from apps.core.views import (
     TenantViewSet,
     ValidationContractViewSet,
 )
+from apps.data_privacy.views import DataPrivacyViewSet
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
 from apps.environment_governance.views import EnvironmentProfileViewSet
 from apps.file_storage.views import SecureFileDownloadView, SecureFileStorageViewSet
@@ -72,6 +73,7 @@ router.register("rate-limits", RateLimitPolicyViewSet, basename="rate-limits")
 router.register("tenant-context", TenantContextViewSet, basename="tenant-context")
 router.register("storage/files", SecureFileStorageViewSet, basename="secure-file")
 router.register("storage/download", SecureFileDownloadView, basename="secure-download")
+router.register("privacy/requests", DataPrivacyViewSet, basename="privacy-request")
 
 
 def health_check(request):
