@@ -1716,3 +1716,137 @@ class HealthDiagnosticsViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class EndpointPermissionMatrixViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0005 & ADR-0059
+    API Endpoint Permission Matrix & Access Evaluation ViewSet.
+    - Inventories all system routes, HTTP methods, RBAC roles, branch scopes, and field masking policies.
+    - Evaluates live or dry-run authorization requests and enforces least-privilege defaults.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_tenant_id(self, request) -> str:
+        tenant_id = (
+            getattr(request, "tenant_id", None)
+            or request.headers.get("X-Tenant-Id")
+            or getattr(getattr(request, "user", None), "tenant_id", None)
+        )
+        if not tenant_id:
+            tenant_id = "default-tenant"
+        return str(tenant_id)
+
+    def _check_tenant_match(self, request, target_tenant: str | None) -> None:
+        if not target_tenant:
+            return
+        caller_tenant = self._get_tenant_id(request)
+        if str(target_tenant).strip() != caller_tenant.strip():
+            from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+            AuditLogEntry.objects.create(
+                action="SECURITY_INCIDENT_CROSS_TENANT",
+                resource_type="SECURITY_BARRIER",
+                tenant_id=caller_tenant,
+                status=AuditActionStatus.DENIED,
+                metadata_json={
+                    "event": "CROSS_TENANT_PERMISSION_MATRIX_VIOLATION",
+                    "caller_tenant": caller_tenant,
+                    "target_tenant": target_tenant,
+                    "endpoint": request.path,
+                },
+            )
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "FORBIDDEN_CROSS_TENANT_ACCESS",
+                    "message_en": f"Access denied: Caller tenant '{caller_tenant}' cannot evaluate permissions for tenant '{target_tenant}'.",
+                    "message_bn": f"অনুমতি নেই: কলার টেন্যান্ট '{caller_tenant}' টার্গেট টেন্যান্ট '{target_tenant}'-এর পারমিশন মূল্যায়ন করতে পারে না।",
+                }
+            )
+
+    @action(detail=False, methods=["get"], url_path="inventory")
+    def get_inventory(self, request):
+        """Returns the full catalog of API endpoint permission rules."""
+        from apps.core.permission_matrix import EndpointPermissionMatrixEngine
+
+        role_filter = request.query_params.get("role")
+        inventory = EndpointPermissionMatrixEngine.get_inventory(role_filter=role_filter)
+
+        return Response(
+            {
+                "success": True,
+                "code": "PERMISSION_MATRIX_INVENTORY_RETRIEVED",
+                "message_en": "API endpoint permission matrix inventory retrieved successfully.",
+                "message_bn": "এপিআই এন্ডপয়েন্ট পারমিশন ম্যাট্রিক্স সফলভাবে প্রদর্শিত হয়েছে।",
+                "data": {
+                    "service": "pharmacy-saas-cloud-api",
+                    "version": "v2",
+                    "default_policy": "DENY",
+                    "total_endpoints": len(inventory),
+                    "endpoints": inventory,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="evaluate")
+    def evaluate_permission(self, request):
+        """
+        Evaluates a request against the endpoint permission matrix.
+        Input validation:
+          - method: required string (GET, POST, PUT, PATCH, DELETE)
+          - path: required string (e.g. /api/v2/invoices/)
+          - target_branch_id: optional string
+          - tenant_plan: optional string (BASIC, STANDARD, PRO)
+          - raw_data: optional dictionary for field masking verification
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.permission_matrix import EndpointPermissionMatrixEngine
+
+        data = request.data or {}
+        method = data.get("method")
+        path = data.get("path")
+        target_tenant = data.get("tenant_id") or request.query_params.get("tenant_id")
+
+        if target_tenant:
+            self._check_tenant_match(request, target_tenant)
+
+        field_errors: dict[str, list[str]] = {}
+        if not method or not str(method).strip():
+            field_errors["method"] = ["Field 'method' is required (e.g. GET, POST, DELETE)."]
+        if not path or not str(path).strip():
+            field_errors["path"] = ["Field 'path' is required (e.g. /api/v2/invoices/)."]
+
+        if field_errors:
+            raise ValidationError(detail=field_errors)
+
+        target_branch_id = data.get("target_branch_id")
+        tenant_plan = data.get("tenant_plan") or "BASIC"
+        raw_data = data.get("raw_data")
+
+        result = EndpointPermissionMatrixEngine.evaluate_request(
+            user=request.user,
+            method=str(method),
+            path=str(path),
+            target_branch_id=target_branch_id,
+            tenant_plan=tenant_plan,
+            raw_data=raw_data,
+        )
+
+        http_status = result["status_code"]
+        is_success = result["is_allowed"]
+
+        return Response(
+            {
+                "success": is_success,
+                "code": "PERMISSION_EVALUATION_SUCCESS" if is_success else result["error_code"],
+                "message_en": result["message_en"],
+                "message_bn": result["message_bn"],
+                "data": result,
+            },
+            status=http_status,
+        )

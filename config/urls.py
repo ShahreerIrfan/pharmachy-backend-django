@@ -22,6 +22,7 @@ from apps.core.views import (
     BranchViewSet,
     ComplianceReminderViewSet,
     DailyBranchAnalyticsViewSet,
+    EndpointPermissionMatrixViewSet,
     GlobalExceptionHandlingViewSet,
     HealthDiagnosticsViewSet,
     MedicineProductViewSet,
@@ -85,6 +86,7 @@ router.register("standards/time-money", TimeMoneyStandardsViewSet, basename="sta
 router.register("archival", SoftDeletionAndArchivalViewSet, basename="archival")
 router.register("async-tasks", AsyncTaskIdempotencyViewSet, basename="async-task")
 router.register("health/diagnostics", HealthDiagnosticsViewSet, basename="health-diagnostics")
+router.register("permissions/matrix", EndpointPermissionMatrixViewSet, basename="permission-matrix")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
