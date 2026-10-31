@@ -30,6 +30,7 @@ from apps.core.views import (
     SubscriptionRecordViewSet,
     TenantContextViewSet,
     TenantViewSet,
+    TimeMoneyStandardsViewSet,
     ValidationContractViewSet,
 )
 from apps.data_privacy.views import DataPrivacyViewSet
@@ -76,6 +77,7 @@ router.register("storage/files", SecureFileStorageViewSet, basename="secure-file
 router.register("storage/download", SecureFileDownloadView, basename="secure-download")
 router.register("privacy/requests", DataPrivacyViewSet, basename="privacy-request")
 router.register("exceptions", GlobalExceptionHandlingViewSet, basename="exceptions")
+router.register("standards/time-money", TimeMoneyStandardsViewSet, basename="standards-time-money")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

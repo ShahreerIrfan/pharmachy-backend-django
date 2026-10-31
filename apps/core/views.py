@@ -162,7 +162,11 @@ class SaleInvoiceViewSet(viewsets.ModelViewSet):
         if trusted_tenant_id:
             if query_tenant_id and query_tenant_id.strip() != trusted_tenant_id:
                 raise CrossTenantViolationError(
-                    field_errors={"tenant_id": [f"Supplied tenant '{query_tenant_id}' does not match trusted tenant '{trusted_tenant_id}'."]},
+                    field_errors={
+                        "tenant_id": [
+                            f"Supplied tenant '{query_tenant_id}' does not match trusted tenant '{trusted_tenant_id}'."
+                        ]
+                    },
                     message_en=f"Cross-tenant access violation: Cannot query invoices for foreign tenant '{query_tenant_id}'.",
                     message_bn="অন্য ফার্মেসির তথ্যে প্রবেশাধিকার কঠোরভাবে নিষিদ্ধ।",
                 )
@@ -961,9 +965,7 @@ class GlobalExceptionHandlingViewSet(viewsets.ViewSet, StandardResponseMixin):
 
         from rest_framework.exceptions import ValidationError
 
-        raise ValidationError(
-            detail={"scenario": [f"Unknown simulation scenario '{scenario}'."]}
-        )
+        raise ValidationError(detail={"scenario": [f"Unknown simulation scenario '{scenario}'."]})
 
     @action(detail=False, methods=["get"], url_path="trace-context")
     def trace_context(self, request):
@@ -989,3 +991,253 @@ class GlobalExceptionHandlingViewSet(viewsets.ViewSet, StandardResponseMixin):
             message_bn="ট্রেস কনটেক্সট তথ্য সফলভাবে লোড হয়েছে।",
         )
 
+
+class TimeMoneyStandardsViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0055
+    Standardized API for Decimal Monetary Precision and Asia/Dhaka Time Operations.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _get_tenant_id(self, request) -> str:
+        tenant_id = (
+            getattr(request, "tenant_id", None)
+            or request.headers.get("X-Tenant-Id")
+            or getattr(getattr(request, "user", None), "tenant_id", None)
+        )
+        if not tenant_id:
+            tenant_id = "default-tenant"
+        return str(tenant_id)
+
+    def _check_tenant_match(self, request, target_tenant: str | None) -> None:
+        if not target_tenant:
+            return
+        caller_tenant = self._get_tenant_id(request)
+        if str(target_tenant).strip() != caller_tenant.strip():
+            from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+            AuditLogEntry.objects.create(
+                action="SECURITY_INCIDENT_CROSS_TENANT",
+                resource_type="SECURITY_BARRIER",
+                tenant_id=caller_tenant,
+                status=AuditActionStatus.DENIED,
+                metadata_json={
+                    "event": "CROSS_TENANT_TIME_MONEY_VIOLATION",
+                    "caller_tenant": caller_tenant,
+                    "target_tenant": target_tenant,
+                    "endpoint": request.path,
+                },
+            )
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "FORBIDDEN_CROSS_TENANT_ACCESS",
+                    "message_en": f"Access denied: Caller tenant '{caller_tenant}' cannot operate on tenant '{target_tenant}'.",
+                    "message_bn": f"অনুমতি নেই: কলার টেন্যান্ট '{caller_tenant}' টার্গেট টেন্যান্ট '{target_tenant}'-এ কাজ করতে পারে না।",
+                }
+            )
+
+    @action(detail=False, methods=["get"], url_path="policy")
+    def get_policy(self, request):
+        """Returns the centralized Time and Money Standards Policy."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from apps.core.localization import format_bdt_currency
+        from apps.core.time_and_money import MoneyStandard, TimeStandard
+
+        target_tenant = request.query_params.get("tenant_id")
+        self._check_tenant_match(request, target_tenant)
+
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        sample_amount = Decimal("152345.50")
+
+        return Response(
+            {
+                "success": True,
+                "code": "POLICY_RETRIEVED",
+                "message_en": "Time and money standards policy retrieved successfully.",
+                "message_bn": "সময় ও মুদ্রার মানদণ্ড নীতিমালা সফলভাবে প্রাপ্ত হয়েছে।",
+                "data": {
+                    "currency_code": MoneyStandard.CURRENCY_CODE,
+                    "currency_symbol": MoneyStandard.CURRENCY_SYMBOL,
+                    "monetary_scale": 2,
+                    "rounding_strategy": "ROUND_HALF_UP",
+                    "storage_timezone": TimeStandard.STORAGE_TIMEZONE,
+                    "display_timezone": TimeStandard.DISPLAY_TIMEZONE,
+                    "date_format": "DD/MM/YYYY",
+                    "datetime_format": "DD/MM/YYYY hh:mm A",
+                    "samples": {
+                        "amount_raw": str(sample_amount),
+                        "bdt_en": format_bdt_currency(sample_amount, locale="en-US"),
+                        "bdt_bn": format_bdt_currency(sample_amount, locale="bn-BD"),
+                        "utc_iso": now_utc.isoformat(),
+                        "dhaka_display_en": TimeStandard.format_dhaka_display(now_utc, locale="en-US"),
+                        "dhaka_display_bn": TimeStandard.format_dhaka_display(now_utc, locale="bn-BD"),
+                    },
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="calculate-invoice")
+    def calculate_invoice(self, request):
+        """
+        Calculates invoice totals using exact Decimal arithmetic,
+        rejecting floating-point inputs and generating compliant timestamps.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.time_and_money import MoneyStandard, TimeStandard
+
+        target_tenant = request.data.get("tenant_id")
+        self._check_tenant_match(request, target_tenant)
+
+        raw_items = request.data.get("items")
+        if not raw_items or not isinstance(raw_items, list):
+            raise ValidationError(
+                detail={"items": ["Field 'items' is required and must be a non-empty list of cart items."]}
+            )
+
+        inv_discount = request.data.get("invoice_discount", "0.00")
+        paid = request.data.get("paid_amount", "0.00")
+
+        try:
+            invoice_result = MoneyStandard.calculate_invoice(
+                items=raw_items,
+                invoice_discount_amount=inv_discount,
+                paid_amount=paid,
+            )
+        except (ValueError, TypeError) as err:
+            raise ValidationError(detail={"calculation_error": [str(err)]})
+
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        invoice_result["created_at_utc"] = now_utc.isoformat()
+        invoice_result["display_at_dhaka"] = TimeStandard.format_dhaka_display(now_utc, locale="en-US")
+        invoice_result["display_at_dhaka_bn"] = TimeStandard.format_dhaka_display(now_utc, locale="bn-BD")
+
+        return Response(
+            {
+                "success": True,
+                "code": "INVOICE_CALCULATED",
+                "message_en": "Invoice totals calculated deterministically with Decimal scale 2.",
+                "message_bn": "ডেসিমেল স্কেল ২ নির্ভুলতায় মোট বিল হিসাব করা হয়েছে।",
+                "data": invoice_result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="validate-money")
+    def validate_money(self, request):
+        """
+        Demonstrates strict input validation: rejects float numbers,
+        negative money where disallowed, and naive datetimes.
+        """
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.localization import format_bdt_currency
+        from apps.core.time_and_money import MoneyStandard, TimeStandard
+
+        target_tenant = request.data.get("tenant_id")
+        self._check_tenant_match(request, target_tenant)
+
+        field_errors: dict[str, list[str]] = {}
+
+        # 1. Validate Amount
+        raw_amount = request.data.get("amount")
+        amount_dec = None
+        if raw_amount is None:
+            field_errors["amount"] = ["Field 'amount' is required."]
+        else:
+            try:
+                amount_dec = MoneyStandard.validate_non_negative(raw_amount, field_name="amount")
+            except (ValueError, TypeError) as err:
+                field_errors["amount"] = [str(err)]
+
+        # 2. Validate Timestamp
+        raw_timestamp = request.data.get("timestamp")
+        utc_dt = None
+        if raw_timestamp is None:
+            field_errors["timestamp"] = ["Field 'timestamp' is required."]
+        else:
+            try:
+                utc_dt = TimeStandard.ensure_aware_utc(raw_timestamp, field_name="timestamp")
+            except (ValueError, TypeError) as err:
+                field_errors["timestamp"] = [str(err)]
+
+        if field_errors:
+            raise ValidationError(detail=field_errors)
+
+        return Response(
+            {
+                "success": True,
+                "code": "VALIDATION_PASSED",
+                "message_en": "Monetary and temporal inputs comply with ADR-0055 standards.",
+                "message_bn": "মুদ্রা ও সময়ের তথ্য মানদণ্ড অনুযায়ী সঠিক রয়েছে।",
+                "data": {
+                    "amount_decimal": str(amount_dec),
+                    "amount_formatted_en": format_bdt_currency(amount_dec, locale="en-US"),
+                    "amount_formatted_bn": format_bdt_currency(amount_dec, locale="bn-BD"),
+                    "timestamp_utc": utc_dt.isoformat(),
+                    "timestamp_dhaka_en": TimeStandard.format_dhaka_display(utc_dt, locale="en-US"),
+                    "timestamp_dhaka_bn": TimeStandard.format_dhaka_display(utc_dt, locale="bn-BD"),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="verify-expiry")
+    def verify_expiry(self, request):
+        """
+        Verifies medicine batch expiry against current date in Asia/Dhaka timezone.
+        """
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.time_and_money import TimeStandard
+
+        target_tenant = request.data.get("tenant_id")
+        self._check_tenant_match(request, target_tenant)
+
+        raw_date = request.data.get("expiry_date")
+        if not raw_date:
+            raise ValidationError(detail={"expiry_date": ["Field 'expiry_date' is required."]})
+
+        raw_ref = request.data.get("reference_timestamp")
+        ref_utc = None
+        if raw_ref:
+            try:
+                ref_utc = TimeStandard.ensure_aware_utc(raw_ref, field_name="reference_timestamp")
+            except (ValueError, TypeError) as err:
+                raise ValidationError(detail={"reference_timestamp": [str(err)]})
+
+        try:
+            parsed_exp = TimeStandard.parse_date_only(raw_date, field_name="expiry_date")
+            is_exp = TimeStandard.is_batch_expired(parsed_exp, reference_time_utc=ref_utc)
+        except (ValueError, TypeError) as err:
+            raise ValidationError(detail={"expiry_date": [str(err)]})
+
+        dhaka_ref = TimeStandard.to_dhaka(ref_utc if ref_utc else datetime.now(ZoneInfo("UTC")))
+
+        return Response(
+            {
+                "success": True,
+                "code": "BATCH_EXPIRY_VERIFIED",
+                "message_en": "Batch expiry successfully evaluated against Dhaka business date.",
+                "message_bn": "ঢাকা সময়ানুসারে ওষুধের মেয়াদের তারিখ যাচাই করা হয়েছে।",
+                "data": {
+                    "expiry_date": parsed_exp.isoformat(),
+                    "reference_dhaka_date": dhaka_ref.date().isoformat(),
+                    "is_expired": is_exp,
+                    "action_required": "QUARANTINE_BATCH" if is_exp else "DISPENSE_ALLOWED",
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
