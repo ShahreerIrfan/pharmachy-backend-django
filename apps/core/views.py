@@ -2242,3 +2242,157 @@ class SecurityBaselineViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class PlatformConsoleViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0063
+    Dedicated Super Admin Platform Console API Boundary.
+    Strictly isolated from standard pharmacy tenant users and operations.
+    Never exposed inside tenant desktop or mobile views.
+    """
+
+    def _is_superadmin(self, request) -> bool:
+        user = getattr(request, "user", None)
+        if not user or not getattr(user, "is_authenticated", False):
+            return False
+        if getattr(user, "is_superuser", False):
+            return True
+        return str(getattr(user, "role", "")).upper() in ["SUPERADMIN", "SUPER_ADMIN", "PLATFORM_OPERATOR"]
+
+    def _require_superadmin(self, request):
+        if not self._is_superadmin(request):
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied(
+                detail={
+                    "error_code": "PLATFORM_ACCESS_DENIED",
+                    "message_en": "Platform Super Admin console is strictly restricted to platform administrators.",
+                    "message_bn": "প্ল্যাটফর্ম সুপার অ্যাডমিন কনসোলে প্রবেশের অনুমতি শুধুমাত্র প্ল্যাটফর্ম অ্যাডমিনিস্ট্রেটরের আছে।",
+                }
+            )
+
+    @action(detail=False, methods=["get"], url_path="metrics")
+    def metrics(self, request):
+        """Returns aggregate platform telemetry, status distribution, and health."""
+        self._require_superadmin(request)
+        from apps.core.platform_console import PlatformConsoleService
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        metrics_data = PlatformConsoleService.get_platform_metrics(operator_id=operator_id)
+        return Response(
+            {
+                "success": True,
+                "code": "PLATFORM_METRICS_RETRIEVED",
+                "message_en": "Platform aggregate metrics retrieved successfully.",
+                "message_bn": "প্ল্যাটফর্ম সামগ্রিক মেট্রিক্স সফলভাবে প্রাপ্ত হয়েছে।",
+                "data": metrics_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["get"], url_path="tenants")
+    def tenants(self, request):
+        """Lists all onboarded platform tenants with search, filtering, and branch counts."""
+        self._require_superadmin(request)
+        from apps.core.platform_console import PlatformConsoleService
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        search = request.query_params.get("search")
+        status_filter = request.query_params.get("status")
+        plan_filter = request.query_params.get("plan_tier")
+
+        try:
+            page = max(1, int(request.query_params.get("page", 1)))
+            page_size = max(1, min(100, int(request.query_params.get("page_size", 20))))
+        except (ValueError, TypeError):
+            page = 1
+            page_size = 20
+
+        directory_data = PlatformConsoleService.list_tenants(
+            search=search,
+            status_filter=status_filter,
+            plan_filter=plan_filter,
+            page=page,
+            page_size=page_size,
+            operator_id=operator_id,
+        )
+        return Response(
+            {
+                "success": True,
+                "code": "PLATFORM_TENANTS_RETRIEVED",
+                "message_en": "Platform tenant directory retrieved successfully.",
+                "message_bn": "প্ল্যাটফর্ম টেন্যান্ট ডিরেক্টরি সফলভাবে প্রাপ্ত হয়েছে।",
+                "data": directory_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["get"], url_path=r"tenants/(?P<tenant_id>[^/.]+)")
+    def inspect_tenant(self, request, tenant_id=None):
+        """Inspects deep operational diagnostics for a specific platform tenant."""
+        self._require_superadmin(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import NotFound
+
+        from apps.core.platform_console import PlatformConsoleService
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        try:
+            inspection_data = PlatformConsoleService.inspect_tenant(tenant_id=tenant_id, operator_id=operator_id)
+        except DjangoValidationError:
+            raise NotFound(
+                detail={
+                    "error_code": "TENANT_NOT_FOUND",
+                    "message_en": f"Tenant '{tenant_id}' does not exist on platform.",
+                    "message_bn": f"টেন্যান্ট '{tenant_id}' প্ল্যাটফর্মে পাওয়া যায়নি।",
+                }
+            )
+
+        return Response(
+            {
+                "success": True,
+                "code": "PLATFORM_TENANT_INSPECTED",
+                "message_en": f"Platform diagnostics for tenant '{tenant_id}' retrieved.",
+                "message_bn": f"টেন্যান্ট '{tenant_id}'-এর প্ল্যাটফর্ম ডায়াগনস্টিক তথ্য প্রাপ্ত হয়েছে।",
+                "data": inspection_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="actions")
+    def execute_action(self, request):
+        """Executes audited administrative operations across the platform."""
+        self._require_superadmin(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.platform_console import PlatformConsoleService
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        data = request.data or {}
+        action_type = data.get("action_type")
+        parameters = data.get("parameters", {})
+        reason = data.get("reason")
+
+        try:
+            result = PlatformConsoleService.execute_platform_action(
+                action_type=action_type,
+                parameters=parameters,
+                reason=reason,
+                operator_id=operator_id,
+            )
+        except DjangoValidationError as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"error": list(err.messages)}
+            raise ValidationError(detail=err_dict)
+
+        return Response(
+            {
+                "success": True,
+                "code": "PLATFORM_ACTION_EXECUTED",
+                "message_en": f"Platform administrative action '{action_type}' executed successfully.",
+                "message_bn": f"প্ল্যাটফর্ম প্রশাসনিক অ্যাকশন '{action_type}' সফলভাবে কার্যকর হয়েছে।",
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )

@@ -400,7 +400,7 @@ class NavigationRegistry:
                 label_en="Platform Metrics",
                 label_bn="প্ল্যাটফর্ম মেট্রিক্স",
                 icon="lucide:server",
-                allowed_roles={"SUPER_ADMIN"},
+                allowed_roles={"SUPER_ADMIN", "SUPERADMIN"},
                 supports_offline=False,
             )
         )
@@ -412,7 +412,7 @@ class NavigationRegistry:
                 label_en="Tenants Directory",
                 label_bn="টেন্যান্ট ডিরেক্টরি",
                 icon="lucide:building",
-                allowed_roles={"SUPER_ADMIN"},
+                allowed_roles={"SUPER_ADMIN", "SUPERADMIN"},
                 supports_offline=False,
             )
         )
