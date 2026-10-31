@@ -52,4 +52,3 @@ class SecretRotationAuditSerializer(serializers.ModelSerializer):
             "status",
         ]
         read_only_fields = fields
-

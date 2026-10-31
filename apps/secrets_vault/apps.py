@@ -13,4 +13,3 @@ class SecretsVaultConfig(AppConfig):
     name = "apps.secrets_vault"
     label = "secrets_vault"
     verbose_name = "Secrets Vault & Rotation Engine"
-

@@ -102,7 +102,9 @@ class TestP022BackendEnvironmentIsolation(unittest.TestCase):
         violations_aws = SecretLeakDetector.scan_content(aws_leak)
         self.assertTrue(any("AWS Access Key" in v for v in violations_aws))
 
-        rsa_leak = "-----" + "BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA0...\n" + "-----END RSA PRIVATE KEY-----"  # pragma: allowlist secret
+        rsa_leak = (
+            "-----" + "BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA0...\n" + "-----END RSA PRIVATE KEY-----"
+        )  # pragma: allowlist secret
         violations_rsa = SecretLeakDetector.scan_content(rsa_leak)
         self.assertTrue(any("Private Key" in v for v in violations_rsa))
 

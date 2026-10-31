@@ -106,4 +106,3 @@ class FailFastSecretValidator:
                         f"Insecure secret rejected for tier '{tier.value}': '{k}' uses a known insecure default."
                     )
                 cls.validate_key_entropy(k, val, tier)
-

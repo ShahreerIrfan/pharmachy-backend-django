@@ -12,7 +12,6 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, Spec
 from rest_framework.routers import DefaultRouter
 
 from apps.audit_logging.views import AuditLogEntryViewSet
-from apps.secrets_vault.views import TenantSecretViewSet
 from apps.core.views import (
     AsyncJobRecordViewSet,
     BatchStockViewSet,
@@ -28,6 +27,7 @@ from apps.core.views import (
     TenantViewSet,
 )
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
+from apps.release_management.views import ReleaseManifestViewSet
 from apps.secrets_vault.views import TenantSecretViewSet
 
 router = DefaultRouter()
@@ -46,6 +46,7 @@ router.register("payments", PaymentTransactionViewSet, basename="payment")
 router.register("audit-logs", AuditLogEntryViewSet, basename="audit-log")
 router.register("developer/quickstart", DeveloperQuickstartViewSet, basename="developer-quickstart")
 router.register("secrets", TenantSecretViewSet, basename="tenant-secret")
+router.register("releases", ReleaseManifestViewSet, basename="release")
 
 
 def health_check(request):

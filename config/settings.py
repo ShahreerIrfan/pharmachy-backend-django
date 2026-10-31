@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     "apps.audit_logging",
     "apps.developer_toolchain",
     "apps.secrets_vault",
+    "apps.release_management",
 ]
 
 MIDDLEWARE = [

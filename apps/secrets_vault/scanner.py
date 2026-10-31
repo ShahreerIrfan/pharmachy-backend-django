@@ -59,4 +59,3 @@ class SecretExposureScanner:
         violations = cls.scan_string(content, source_name=source_name)
         if violations:
             raise SecretExposureViolation("\n".join(violations))
-

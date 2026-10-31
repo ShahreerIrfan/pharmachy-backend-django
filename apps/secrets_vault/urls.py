@@ -14,4 +14,3 @@ router = DefaultRouter()
 router.register("secrets", TenantSecretViewSet, basename="tenant-secret")
 
 urlpatterns = router.urls
-

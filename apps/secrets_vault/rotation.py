@@ -62,4 +62,3 @@ class SecretRotationEngine:
         """Generates a high-entropy URL-safe cryptographic secret string."""
         raw = secrets.token_urlsafe(length)
         return f"{prefix}-{raw}"
-

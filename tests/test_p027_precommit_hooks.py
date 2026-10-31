@@ -144,7 +144,7 @@ class TestP027PreCommitHooks(unittest.TestCase):
     def test_secret_detection_catches_cloud_and_database_credentials(self):
         """AWS keys, database passwords in URIs, and JWT secrets must be flagged."""
         content = (
-            'AWS_KEY = "' + 'AKIA' + 'IOSFODNN7EXAMPLE"\n'
+            'AWS_KEY = "' + "AKIA" + 'IOSFODNN7EXAMPLE"\n'
             'DATABASE_URL = "postgres://admin_usr:SuperSecretPass123@db.prod.internal:5432/pharmacy_prod"\n'
             'jwt_secret_key = "very_confidential_signing_secret_9999"\n'
             'SECRET_KEY = "django-insecure-prod-key-with-high-entropy-1234567890abcdef"\n'
@@ -154,7 +154,7 @@ class TestP027PreCommitHooks(unittest.TestCase):
 
     def test_secret_detection_honors_allowlist_pragma(self):
         """Lines with pragma: allowlist secret must be excused."""
-        content = 'AWS_KEY = "' + 'AKIA' + 'IOSFODNN7EXAMPLE"  # pragma: allowlist secret\n'
+        content = 'AWS_KEY = "' + "AKIA" + 'IOSFODNN7EXAMPLE"  # pragma: allowlist secret\n'
         violations = SecretScanner.scan_content(content, file_path="test_mock.py")
         self.assertEqual(len(violations), 0)
 

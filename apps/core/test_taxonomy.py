@@ -269,6 +269,13 @@ class TestTaxonomyRegistry:
                 TestMarker.SECURITY,
                 [TestMarker.INTEGRATION, TestMarker.UNIT, TestMarker.CONTRACT],
             ),
+            (
+                "P038",
+                "Release Version and Changelog",
+                "shared/tests/test_p038_release_versioning.py",
+                TestMarker.CONTRACT,
+                [TestMarker.INTEGRATION, TestMarker.UNIT, TestMarker.SECURITY],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:
