@@ -304,6 +304,13 @@ class TestTaxonomyRegistry:
                 TestMarker.SECURITY,
                 [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
             ),
+            (
+                "P043",
+                "Authentication Endpoints and Token Lifecycle",
+                "shared/tests/test_p043_authentication_endpoints.py",
+                TestMarker.SECURITY,
+                [TestMarker.CONTRACT, TestMarker.INTEGRATION, TestMarker.UNIT],
+            ),
         ]
 
         for pid, name, path, primary, secondaries in canonical_map:

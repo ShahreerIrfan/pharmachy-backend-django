@@ -29,6 +29,7 @@ from apps.core.views import (
 )
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
 from apps.environment_governance.views import EnvironmentProfileViewSet
+from apps.identity.auth_views import AuthenticationViewSet
 from apps.identity.views import PharmacyUserViewSet
 from apps.quality_governance.views import (
     DefinitionOfDoneAuditViewSet,
@@ -38,6 +39,7 @@ from apps.release_management.views import ReleaseManifestViewSet
 from apps.secrets_vault.views import TenantSecretViewSet
 
 router = DefaultRouter()
+router.register("auth", AuthenticationViewSet, basename="auth")
 router.register("tenants", TenantViewSet, basename="tenant")
 router.register("branches", BranchViewSet, basename="branch")
 router.register("medicines", MedicineProductViewSet, basename="medicine")

@@ -1,7 +1,7 @@
 """
 apps.identity.serializers
-Architecture Decision: ADR-0042
-DRF Serializers for Custom PharmacyUser Identity, Registration, and Safe Deletion.
+Architecture Decision: ADR-0042 & ADR-0043
+DRF Serializers for Custom PharmacyUser Identity, Authentication, and Token Lifecycle.
 """
 
 from __future__ import annotations
@@ -85,6 +85,56 @@ class PharmacyUserArchiveRequestSerializer(serializers.Serializer):
     archival_reason = serializers.CharField(max_length=500, required=True)
 
 
-class PharmacyUserLoginSerializer(serializers.Serializer):
-    identifier = serializers.CharField(max_length=128, required=True, help_text="Email or Bangladesh mobile phone")
+class LoginRequestSerializer(serializers.Serializer):
+    """
+    Validates login credentials supporting email or Bangladesh phone number.
+    """
+
+    identifier = serializers.CharField(
+        max_length=128, required=True, help_text="Email address or Bangladesh mobile number (+8801...)"
+    )
     password = serializers.CharField(write_only=True, required=True)
+    device_id = serializers.CharField(max_length=64, required=False, default="client-terminal")
+
+
+PharmacyUserLoginSerializer = LoginRequestSerializer
+
+
+class LoginResponseSerializer(serializers.Serializer):
+    """
+    Serializes authentication response payload conforming to auth_tokens.schema.json.
+    """
+
+    access = serializers.CharField()
+    refresh = serializers.CharField()
+    token_type = serializers.CharField(default="Bearer")
+    expires_in = serializers.IntegerField(default=900)
+    user = PharmacyUserSerializer()
+
+
+class LogoutRequestSerializer(serializers.Serializer):
+    refresh = serializers.CharField(required=True, help_text="JWT refresh token to blacklist")
+
+
+class TokenRefreshRequestSerializer(serializers.Serializer):
+    refresh = serializers.CharField(required=True)
+
+
+class UserProfileUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PharmacyUser
+        fields = [
+            "full_name",
+            "pcb_registration_no",
+        ]
+
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    identifier = serializers.CharField(
+        max_length=128, required=True, help_text="Email address or Bangladesh mobile number"
+    )
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    reset_token = serializers.CharField(required=True, max_length=128)
+    new_password = serializers.CharField(write_only=True, min_length=8, required=True)

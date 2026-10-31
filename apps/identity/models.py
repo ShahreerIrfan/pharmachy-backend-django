@@ -272,3 +272,31 @@ class PharmacyUser(AbstractBaseUser, PermissionsMixin):
         self.activation_status = ActivationStatus.SUSPENDED
         self.is_active = False
         self.save(update_fields=["activation_status", "is_active", "updated_at"])
+
+
+class PasswordResetToken(models.Model):
+    """
+    Time-bound (15-minute) single-use cryptographic token for password recovery.
+    Architecture Decision: ADR-0043
+    """
+
+    token_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(PharmacyUser, on_delete=models.CASCADE, related_name="password_reset_tokens")
+    token = models.CharField(max_length=128, unique=True, db_index=True)
+    otp_code = models.CharField(max_length=6, blank=True, default="")
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "identity_password_reset_tokens"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["token", "is_used"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ResetToken-{self.token_id} for {self.user.email} (used={self.is_used})"
+
+    def is_valid(self) -> bool:
+        return not self.is_used and timezone.now() < self.expires_at

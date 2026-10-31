@@ -46,3 +46,9 @@ SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SECURE = False
 SECURE_HSTS_SECONDS = 0
 IS_HARDENED = False
+
+# Disable throttling during automated unit and integration tests
+REST_FRAMEWORK = {
+    **REST_FRAMEWORK,  # noqa: F405
+    "DEFAULT_THROTTLE_CLASSES": [],
+}

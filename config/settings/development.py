@@ -43,3 +43,13 @@ SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SECURE = False
 SECURE_HSTS_SECONDS = 0
 IS_HARDENED = False
+
+# Local Dev Cache: Default to fast LocMemCache unless Redis explicitly enabled
+USE_REDIS_CACHE = os.environ.get("USE_REDIS_CACHE", "False").lower() in ("true", "1")
+if not USE_REDIS_CACHE:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "dev-pharmacy-cache",
+        }
+    }
