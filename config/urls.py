@@ -14,6 +14,10 @@ from rest_framework.routers import DefaultRouter
 from apps.audit_logging.views import AuditLogEntryViewSet
 from apps.build_pipeline.views import BuildSmokeViewSet
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
+from apps.core.support_access_views import (
+    PlatformSupportAccessViewSet,
+    TenantSupportAccessViewSet,
+)
 from apps.core.views import (
     ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
@@ -91,6 +95,8 @@ router.register("health/diagnostics", HealthDiagnosticsViewSet, basename="health
 router.register("permissions/matrix", EndpointPermissionMatrixViewSet, basename="permission-matrix")
 router.register("security/baseline", SecurityBaselineViewSet, basename="security-baseline")
 router.register("platform/console", PlatformConsoleViewSet, basename="platform-console")
+router.register("platform/support-access", PlatformSupportAccessViewSet, basename="platform-support-access")
+router.register("tenants/support-access", TenantSupportAccessViewSet, basename="tenant-support-access")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

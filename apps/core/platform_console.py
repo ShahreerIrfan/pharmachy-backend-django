@@ -731,9 +731,7 @@ class PlatformConsoleService:
         clean_code = str(reason_code or "ADMIN_MANUAL").upper().strip()
         if clean_code not in cls.SUSPENSION_REASON_CODES:
             raise ValidationError(
-                {
-                    "reason_code": f"Invalid reason_code '{clean_code}'. Must be one of {sorted(cls.SUSPENSION_REASON_CODES)}"
-                }
+                {"reason_code": f"Invalid reason_code '{clean_code}'. Must be one of {sorted(cls.SUSPENSION_REASON_CODES)}"}
             )
 
         now = timezone.now()
@@ -742,14 +740,10 @@ class PlatformConsoleService:
         tenant.suspended_at = now
         tenant.suspension_reason = clean_reason
         tenant.suspension_reason_code = clean_code
-        tenant.save(
-            update_fields=["status", "suspended_at", "suspension_reason", "suspension_reason_code", "updated_at"]
-        )
+        tenant.save(update_fields=["status", "suspended_at", "suspension_reason", "suspension_reason_code", "updated_at"])
 
         # Invalidate active client sessions for this tenant
-        revoked_sessions_count = UserSession.objects.filter(tenant_id=tenant.tenant_id, is_active=True).update(
-            is_active=False
-        )
+        revoked_sessions_count = UserSession.objects.filter(tenant_id=tenant.tenant_id, is_active=True).update(is_active=False)
 
         # Record tamper-evident audit log
         AuditLogEntry.objects.create(
@@ -820,17 +814,7 @@ class PlatformConsoleService:
         tenant.suspended_at = None
         tenant.suspension_reason = ""
         tenant.suspension_reason_code = ""
-        tenant.save(
-            update_fields=[
-                "status",
-                "restored_at",
-                "restoration_reason",
-                "suspended_at",
-                "suspension_reason",
-                "suspension_reason_code",
-                "updated_at",
-            ]
-        )
+        tenant.save(update_fields=["status", "restored_at", "restoration_reason", "suspended_at", "suspension_reason", "suspension_reason_code", "updated_at"])
 
         # Record tamper-evident audit log
         AuditLogEntry.objects.create(
@@ -888,7 +872,6 @@ class PlatformConsoleService:
             }
 
         from dateutil import parser
-
         if isinstance(transaction_timestamp, str):
             tx_time = parser.isoparse(transaction_timestamp)
         else:

@@ -434,6 +434,41 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.GLOBAL,
         min_plan=PlanTier.BASIC,
     ),
+    # 12. Secure Delegated Support Access Governance & Break-Glass (ADR-0068)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/support-access/(?:grants|[^/]+/revoke|request|impersonate)/?$",
+        method="GET",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/support-access/(?:request|[^/]+/revoke|impersonate)/?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/tenants/support-access/[^/]+/active/?$",
+        method="GET",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.STAFF_PHARMACIST,
+            UserRole.CASHIER,
+        ],
+        scope=ScopeLevel.TENANT,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/tenants/support-access/[^/]+/[^/]+/(?:approve|reject|revoke)/?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PHARMACY_OWNER],
+        scope=ScopeLevel.TENANT,
+        min_plan=PlanTier.BASIC,
+    ),
 ]
 
 

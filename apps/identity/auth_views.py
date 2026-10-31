@@ -27,6 +27,7 @@ from apps.identity.models import (
     PasswordResetToken,
     PharmacyUser,
     UserMfaDevice,
+    UserRole,
     UserSession,
     normalize_bangladesh_phone,
 )
@@ -92,6 +93,41 @@ class AuthenticationViewSet(viewsets.ViewSet):
                 },
                 status=status.HTTP_401_UNAUTHORIZED,
             )
+
+        # Check Tenant Lifecycle Status (ADR-0061 & ADR-0067)
+        tenant_obj = None
+        if user.tenant_id and user.role not in [UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR]:
+            from apps.core.models import Tenant, TenantLifecycleStatus
+
+            tenant_obj = Tenant.objects.filter(tenant_id=user.tenant_id).first()
+            if tenant_obj:
+                if tenant_obj.status == TenantLifecycleStatus.SUSPENDED:
+                    # Operational staff (CASHIER, DISPENSER, STAFF, BRANCH_MANAGER) are hard-blocked
+                    if user.role != UserRole.PHARMACY_OWNER:
+                        return Response(
+                            {
+                                "error_code": "TENANT_SUSPENDED",
+                                "message_en": "Tenant account is currently suspended. Operational access is blocked. Please contact your pharmacy administrator.",
+                                "message_bn": "ফার্মেসি টেন্যান্ট অ্যাকাউন্টটি সাময়িকভাবে স্থগিত করা হয়েছে। অপারেশনাল অ্যাক্সেস বন্ধ আছে। অনুগ্রহ করে অ্যাডমিনের সাথে যোগাযোগ করুন।",
+                                "details": {
+                                    "tenant_id": tenant_obj.tenant_id,
+                                    "suspended_at": tenant_obj.suspended_at.isoformat() if tenant_obj.suspended_at else None,
+                                    "suspension_reason": tenant_obj.suspension_reason,
+                                    "reason_code": getattr(tenant_obj, "suspension_reason_code", "") or "ADMIN_MANUAL",
+                                },
+                            },
+                            status=status.HTTP_403_FORBIDDEN,
+                        )
+                elif tenant_obj.status == TenantLifecycleStatus.ARCHIVED:
+                    return Response(
+                        {
+                            "error_code": "TENANT_ARCHIVED",
+                            "message_en": "Tenant account has been decommissioned and archived. Logins are blocked.",
+                            "message_bn": "টেন্যান্ট অ্যাকাউন্টটি বাতিল ও আর্কাইভ করা হয়েছে। লগইন প্রতিরোধ করা হয়েছে।",
+                            "details": {"tenant_id": tenant_obj.tenant_id},
+                        },
+                        status=status.HTTP_403_FORBIDDEN,
+                    )
 
         # Check if MFA is required (ADR-0044)
         device = getattr(user, "mfa_device", None)
@@ -178,6 +214,9 @@ class AuthenticationViewSet(viewsets.ViewSet):
             "token_type": "Bearer",
             "expires_in": 900,
             "user": PharmacyUserSerializer(user).data,
+            "tenant_suspended": bool(tenant_obj and tenant_obj.status == "SUSPENDED"),
+            "suspension_reason": tenant_obj.suspension_reason if (tenant_obj and tenant_obj.status == "SUSPENDED") else "",
+            "suspension_reason_code": getattr(tenant_obj, "suspension_reason_code", "") if (tenant_obj and tenant_obj.status == "SUSPENDED") else "",
         }
 
         return Response(LoginResponseSerializer(response_payload).data, status=status.HTTP_200_OK)

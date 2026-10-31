@@ -111,6 +111,9 @@ class LoginResponseSerializer(serializers.Serializer):
     token_type = serializers.CharField(default="Bearer")
     expires_in = serializers.IntegerField(default=900)
     user = PharmacyUserSerializer()
+    tenant_suspended = serializers.BooleanField(required=False, default=False)
+    suspension_reason = serializers.CharField(required=False, allow_blank=True, default="")
+    suspension_reason_code = serializers.CharField(required=False, allow_blank=True, default="")
 
 
 class LogoutRequestSerializer(serializers.Serializer):

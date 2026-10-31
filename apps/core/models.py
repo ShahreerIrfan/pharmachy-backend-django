@@ -17,6 +17,7 @@ from decimal import Decimal
 
 from django.core.validators import MinValueValidator
 from django.db import models
+from django.utils import timezone
 
 
 class PlanTier(models.TextChoices):
@@ -86,6 +87,9 @@ class Tenant(models.Model):
     grace_period_ends_at = models.DateTimeField(null=True, blank=True)
     suspended_at = models.DateTimeField(null=True, blank=True)
     suspension_reason = models.TextField(blank=True, default="")
+    suspension_reason_code = models.CharField(max_length=64, blank=True, default="")
+    restored_at = models.DateTimeField(null=True, blank=True)
+    restoration_reason = models.TextField(blank=True, default="")
     canonical_settings = models.JSONField(default=get_default_canonical_settings, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -643,3 +647,91 @@ class PaymentTransaction(models.Model):
 
     def __str__(self) -> str:
         return f"Payment {self.transaction_id} ({self.tender_type}) - BDT {self.amount_bdt} [{self.status}]"
+
+
+class SupportAccessStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending Approval"
+    APPROVED = "APPROVED", "Approved & Active"
+    REJECTED = "REJECTED", "Rejected by Tenant"
+    REVOKED = "REVOKED", "Revoked Prematurely"
+    EXPIRED = "EXPIRED", "Expired"
+
+
+class SupportAccessScope(models.TextChoices):
+    DIAGNOSTIC_READ = "DIAGNOSTIC_READ", "Diagnostic & Configuration Read-Only"
+    BILLING_READ = "BILLING_READ", "Subscription & Billing Read-Only"
+    BREAK_GLASS_REPAIR = "BREAK_GLASS_REPAIR", "Emergency Break-Glass Repair"
+
+
+class SupportAccessGrant(models.Model):
+    """
+    Architecture Decision: ADR-0068
+    Secure support access without unsafe impersonation ("ghost login").
+    Enforces tenant owner consent, narrow scopes, automatic expiration,
+    break-glass audit governance, and non-dismissible client notice banners.
+    """
+
+    grant_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="support_grants")
+    requested_by_operator = models.ForeignKey(
+        "identity.PharmacyUser", on_delete=models.CASCADE, related_name="requested_support_grants"
+    )
+    approved_by_user = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_support_grants",
+    )
+    scope = models.CharField(
+        max_length=32, choices=SupportAccessScope.choices, default=SupportAccessScope.DIAGNOSTIC_READ
+    )
+    status = models.CharField(
+        max_length=20, choices=SupportAccessStatus.choices, default=SupportAccessStatus.PENDING, db_index=True
+    )
+    reason = models.TextField()
+    ticket_reference = models.CharField(max_length=64, blank=True, default="")
+    is_break_glass = models.BooleanField(default=False)
+    break_glass_justification = models.TextField(blank=True, default="")
+    duration_minutes = models.PositiveIntegerField(default=30)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revocation_reason = models.TextField(blank=True, default="")
+    revoked_by_user = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="revoked_support_grants",
+    )
+    access_token = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Support Access Grant"
+        verbose_name_plural = "Support Access Grants"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["expires_at", "status"]),
+        ]
+
+    def is_currently_active(self) -> bool:
+        if self.status != SupportAccessStatus.APPROVED:
+            return False
+        if not self.expires_at:
+            return False
+        return timezone.now() < self.expires_at
+
+    def expire_if_needed(self) -> bool:
+        if self.status == SupportAccessStatus.APPROVED and self.expires_at and timezone.now() >= self.expires_at:
+            self.status = SupportAccessStatus.EXPIRED
+            self.save(update_fields=["status", "updated_at"])
+            return True
+        return False
+
+    def __str__(self) -> str:
+        bg = " [BREAK-GLASS]" if self.is_break_glass else ""
+        return f"SupportGrant {self.grant_id} ({self.tenant_id}) [{self.scope}] {self.status}{bg}"
