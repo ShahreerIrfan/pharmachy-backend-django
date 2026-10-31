@@ -419,9 +419,9 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.GLOBAL,
         min_plan=PlanTier.BASIC,
     ),
-    # 11. Platform Super Admin Console (ADR-0063)
+    # 11. Platform Super Admin Console (ADR-0063 & ADR-0064)
     EndpointPermissionRule(
-        path_pattern=r"^/api/v2/platform/console/(?:metrics|tenants|actions)(?:/[^/]+)?/?$",
+        path_pattern=r"^/api/v2/platform/console/(?:metrics|kpis|tenants|actions)(?:/[^/]+)?/?$",
         method="GET",
         allowed_roles=[UserRole.SUPERADMIN],
         scope=ScopeLevel.GLOBAL,

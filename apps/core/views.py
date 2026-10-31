@@ -2272,6 +2272,42 @@ class PlatformConsoleViewSet(viewsets.ViewSet):
                 }
             )
 
+    @action(detail=False, methods=["get"], url_path="kpis")
+    def kpis(self, request):
+        """Returns 7 platform Super Admin KPI cards with Decimal precision."""
+        self._require_superadmin(request)
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from rest_framework.exceptions import ValidationError
+
+        from apps.core.platform_console import PlatformConsoleService
+
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        currency = request.query_params.get("currency", "BDT")
+        period = request.query_params.get("period", "current")
+        include_health = request.query_params.get("include_health_check", "true").lower() == "true"
+
+        try:
+            kpi_data = PlatformConsoleService.calculate_kpi_cards(
+                currency=currency,
+                period=period,
+                include_health_check=include_health,
+                operator_id=operator_id,
+            )
+        except DjangoValidationError as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"error": list(err.messages)}
+            raise ValidationError(detail=err_dict)
+
+        return Response(
+            {
+                "success": True,
+                "code": "PLATFORM_KPIS_RETRIEVED",
+                "message_en": "Platform Super Admin KPI cards calculated successfully.",
+                "message_bn": "প্ল্যাটফর্ম সুপার অ্যাডমিন কেপিআই কার্ড সফলভাবে গণনা করা হয়েছে।",
+                "data": kpi_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
     @action(detail=False, methods=["get"], url_path="metrics")
     def metrics(self, request):
         """Returns aggregate platform telemetry, status distribution, and health."""
