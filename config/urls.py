@@ -20,6 +20,7 @@ from apps.core.views import (
     BranchViewSet,
     ComplianceReminderViewSet,
     DailyBranchAnalyticsViewSet,
+    GlobalExceptionHandlingViewSet,
     MedicineProductViewSet,
     PaymentTransactionViewSet,
     PrescriptionRecordViewSet,
@@ -74,6 +75,12 @@ router.register("tenant-context", TenantContextViewSet, basename="tenant-context
 router.register("storage/files", SecureFileStorageViewSet, basename="secure-file")
 router.register("storage/download", SecureFileDownloadView, basename="secure-download")
 router.register("privacy/requests", DataPrivacyViewSet, basename="privacy-request")
+router.register("exceptions", GlobalExceptionHandlingViewSet, basename="exceptions")
+
+
+# Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
+handler404 = "apps.core.errors.global_handler404"
+handler500 = "apps.core.errors.global_handler500"
 
 
 def health_check(request):

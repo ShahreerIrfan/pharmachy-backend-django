@@ -832,3 +832,160 @@ class TenantContextViewSet(viewsets.ViewSet, StandardResponseMixin):
             message_en="Tenant context resolution policy matrix retrieved successfully.",
             message_bn="টেন্যান্ট কনটেক্সট রেজোলিউশন নীতিমালা সফলভাবে লোড হয়েছে।",
         )
+
+
+class GlobalExceptionHandlingViewSet(viewsets.ViewSet, StandardResponseMixin):
+    """
+    Dedicated viewset auditing, simulating, and verifying centralized global exception handling (ADR-0054).
+    Validates machine error codes, bilingual localized descriptions, trace context preservation,
+    and strict information masking across domain, validation, database, and unexpected server failures.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    @action(detail=False, methods=["get"], url_path="catalog")
+    def catalog(self, request):
+        """Returns the canonical catalog of all registered machine error codes and recovery guidance."""
+        from apps.core.errors import get_registered_error_catalog
+
+        error_catalog = get_registered_error_catalog()
+        return self.success_response(
+            data=error_catalog,
+            code="ERROR_CATALOG_RETRIEVED",
+            message_en=f"Retrieved {len(error_catalog)} registered canonical error codes.",
+            message_bn=f"{len(error_catalog)}টি নিবন্ধিত ক্যানোনিকাল ত্রুটি কোড সফলভাবে লোড হয়েছে।",
+        )
+
+    @action(detail=False, methods=["post"], url_path="simulate")
+    def simulate(self, request):
+        """
+        Simulates explicit exception scenarios against the global exception handler pipeline.
+        Supported scenarios:
+          - valid
+          - validation_error
+          - cross_tenant
+          - unauthorized
+          - permission_denied
+          - database_integrity
+          - database_unavailable
+          - subscription_expired
+          - unhandled_server_error
+          - domain_batch_expired
+          - resource_not_found
+        """
+        scenario = request.data.get("scenario", "valid")
+
+        if scenario == "valid":
+            return self.success_response(
+                data={"scenario": "valid", "executed": True},
+                code="SIMULATION_SUCCESS",
+                message_en="Simulated valid request completed successfully.",
+                message_bn="সঠিক অনুরোধের সিমুলেশন সফলভাবে সম্পন্ন হয়েছে।",
+            )
+
+        if scenario == "validation_error":
+            from rest_framework.exceptions import ValidationError
+
+            raise ValidationError(
+                detail={
+                    "medicine_id": ["Medicine ID is required and cannot be blank."],
+                    "dispense_quantity": ["Dispense quantity must be a positive integer greater than zero."],
+                }
+            )
+
+        if scenario == "cross_tenant":
+            from apps.core.errors import CrossTenantViolationError
+
+            raise CrossTenantViolationError(
+                message_en="Access to foreign pharmacy tenant resources is strictly forbidden.",
+                message_bn="অন্য ফার্মেসির তথ্যে প্রবেশাধিকার কঠোরভাবে নিষিদ্ধ।",
+            )
+
+        if scenario == "unauthorized":
+            from apps.core.errors import AuthenticationExpiredError
+
+            raise AuthenticationExpiredError(
+                message_en="Authentication session expired. Please log in again.",
+                message_bn="আপনার লগইন সেশনের মেয়াদ শেষ হয়েছে। অনুগ্রহ করে পুনরায় লগইন করুন।",
+            )
+
+        if scenario == "permission_denied":
+            from apps.core.errors import PermissionDeniedError
+
+            raise PermissionDeniedError(
+                message_en="Cashier role cannot perform administrative override without manager authorization.",
+                message_bn="ম্যানেজারের অনুমোদন ব্যতীত ক্যাশিয়ার প্রশাসনিক পরিবর্তন করতে পারবে না।",
+            )
+
+        if scenario == "database_integrity":
+            from django.db import IntegrityError as DjangoIntegrityError
+
+            raise DjangoIntegrityError(
+                "duplicate key value violates unique constraint 'core_saleinvoice_tenant_id_invoice_number_uniq'\n"
+                "DETAIL:  Key (tenant_id, invoice_number)=(tenant-dhaka, INV-1042) already exists."
+            )
+
+        if scenario == "database_unavailable":
+            from django.db import OperationalError as DjangoOperationalError
+
+            raise DjangoOperationalError(
+                "could not connect to server: Connection refused\n"
+                "Is the server running on host 'postgres.internal' and accepting TCP/IP connections on port 5432?"
+            )
+
+        if scenario == "subscription_expired":
+            from apps.core.errors import SubscriptionExpiredError
+
+            raise SubscriptionExpiredError(
+                message_en="Pharmacy subscription has expired. Please renew your enterprise plan.",
+                message_bn="ফার্মেসির সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। অনুগ্রহ করে আপনার এন্টারপ্রাইজ প্ল্যান নবায়ন করুন।",
+            )
+
+        if scenario == "unhandled_server_error":
+            raise RuntimeError(
+                "Simulated unhandled critical runtime fault: pointer dereference or division by zero in pricing engine."
+            )
+
+        if scenario == "domain_batch_expired":
+            from apps.core.errors import BatchExpiredError
+
+            raise BatchExpiredError(
+                message_en="Selected medicine batch BATCH-NAPA-2023 expired on 2024-01-01 and cannot be dispensed.",
+                message_bn="নির্বাচিত ওষুধের ব্যাচটির মেয়াদ উত্তীর্ণ হয়েছে এবং এটি বিক্রি করা নিষিদ্ধ।",
+            )
+
+        if scenario == "resource_not_found":
+            from rest_framework.exceptions import NotFound
+
+            raise NotFound(detail="The requested simulated resource was not found.")
+
+        from rest_framework.exceptions import ValidationError
+
+        raise ValidationError(
+            detail={"scenario": [f"Unknown simulation scenario '{scenario}'."]}
+        )
+
+    @action(detail=False, methods=["get"], url_path="trace-context")
+    def trace_context(self, request):
+        """Returns the active distributed tracing and correlation context."""
+        from apps.audit_logging.context import LogContextManager
+
+        ctx = LogContextManager.get_context()
+        request_id = (
+            getattr(request, "request_id", None)
+            or request.META.get("HTTP_X_REQUEST_ID")
+            or (ctx.request_id if ctx else None)
+        )
+        return self.success_response(
+            data={
+                "request_id": request_id,
+                "correlation_id": request.META.get("HTTP_X_CORRELATION_ID") or request_id,
+                "tenant_id": getattr(request, "tenant_id", None) or (ctx.tenant_id if ctx else None),
+                "user_id": getattr(getattr(request, "user", None), "user_id", None) or (ctx.user_id if ctx else None),
+                "is_authenticated": bool(request.user and request.user.is_authenticated),
+            },
+            code="TRACE_CONTEXT_RETRIEVED",
+            message_en="Distributed trace context retrieved successfully.",
+            message_bn="ট্রেস কনটেক্সট তথ্য সফলভাবে লোড হয়েছে।",
+        )
+

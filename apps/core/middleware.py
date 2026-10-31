@@ -8,6 +8,7 @@ Resolves tenant and active branch from trusted signed claims/membership; never t
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Optional
 
@@ -351,3 +352,65 @@ class TenantContextMiddleware:
 
         response = self.get_response(request)
         return response
+
+
+class GlobalExceptionMiddleware:
+    """
+    Tier-2 Global Exception Middleware (ADR-0054).
+    Intercepts any unhandled exception in the Django middleware pipeline or non-DRF views,
+    guaranteeing that API endpoints always receive a standardized, localized, safe error envelope.
+    """
+
+    def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        try:
+            return self.get_response(request)
+        except Exception as exc:
+            handled = self.process_exception(request, exc)
+            if handled is not None:
+                return handled
+            raise
+
+    def process_exception(self, request: HttpRequest, exc: Exception) -> Optional[HttpResponse]:
+        # Handle only if request is an API request or expects JSON
+        is_api = (
+            request.path.startswith("/api/")
+            or "application/json" in request.META.get("HTTP_ACCEPT", "")
+        )
+        if not is_api:
+            # Let standard Django exception processing handle web / admin views
+            return None
+
+        # Build correlation ID
+        ctx = LogContextManager.get_context()
+        correlation_id = (
+            getattr(request, "request_id", None)
+            or request.META.get("HTTP_X_REQUEST_ID")
+            or request.META.get("HTTP_X_CORRELATION_ID")
+            or (ctx.request_id if ctx else None)
+        )
+        if not correlation_id:
+            correlation_id = f"req-{uuid.uuid4()}"
+
+        logger.error(
+            f"GlobalExceptionMiddleware caught exception on {request.method} {request.path}: {exc}",
+            exc_info=True,
+            extra={
+                "correlation_id": correlation_id,
+                "path": request.path,
+                "method": request.method,
+            },
+        )
+
+        from apps.core.errors import format_error_response
+
+        payload = format_error_response(exc, correlation_id=correlation_id)
+        http_status = payload.get("http_status", 500)
+
+        response = JsonResponse(payload, status=http_status)
+        response["X-Request-ID"] = correlation_id
+        response["X-Correlation-ID"] = correlation_id
+        return response
+

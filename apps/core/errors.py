@@ -1,16 +1,19 @@
 """
 Standardized Error Vocabulary, Correlation IDs & Actionable Feedback Language
-Architecture Decision: ADR-0014 & ADR-0046
+Architecture Decision: ADR-0014, ADR-0046, ADR-0047, & ADR-0054
 Provides machine error codes, correlation tracing, bilingual messages, and retryability flags.
 """
 
 from __future__ import annotations
 
 import datetime
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger("apps.core.errors")
 
 
 class RecoveryAction(str, Enum):
@@ -278,6 +281,60 @@ class InvalidCursorError(PharmacyBaseException):
     default_message_bn = "প্রদত্ত পেজিনেশন কার্সারটি অবৈধ, মেয়াদোত্তীর্ণ বা বিকৃত।"
 
 
+class DatabaseIntegrityConflictError(PharmacyBaseException):
+    error_code = "ERR_DATABASE_INTEGRITY"
+    http_status = 409
+    is_retryable = False
+    recovery_action = RecoveryAction.CORRECT_INPUT_FIELDS
+    default_message_en = "A database integrity constraint or duplicate record conflict occurred."
+    default_message_bn = "একটি ডেটাবেজ ইন্টিগ্রিটি বা ডুপ্লিকেট রেকর্ড দ্বন্দ্ব তৈরি হয়েছে।"
+
+
+class DatabaseUnavailableError(PharmacyBaseException):
+    error_code = "ERR_DATABASE_UNAVAILABLE"
+    http_status = 503
+    is_retryable = True
+    recovery_action = RecoveryAction.RETRY_AFTER_BACKOFF
+    default_message_en = "Database service is temporarily unavailable or locked. Safe to retry."
+    default_message_bn = "ডেটাবেজ সেবা সাময়িকভাবে অনুপলব্ধ বা লক করা আছে। কিছুক্ষণ পর পুনরায় চেষ্টা করুন।"
+
+
+class SubscriptionExpiredError(PharmacyBaseException):
+    error_code = "ERR_SUBSCRIPTION_EXPIRED"
+    http_status = 403
+    is_retryable = False
+    recovery_action = RecoveryAction.CONTACT_SUPPORT
+    default_message_en = "Pharmacy tenant subscription has expired. Please renew your plan."
+    default_message_bn = "ফার্মেসির সাবস্ক্রিপশনের মেয়াদ শেষ হয়েছে। অনুগ্রহ করে আপনার প্ল্যান নবায়ন করুন।"
+
+
+class InternalServerError(PharmacyBaseException):
+    error_code = "ERR_INTERNAL_SERVER_ERROR"
+    http_status = 500
+    is_retryable = False
+    recovery_action = RecoveryAction.RETRY_AFTER_BACKOFF
+    default_message_en = "An unexpected internal server error occurred. Please contact support with the request ID."
+    default_message_bn = "একটি অভ্যন্তরীণ সমস্যা দেখা দিয়েছে। অনুগ্রহ করে রিকোয়েস্ট আইডি সহ সাপোর্ট টিমের সাথে যোগাযোগ করুন।"
+
+
+class ResourceNotFoundError(PharmacyBaseException):
+    error_code = "ERR_RESOURCE_NOT_FOUND"
+    http_status = 404
+    is_retryable = False
+    recovery_action = RecoveryAction.CORRECT_INPUT_FIELDS
+    default_message_en = "The requested resource was not found."
+    default_message_bn = "অনুরোধকৃত রিসোর্সটি খুঁজে পাওয়া যায়নি।"
+
+
+class InvalidRequestError(PharmacyBaseException):
+    error_code = "ERR_BAD_REQUEST"
+    http_status = 400
+    is_retryable = False
+    recovery_action = RecoveryAction.CORRECT_INPUT_FIELDS
+    default_message_en = "The request is malformed or invalid."
+    default_message_bn = "অনুরোধটি ত্রুটিপূর্ণ বা অবৈধ।"
+
+
 # Canonical registry of all specialized business exceptions
 CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     AuthenticationExpiredError,
@@ -300,6 +357,12 @@ CANONICAL_EXCEPTION_REGISTRY: list[type[PharmacyBaseException]] = [
     PrivacyRetentionConflictError,
     PrivacyRequestNotFoundError,
     InvalidCursorError,
+    DatabaseIntegrityConflictError,
+    DatabaseUnavailableError,
+    SubscriptionExpiredError,
+    InternalServerError,
+    ResourceNotFoundError,
+    InvalidRequestError,
 ]
 
 
@@ -329,30 +392,125 @@ def format_error_response(
     if isinstance(exc, PharmacyBaseException):
         payload = exc.to_payload()
         res = payload.to_dict()
-        if correlation_id:
-            res["correlation_id"] = correlation_id
+        res["request_id"] = cid
+        res["correlation_id"] = cid
         res["code"] = exc.error_code
+        res["error_code"] = exc.error_code
         res["message"] = exc.message_en
+        res["message_en"] = exc.message_en
+        res["message_bn"] = exc.message_bn
         res["retryable"] = exc.is_retryable
+        res["is_retryable"] = exc.is_retryable
         res["details"] = exc.field_errors
+        res["field_errors"] = exc.field_errors
         return res
 
-    # Generic or untrusted exception: sanitize and mask from external disclosure (NFR-09 & NFR-10)
-    safe_payload = ErrorPayload(
-        error_code="ERR_INTERNAL_SERVER_ERROR",
-        correlation_id=cid,
-        http_status=500,
-        is_retryable=False,
-        message_en="An internal server error occurred. Please contact support with the correlation ID.",
-        message_bn="একটি অভ্যন্তরীণ সমস্যা দেখা দিয়েছে। অনুগ্রহ করে সাপোর্ট টিমের সাথে যোগাযোগ করুন।",
-        recovery_action=RecoveryAction.RETRY_AFTER_BACKOFF,
-        field_errors={},
+    from django.core.exceptions import ValidationError as DjangoValidationError
+    from django.db import (
+        DatabaseError as DjangoDatabaseError,
     )
-    res = safe_payload.to_dict()
-    res["code"] = "ERR_INTERNAL_SERVER_ERROR"
-    res["message"] = res["message_en"]
-    res["retryable"] = False
-    res["details"] = {}
+    from django.db import (
+        IntegrityError as DjangoIntegrityError,
+    )
+    from django.db import (
+        OperationalError as DjangoOperationalError,
+    )
+    from rest_framework.exceptions import ValidationError as DRFValidationError
+
+    if isinstance(exc, (DRFValidationError, DjangoValidationError)):
+        field_errs: dict[str, list[str]] = {}
+        if isinstance(exc, DRFValidationError):
+            raw_errs = exc.detail
+        elif hasattr(exc, "message_dict"):
+            raw_errs = exc.message_dict
+        else:
+            raw_errs = {"non_field_errors": list(exc.messages) if hasattr(exc, "messages") else [str(exc)]}
+
+        if isinstance(raw_errs, dict):
+            for f, err_list in raw_errs.items():
+                if isinstance(err_list, list):
+                    field_errs[f] = [str(e) for e in err_list]
+                else:
+                    field_errs[f] = [str(err_list)]
+        elif isinstance(raw_errs, list):
+            field_errs["non_field_errors"] = [str(e) for e in raw_errs]
+        else:
+            field_errs["non_field_errors"] = [str(raw_errs)]
+
+        return {
+            "success": False,
+            "error_code": "ERR_VALIDATION_FAILED",
+            "code": "ERR_VALIDATION_FAILED",
+            "request_id": cid,
+            "correlation_id": cid,
+            "http_status": 422,
+            "is_retryable": False,
+            "retryable": False,
+            "message": "One or more input fields failed validation.",
+            "message_en": "One or more input fields failed validation.",
+            "message_bn": "এক বা একাধিক তথ্যের মান সঠিক নয়।",
+            "recovery_action": RecoveryAction.CORRECT_INPUT_FIELDS.value,
+            "field_errors": field_errs,
+            "details": field_errs,
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+
+    if isinstance(exc, DjangoIntegrityError):
+        return {
+            "success": False,
+            "error_code": "ERR_DATABASE_INTEGRITY",
+            "code": "ERR_DATABASE_INTEGRITY",
+            "request_id": cid,
+            "correlation_id": cid,
+            "http_status": 409,
+            "is_retryable": False,
+            "retryable": False,
+            "message": "A database integrity constraint or duplicate record conflict occurred.",
+            "message_en": "A database integrity constraint or duplicate record conflict occurred.",
+            "message_bn": "একটি ডেটাবেজ ইন্টিগ্রিটি বা ডুপ্লিকেট রেকর্ড দ্বন্দ্ব তৈরি হয়েছে।",
+            "recovery_action": RecoveryAction.CORRECT_INPUT_FIELDS.value,
+            "field_errors": {},
+            "details": {},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+
+    if isinstance(exc, (DjangoOperationalError, DjangoDatabaseError)):
+        return {
+            "success": False,
+            "error_code": "ERR_DATABASE_UNAVAILABLE",
+            "code": "ERR_DATABASE_UNAVAILABLE",
+            "request_id": cid,
+            "correlation_id": cid,
+            "http_status": 503,
+            "is_retryable": True,
+            "retryable": True,
+            "message": "Database service is temporarily unavailable or locked. Safe to retry.",
+            "message_en": "Database service is temporarily unavailable or locked. Safe to retry.",
+            "message_bn": "ডেটাবেজ সেবা সাময়িকভাবে অনুপলব্ধ বা লক করা আছে। কিছুক্ষণ পর পুনরায় চেষ্টা করুন।",
+            "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+            "field_errors": {},
+            "details": {},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+
+    # Generic or untrusted exception: sanitize and mask from external disclosure (NFR-09 & NFR-10)
+    res = {
+        "success": False,
+        "error_code": "ERR_INTERNAL_SERVER_ERROR",
+        "code": "ERR_INTERNAL_SERVER_ERROR",
+        "request_id": cid,
+        "correlation_id": cid,
+        "http_status": 500,
+        "is_retryable": False,
+        "retryable": False,
+        "message": "An internal server error occurred. Please contact support with the request ID.",
+        "message_en": "An internal server error occurred. Please contact support with the request ID.",
+        "message_bn": "একটি অভ্যন্তরীণ সমস্যা দেখা দিয়েছে। অনুগ্রহ করে রিকোয়েস্ট আইডি সহ সাপোর্ট টিমের সাথে যোগাযোগ করুন।",
+        "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        "field_errors": {},
+        "details": {},
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
     if include_debug:
         res["debug_detail"] = str(exc)
     return res
@@ -371,15 +529,24 @@ def process_api_exception(
 
 def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None = None):
     """
-    Standardized DRF exception handler conforming to ADR-0014 and ADR-0046.
-    Intercepts ValidationErrors, cross-tenant violations, and domain exceptions,
-    formatting them into machine-readable, localized, client-safe ErrorPayload responses.
+    Standardized DRF exception handler conforming to ADR-0014, ADR-0046, ADR-0047, and ADR-0054.
+    Intercepts Domain exceptions, ValidationErrors, Database constraints, and unhandled 500s,
+    formatting them into machine-readable, localized, client-safe error responses.
     """
     from django.core.exceptions import (
         PermissionDenied as DjangoPermissionDenied,
     )
     from django.core.exceptions import (
         ValidationError as DjangoValidationError,
+    )
+    from django.db import (
+        DatabaseError as DjangoDatabaseError,
+    )
+    from django.db import (
+        IntegrityError as DjangoIntegrityError,
+    )
+    from django.db import (
+        OperationalError as DjangoOperationalError,
     )
     from django.http import Http404
     from rest_framework import status
@@ -412,14 +579,47 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
 
     # 1. Custom Domain Exception (PharmacyBaseException)
     if isinstance(exc, PharmacyBaseException):
+        if isinstance(exc, CrossTenantViolationError):
+            try:
+                from apps.audit_logging.context import LogContextManager
+                from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
+
+                ctx = LogContextManager.get_context()
+                user_id = ctx.user_id if ctx else None
+                tenant_id = getattr(request, "tenant_id", None) or (ctx.tenant_id if ctx else None) or "UNKNOWN"
+                device_id = getattr(request, "device_id", None) or (ctx.device_id if ctx else None) or "web-api"
+
+                AuditLogEntry.objects.create(
+                    action="SECURITY_INCIDENT_CROSS_TENANT",
+                    user_id=str(user_id or "anonymous"),
+                    actor_role=getattr(getattr(request, "user", None), "role", "UNKNOWN"),
+                    tenant_id=tenant_id,
+                    branch_id=getattr(request, "branch_id", None),
+                    device_id=device_id,
+                    request_id=correlation_id,
+                    resource_type="SECURITY_BARRIER",
+                    resource_id=getattr(request, "path", "/api/v2/"),
+                    status=AuditActionStatus.DENIED,
+                    metadata_json={"description": exc.message_en, "attempted_path": getattr(request, "path", "")},
+                    before_state={"attempted_path": getattr(request, "path", "")},
+                    after_state={"error_code": exc.error_code},
+                )
+            except Exception as audit_err:
+                logger.warning("Failed to record cross-tenant audit log: %s", audit_err)
+
         payload = exc.to_payload().to_dict()
         payload["success"] = False
         payload["code"] = exc.error_code
+        payload["error_code"] = exc.error_code
         payload["request_id"] = correlation_id
         payload["correlation_id"] = correlation_id
         payload["message"] = exc.message_en
+        payload["message_en"] = exc.message_en
+        payload["message_bn"] = exc.message_bn
         payload["retryable"] = exc.is_retryable
+        payload["is_retryable"] = exc.is_retryable
         payload["details"] = exc.field_errors
+        payload["field_errors"] = exc.field_errors
         return Response(payload, status=exc.http_status)
 
     # 2. DRF or Django Validation Errors
@@ -521,7 +721,7 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
             "message": "The requested resource was not found.",
             "message_en": "The requested resource was not found.",
             "message_bn": "অনুরোধকৃত রিসোর্সটি খুঁজে পাওয়া যায়নি।",
-            "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+            "recovery_action": RecoveryAction.CORRECT_INPUT_FIELDS.value,
             "field_errors": {},
             "details": {"error": str(exc)},
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
@@ -573,15 +773,75 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
         res["Retry-After"] = str(wait_seconds)
         return res
 
-    # 8. Let default DRF handler process any unhandled exceptions, then standardize
+    # 8. Database Integrity Constraint Violations (409 Conflict)
+    if isinstance(exc, DjangoIntegrityError):
+        logger.error(
+            "Database integrity constraint violated in API: %s",
+            exc,
+            exc_info=True,
+            extra={"correlation_id": correlation_id},
+        )
+        payload = {
+            "success": False,
+            "error_code": "ERR_DATABASE_INTEGRITY",
+            "code": "ERR_DATABASE_INTEGRITY",
+            "request_id": correlation_id,
+            "correlation_id": correlation_id,
+            "http_status": 409,
+            "is_retryable": False,
+            "retryable": False,
+            "message": "A database integrity constraint or duplicate record conflict occurred.",
+            "message_en": "A database integrity constraint or duplicate record conflict occurred.",
+            "message_bn": "একটি ডেটাবেজ ইন্টিগ্রিটি বা ডুপ্লিকেট রেকর্ড দ্বন্দ্ব তৈরি হয়েছে।",
+            "recovery_action": RecoveryAction.CORRECT_INPUT_FIELDS.value,
+            "field_errors": {},
+            "details": {},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        return Response(payload, status=status.HTTP_409_CONFLICT)
+
+    # 9. Database Operational or Connection Errors (503 Service Unavailable)
+    if isinstance(exc, (DjangoOperationalError, DjangoDatabaseError)):
+        logger.error(
+            "Database operational error in API: %s",
+            exc,
+            exc_info=True,
+            extra={"correlation_id": correlation_id},
+        )
+        payload = {
+            "success": False,
+            "error_code": "ERR_DATABASE_UNAVAILABLE",
+            "code": "ERR_DATABASE_UNAVAILABLE",
+            "request_id": correlation_id,
+            "correlation_id": correlation_id,
+            "http_status": 503,
+            "is_retryable": True,
+            "retryable": True,
+            "message": "Database service is temporarily unavailable or locked. Safe to retry.",
+            "message_en": "Database service is temporarily unavailable or locked. Safe to retry.",
+            "message_bn": "ডেটাবেজ সেবা সাময়িকভাবে অনুপলব্ধ বা লক করা আছে। কিছুক্ষণ পর পুনরায় চেষ্টা করুন।",
+            "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+            "field_errors": {},
+            "details": {},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        return Response(payload, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    # 10. Let default DRF handler process any remaining built-in exceptions, then standardize
     response = exception_handler(exc, context)
     if response is not None and isinstance(response.data, dict):
         if "error_code" not in response.data and "code" not in response.data:
             detail_val = response.data.get("detail", str(exc))
+            err_code = "ERR_HTTP_EXCEPTION"
+            if response.status_code == 400:
+                err_code = "ERR_BAD_REQUEST"
+            elif response.status_code == 415:
+                err_code = "ERR_UNSUPPORTED_MEDIA_TYPE"
+
             response.data = {
                 "success": False,
-                "error_code": "ERR_HTTP_EXCEPTION",
-                "code": "ERR_HTTP_EXCEPTION",
+                "error_code": err_code,
+                "code": err_code,
                 "request_id": correlation_id,
                 "correlation_id": correlation_id,
                 "http_status": response.status_code,
@@ -589,10 +849,120 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
                 "retryable": False,
                 "message": str(detail_val),
                 "message_en": str(detail_val),
-                "message_bn": "একটি অপ্রত্যাশিত ত্রুটি ঘটেছে।",
-                "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+                "message_bn": "অনুরোধটি প্রক্রিয়াকরণ করা সম্ভব হয়নি।",
+                "recovery_action": RecoveryAction.CORRECT_INPUT_FIELDS.value,
                 "field_errors": {},
                 "details": response.data,
                 "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
             }
-    return response
+        return response
+
+    # 11. Unhandled Server Exception (500 Internal Server Error)
+    logger.error(
+        "Unhandled API exception caught by custom_drf_exception_handler: %s",
+        exc,
+        exc_info=True,
+        extra={"correlation_id": correlation_id},
+    )
+    fallback_payload = {
+        "success": False,
+        "error_code": "ERR_INTERNAL_SERVER_ERROR",
+        "code": "ERR_INTERNAL_SERVER_ERROR",
+        "request_id": correlation_id,
+        "correlation_id": correlation_id,
+        "http_status": 500,
+        "is_retryable": False,
+        "retryable": False,
+        "message": "An internal server error occurred. Please contact support with the request ID.",
+        "message_en": "An internal server error occurred. Please contact support with the request ID.",
+        "message_bn": "একটি অভ্যন্তরীণ সমস্যা দেখা দিয়েছে। অনুগ্রহ করে রিকোয়েস্ট আইডি সহ সাপোর্ট টিমের সাথে যোগাযোগ করুন।",
+        "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+        "field_errors": {},
+        "details": {},
+        "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+    return Response(fallback_payload, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def global_handler404(request, exception=None):
+    """
+    Root 404 URL handler for Django.
+    Returns standardized JSON error envelope for /api/ routes, or standard 404 for web assets.
+    """
+    from django.http import JsonResponse
+
+    cid = (
+        getattr(request, "request_id", "")
+        or request.META.get("HTTP_X_REQUEST_ID")
+        or request.META.get("HTTP_X_CORRELATION_ID")
+        or f"req-{uuid.uuid4()}"
+    )
+
+    if request.path.startswith("/api/") or "application/json" in request.META.get("HTTP_ACCEPT", ""):
+        payload = {
+            "success": False,
+            "error_code": "ERR_RESOURCE_NOT_FOUND",
+            "code": "ERR_RESOURCE_NOT_FOUND",
+            "request_id": cid,
+            "correlation_id": cid,
+            "http_status": 404,
+            "is_retryable": False,
+            "retryable": False,
+            "message": "The requested API endpoint was not found.",
+            "message_en": "The requested API endpoint was not found.",
+            "message_bn": "অনুরোধকৃত এপিআই এন্ডপয়েন্টটি খুঁজে পাওয়া যায়নি।",
+            "recovery_action": RecoveryAction.CORRECT_INPUT_FIELDS.value,
+            "field_errors": {},
+            "details": {"path": request.path},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        resp = JsonResponse(payload, status=404)
+        resp["X-Request-ID"] = cid
+        resp["X-Correlation-ID"] = cid
+        return resp
+
+    from django.views.defaults import page_not_found
+
+    return page_not_found(request, exception)
+
+
+def global_handler500(request):
+    """
+    Root 500 URL handler for Django.
+    Returns standardized, sanitized JSON error envelope for /api/ routes, preventing HTML traceback leaks.
+    """
+    from django.http import JsonResponse
+
+    cid = (
+        getattr(request, "request_id", "")
+        or request.META.get("HTTP_X_REQUEST_ID")
+        or request.META.get("HTTP_X_CORRELATION_ID")
+        or f"req-{uuid.uuid4()}"
+    )
+
+    if request.path.startswith("/api/") or "application/json" in request.META.get("HTTP_ACCEPT", ""):
+        payload = {
+            "success": False,
+            "error_code": "ERR_INTERNAL_SERVER_ERROR",
+            "code": "ERR_INTERNAL_SERVER_ERROR",
+            "request_id": cid,
+            "correlation_id": cid,
+            "http_status": 500,
+            "is_retryable": False,
+            "retryable": False,
+            "message": "An internal server error occurred. Please contact support with the request ID.",
+            "message_en": "An internal server error occurred. Please contact support with the request ID.",
+            "message_bn": "একটি অভ্যন্তরীণ সমস্যা দেখা দিয়েছে। অনুগ্রহ করে রিকোয়েস্ট আইডি সহ সাপোর্ট টিমের সাথে যোগাযোগ করুন।",
+            "recovery_action": RecoveryAction.RETRY_AFTER_BACKOFF.value,
+            "field_errors": {},
+            "details": {},
+            "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
+        }
+        resp = JsonResponse(payload, status=500)
+        resp["X-Request-ID"] = cid
+        resp["X-Correlation-ID"] = cid
+        return resp
+
+    from django.views.defaults import server_error
+
+    return server_error(request)
