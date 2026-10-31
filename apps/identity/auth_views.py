@@ -1,14 +1,17 @@
 """
 apps.identity.auth_views
-Architecture Decision: ADR-0043
-REST ViewSets for Authentication, JWT Token Lifecycle, Profile, and Password Reset.
+Architecture Decision: ADR-0043 & ADR-0044
+REST ViewSets for Authentication, JWT Token Lifecycle, Multi-Factor Authentication (MFA),
+Profile, and Password Reset.
 """
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 from datetime import timedelta
 
+import pyotp
 from django.conf import settings
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
@@ -19,14 +22,22 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.identity.auth_backends import EmailOrPhoneModelBackend
 from apps.identity.models import (
+    MfaChallengeSession,
     PasswordResetToken,
     PharmacyUser,
+    UserMfaDevice,
     normalize_bangladesh_phone,
 )
 from apps.identity.serializers import (
     LoginRequestSerializer,
     LoginResponseSerializer,
     LogoutRequestSerializer,
+    MfaActivateRequestSerializer,
+    MfaChallengeResponseSerializer,
+    MfaDisableRequestSerializer,
+    MfaSetupResponseSerializer,
+    MfaStatusResponseSerializer,
+    MfaVerifyRequestSerializer,
     PasswordResetConfirmSerializer,
     PasswordResetRequestSerializer,
     PharmacyUserSerializer,
@@ -77,8 +88,51 @@ class AuthenticationViewSet(viewsets.ViewSet):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
+        # Check if MFA is required (ADR-0044)
+        device = getattr(user, "mfa_device", None)
+        requires_mfa = user.mfa_enabled or (user.is_privileged and device is not None and device.is_confirmed)
+
+        if requires_mfa:
+            if device and device.is_locked_out():
+                return Response(
+                    {
+                        "error_code": "MFA_LOCKED_OUT",
+                        "message_en": "Too many failed MFA attempts. Account MFA verification locked for 15 minutes.",
+                        "message_bn": "অতিরিক্ত ভুল MFA চেষ্টার কারণে অ্যাকাউন্ট ১৫ মিনিটের জন্য সাময়িকভাবে লক করা হয়েছে।",
+                        "details": {
+                            "lockout_until": device.lockout_until.isoformat() if device.lockout_until else None,
+                            "failed_attempts": device.failed_attempts,
+                        },
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            challenge_token = secrets.token_urlsafe(32)
+            expires_at = timezone.now() + timedelta(minutes=5)
+            MfaChallengeSession.objects.create(
+                user=user,
+                challenge_token=challenge_token,
+                device_id=serializer.validated_data.get("device_id", "client-terminal"),
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:255],
+                expires_at=expires_at,
+            )
+
+            challenge_payload = {
+                "mfa_required": True,
+                "challenge_token": challenge_token,
+                "expires_in": 300,
+                "method": "TOTP",
+                "user_id": str(user.user_id),
+                "email": user.email,
+                "role": user.role,
+                "remaining_attempts": 5,
+            }
+            return Response(MfaChallengeResponseSerializer(challenge_payload).data, status=status.HTTP_200_OK)
+
         # Generate JWT tokens with tenant/role claims
         refresh = RefreshToken.for_user(user)
+        refresh["email"] = user.email
         refresh["tenant_id"] = user.tenant_id
         refresh["branch_id"] = user.branch_id
         refresh["role"] = user.role
@@ -325,6 +379,339 @@ class AuthenticationViewSet(viewsets.ViewSet):
                 "status": "SUCCESS",
                 "message_en": "Password has been reset successfully. Please log in with your new credentials.",
                 "message_bn": "পাসওয়ার্ড সফলভাবে পরিবর্তিত হয়েছে। অনুগ্রহ করে নতুন পাসওয়ার্ড দিয়ে লগইন করুন।",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="mfa/setup", permission_classes=[permissions.IsAuthenticated])
+    def mfa_setup(self, request):
+        """
+        Initiates RFC 6238 TOTP enrollment and provisions 8 single-use recovery codes.
+        """
+        user = request.user
+        secret = pyotp.random_base32()
+        raw_recovery_codes = [f"{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}" for _ in range(8)]
+        hashed_codes = [
+            {
+                "code_hash": hashlib.sha256(c.encode("utf-8")).hexdigest(),
+                "is_used": False,
+                "used_at": None,
+            }
+            for c in raw_recovery_codes
+        ]
+
+        UserMfaDevice.objects.update_or_create(
+            user=user,
+            defaults={
+                "secret_key": secret,
+                "is_confirmed": False,
+                "recovery_codes": hashed_codes,
+                "failed_attempts": 0,
+                "lockout_until": None,
+            },
+        )
+
+        totp = pyotp.TOTP(secret)
+        otpauth_uri = totp.provisioning_uri(name=user.email, issuer_name="PharmacySaasBD")
+
+        payload = {
+            "secret": secret,
+            "otpauth_uri": otpauth_uri,
+            "recovery_codes": raw_recovery_codes,
+            "issuer": "PharmacySaasBD",
+        }
+        return Response(MfaSetupResponseSerializer(payload).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path="mfa/activate", permission_classes=[permissions.IsAuthenticated])
+    def mfa_activate(self, request):
+        """
+        Validates TOTP code to confirm enrollment and activate MFA for user session.
+        """
+        serializer = MfaActivateRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "error_code": "INVALID_PAYLOAD",
+                    "message_en": "6-digit TOTP code is required.",
+                    "message_bn": "৬-সংখ্যার TOTP কোড আবশ্যক।",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user
+        device = getattr(user, "mfa_device", None)
+        if not device:
+            return Response(
+                {
+                    "error_code": "MFA_NOT_INITIALIZED",
+                    "message_en": "MFA setup has not been initiated. Call /mfa/setup/ first.",
+                    "message_bn": "MFA সেটআপ শুরু করা হয়নি। প্রথমে /mfa/setup/ কল করুন।",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        code = serializer.validated_data["code"]
+        totp = pyotp.TOTP(device.secret_key)
+        if not totp.verify(code, valid_window=1):
+            return Response(
+                {
+                    "error_code": "INVALID_TOTP_CODE",
+                    "message_en": "Invalid TOTP verification code.",
+                    "message_bn": "ভুল TOTP ভেরিফিকেশন কোড।",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        device.is_confirmed = True
+        device.failed_attempts = 0
+        device.lockout_until = None
+        device.save(update_fields=["is_confirmed", "failed_attempts", "lockout_until", "updated_at"])
+
+        user.mfa_enabled = True
+        user.save(update_fields=["mfa_enabled", "updated_at"])
+
+        return Response(
+            {
+                "status": "SUCCESS",
+                "message_en": "Multi-factor authentication activated successfully.",
+                "message_bn": "মাল্টি-ফ্যাক্টর অথেনটিকেশন সফলভাবে সক্রিয় করা হয়েছে।",
+                "mfa_enabled": True,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="mfa/verify", permission_classes=[permissions.AllowAny])
+    def mfa_verify(self, request):
+        """
+        Verifies login second-factor challenge using TOTP code or single-use recovery code.
+        Upon success, issues full JWT tokens conforming to AuthTokensPayload.
+        """
+        serializer = MfaVerifyRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "error_code": "INVALID_PAYLOAD",
+                    "message_en": "Challenge token and verification code are required.",
+                    "message_bn": "চ্যালেঞ্জ টোকেন এবং ভেরিফিকেশন কোড আবশ্যক।",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        challenge_token = serializer.validated_data["challenge_token"]
+        raw_code = serializer.validated_data["code"].strip()
+
+        challenge = MfaChallengeSession.objects.filter(challenge_token=challenge_token).first()
+        if not challenge:
+            return Response(
+                {
+                    "error_code": "INVALID_CHALLENGE",
+                    "message_en": "MFA challenge token is invalid or expired.",
+                    "message_bn": "MFA চ্যালেঞ্জ টোকেনটি অবৈধ বা মেয়াদোত্তীর্ণ।",
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if challenge.is_verified:
+            return Response(
+                {
+                    "error_code": "CHALLENGE_ALREADY_VERIFIED",
+                    "message_en": "MFA challenge token has already been verified.",
+                    "message_bn": "এই MFA চ্যালেঞ্জ টোকেনটি ইতোমধ্যে ব্যবহার করা হয়েছে।",
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        if timezone.now() > challenge.expires_at:
+            return Response(
+                {
+                    "error_code": "CHALLENGE_EXPIRED",
+                    "message_en": "MFA challenge token has expired. Please log in again.",
+                    "message_bn": "MFA চ্যালেঞ্জের সময় শেষ হয়েছে। দয়া করে পুনরায় লগইন করুন।",
+                },
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # Cross-tenant security boundary check
+        header_tenant = request.headers.get("X-Tenant-Id") or request.META.get("HTTP_X_TENANT_ID")
+        if header_tenant and header_tenant != challenge.user.tenant_id:
+            return Response(
+                {
+                    "error_code": "CROSS_TENANT_MFA_FORBIDDEN",
+                    "message_en": "Cross-tenant MFA challenge exchange is strictly forbidden.",
+                    "message_bn": "ক্রস-টেন্যান্ট MFA ভেরিফিকেশন কঠোরভাবে নিষিদ্ধ।",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        user = challenge.user
+        device = getattr(user, "mfa_device", None)
+
+        # Lockout check
+        if challenge.is_locked_out() or (device and device.is_locked_out()):
+            lockout_time = (
+                device.lockout_until.isoformat() if device and device.lockout_until else timezone.now().isoformat()
+            )
+            return Response(
+                {
+                    "error_code": "MFA_LOCKED_OUT",
+                    "message_en": "Too many failed MFA attempts. Account MFA verification locked for 15 minutes.",
+                    "message_bn": "অতিরিক্ত ভুল MFA চেষ্টার কারণে অ্যাকাউন্ট ১৫ মিনিটের জন্য সাময়িকভাবে লক করা হয়েছে।",
+                    "details": {"lockout_until": lockout_time, "failed_attempts": 5},
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        verified = False
+
+        if device and device.is_confirmed:
+            # 1. Try TOTP code
+            clean_digits = raw_code.replace(" ", "").replace("-", "")
+            if clean_digits.isdigit() and len(clean_digits) == 6:
+                totp = pyotp.TOTP(device.secret_key)
+                if totp.verify(clean_digits, valid_window=1):
+                    verified = True
+
+            # 2. Try single-use recovery code if not verified as TOTP
+            if not verified:
+                candidate_hash = hashlib.sha256(raw_code.upper().encode("utf-8")).hexdigest()
+                codes = list(device.recovery_codes)
+                for item in codes:
+                    if item.get("code_hash") == candidate_hash and not item.get("is_used", False):
+                        item["is_used"] = True
+                        item["used_at"] = timezone.now().isoformat()
+                        device.recovery_codes = codes
+                        device.save(update_fields=["recovery_codes", "updated_at"])
+                        verified = True
+                        break
+
+        if verified:
+            challenge.is_verified = True
+            challenge.save(update_fields=["is_verified"])
+
+            if device:
+                device.failed_attempts = 0
+                device.last_used_at = timezone.now()
+                device.save(update_fields=["failed_attempts", "last_used_at", "updated_at"])
+
+            # Issue full JWT tokens
+            refresh = RefreshToken.for_user(user)
+            refresh["email"] = user.email
+            refresh["tenant_id"] = user.tenant_id
+            refresh["branch_id"] = user.branch_id
+            refresh["role"] = user.role
+
+            access_token = str(refresh.access_token)
+            refresh_token = str(refresh)
+
+            response_payload = {
+                "access": access_token,
+                "refresh": refresh_token,
+                "token_type": "Bearer",
+                "expires_in": 900,
+                "user": PharmacyUserSerializer(user).data,
+            }
+            return Response(LoginResponseSerializer(response_payload).data, status=status.HTTP_200_OK)
+
+        # Verification failed -> Increment failure counter
+        challenge.failed_attempts += 1
+        challenge.save(update_fields=["failed_attempts"])
+
+        if device:
+            device.failed_attempts += 1
+            if device.failed_attempts >= 5:
+                device.lockout_until = timezone.now() + timedelta(minutes=15)
+            device.save(update_fields=["failed_attempts", "lockout_until", "updated_at"])
+
+        remaining = max(0, 5 - challenge.failed_attempts)
+        if remaining == 0:
+            return Response(
+                {
+                    "error_code": "MFA_LOCKED_OUT",
+                    "message_en": "Too many failed MFA attempts. Account MFA verification locked for 15 minutes.",
+                    "message_bn": "অতিরিক্ত ভুল MFA চেষ্টার কারণে অ্যাকাউন্ট ১৫ মিনিটের জন্য সাময়িকভাবে লক করা হয়েছে।",
+                    "details": {"remaining_attempts": 0, "failed_attempts": 5},
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        return Response(
+            {
+                "error_code": "INVALID_MFA_CODE",
+                "message_en": "Invalid MFA verification code.",
+                "message_bn": "ভুল MFA ভেরিফিকেশন কোড।",
+                "details": {"remaining_attempts": remaining},
+            },
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
+
+    @action(detail=False, methods=["get"], url_path="mfa/status", permission_classes=[permissions.IsAuthenticated])
+    def mfa_status(self, request):
+        """
+        Retrieves MFA security posture, mandatory status, and remaining recovery codes count.
+        """
+        user = request.user
+        device = getattr(user, "mfa_device", None)
+        payload = {
+            "mfa_enabled": user.mfa_enabled,
+            "is_mandatory": user.is_privileged,
+            "is_confirmed": bool(device and device.is_confirmed),
+            "remaining_recovery_codes": device.remaining_recovery_codes_count() if device else 0,
+            "enrolled_at": device.created_at if (device and device.is_confirmed) else None,
+        }
+        return Response(MfaStatusResponseSerializer(payload).data, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path="mfa/disable", permission_classes=[permissions.IsAuthenticated])
+    def mfa_disable(self, request):
+        """
+        Disables voluntary MFA for unprivileged users. Rejects privileged role opt-out.
+        """
+        user = request.user
+        if user.is_privileged:
+            return Response(
+                {
+                    "error_code": "MFA_MANDATORY_FOR_PRIVILEGED_ROLE",
+                    "message_en": "MFA is strictly mandatory for privileged roles and cannot be disabled.",
+                    "message_bn": "প্রিভিলেজড ব্যবহারকারীদের জন্য MFA বাধ্যতামূলক এবং এটি নিষ্ক্রিয় করা যাবে না।",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = MfaDisableRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(
+                {
+                    "error_code": "INVALID_PAYLOAD",
+                    "message_en": "Current password is required to disable MFA.",
+                    "message_bn": "MFA নিষ্ক্রিয় করতে বর্তমান পাসওয়ার্ড আবশ্যক।",
+                    "details": serializer.errors,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not user.check_password(serializer.validated_data["current_password"]):
+            return Response(
+                {
+                    "error_code": "INVALID_CREDENTIALS",
+                    "message_en": "Invalid current password.",
+                    "message_bn": "ভুল বর্তমান পাসওয়ার্ড।",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.mfa_enabled = False
+        user.save(update_fields=["mfa_enabled", "updated_at"])
+
+        if hasattr(user, "mfa_device"):
+            user.mfa_device.delete()
+
+        return Response(
+            {
+                "status": "SUCCESS",
+                "message_en": "MFA disabled successfully.",
+                "message_bn": "MFA সফলভাবে নিষ্ক্রিয় করা হয়েছে।",
+                "mfa_enabled": False,
             },
             status=status.HTTP_200_OK,
         )

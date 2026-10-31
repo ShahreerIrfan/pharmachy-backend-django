@@ -273,6 +273,82 @@ class PharmacyUser(AbstractBaseUser, PermissionsMixin):
         self.is_active = False
         self.save(update_fields=["activation_status", "is_active", "updated_at"])
 
+    @property
+    def is_privileged(self) -> bool:
+        """Indicates whether this role has elevated administrative authority requiring mandatory MFA (ADR-0044)."""
+        return self.is_superuser or self.role in {
+            UserRole.SUPERADMIN,
+            UserRole.PLATFORM_OPERATOR,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.FINANCE_OFFICER,
+        }
+
+
+class UserMfaDevice(models.Model):
+    """
+    RFC 6238 TOTP device configuration and hashed backup recovery codes.
+    Architecture Decision: ADR-0044
+    """
+
+    device_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(PharmacyUser, on_delete=models.CASCADE, related_name="mfa_device")
+    secret_key = models.CharField(max_length=64, help_text="Base32 TOTP secret key")
+    is_confirmed = models.BooleanField(default=False)
+    recovery_codes = models.JSONField(default=list, help_text="Hashed single-use recovery codes")
+    failed_attempts = models.PositiveIntegerField(default=0)
+    lockout_until = models.DateTimeField(null=True, blank=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "identity_user_mfa_devices"
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"MfaDevice for {self.user.email} (confirmed={self.is_confirmed})"
+
+    def is_locked_out(self) -> bool:
+        return bool(self.lockout_until and timezone.now() < self.lockout_until)
+
+    def remaining_recovery_codes_count(self) -> int:
+        return sum(1 for c in self.recovery_codes if not c.get("is_used", False))
+
+
+class MfaChallengeSession(models.Model):
+    """
+    Short-lived (5-minute) login challenge session for MFA verification.
+    Architecture Decision: ADR-0044
+    """
+
+    challenge_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(PharmacyUser, on_delete=models.CASCADE, related_name="mfa_challenges")
+    challenge_token = models.CharField(max_length=128, unique=True, db_index=True)
+    device_id = models.CharField(max_length=64, blank=True, default="")
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True, default="")
+    failed_attempts = models.PositiveIntegerField(default=0)
+    is_verified = models.BooleanField(default=False)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "identity_mfa_challenge_sessions"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["challenge_token", "is_verified"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"MfaChallenge-{self.challenge_id} for {self.user.email} (verified={self.is_verified})"
+
+    def is_valid(self) -> bool:
+        return not self.is_verified and timezone.now() < self.expires_at and self.failed_attempts < 5
+
+    def is_locked_out(self) -> bool:
+        return self.failed_attempts >= 5
+
 
 class PasswordResetToken(models.Model):
     """

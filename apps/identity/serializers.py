@@ -138,3 +138,55 @@ class PasswordResetRequestSerializer(serializers.Serializer):
 class PasswordResetConfirmSerializer(serializers.Serializer):
     reset_token = serializers.CharField(required=True, max_length=128)
     new_password = serializers.CharField(write_only=True, min_length=8, required=True)
+
+
+class MfaSetupResponseSerializer(serializers.Serializer):
+    """Serializes MFA enrollment initiation details (ADR-0044)."""
+
+    secret = serializers.CharField()
+    otpauth_uri = serializers.CharField()
+    recovery_codes = serializers.ListField(child=serializers.CharField())
+    issuer = serializers.CharField(default="PharmacySaasBD")
+
+
+class MfaActivateRequestSerializer(serializers.Serializer):
+    """Validates 6-digit TOTP verification code to confirm MFA activation."""
+
+    code = serializers.CharField(min_length=6, max_length=6, required=True)
+
+
+class MfaChallengeResponseSerializer(serializers.Serializer):
+    """Serializes login second-factor challenge conforming to mfa_challenge.schema.json."""
+
+    mfa_required = serializers.BooleanField(default=True)
+    challenge_token = serializers.CharField()
+    expires_in = serializers.IntegerField(default=300)
+    method = serializers.CharField(default="TOTP")
+    user_id = serializers.CharField()
+    email = serializers.EmailField()
+    role = serializers.CharField()
+    remaining_attempts = serializers.IntegerField(default=5)
+
+
+class MfaVerifyRequestSerializer(serializers.Serializer):
+    """Validates MFA verification request with TOTP code or backup recovery code."""
+
+    challenge_token = serializers.CharField(required=True, max_length=128)
+    code = serializers.CharField(required=True, max_length=32, help_text="6-digit TOTP code or recovery code")
+    device_id = serializers.CharField(required=False, default="client-terminal", max_length=64)
+
+
+class MfaStatusResponseSerializer(serializers.Serializer):
+    """Serializes user MFA security posture and recovery code telemetry."""
+
+    mfa_enabled = serializers.BooleanField()
+    is_mandatory = serializers.BooleanField()
+    is_confirmed = serializers.BooleanField()
+    remaining_recovery_codes = serializers.IntegerField()
+    enrolled_at = serializers.DateTimeField(allow_null=True)
+
+
+class MfaDisableRequestSerializer(serializers.Serializer):
+    """Validates password confirmation to disable voluntary MFA."""
+
+    current_password = serializers.CharField(write_only=True, required=True)
