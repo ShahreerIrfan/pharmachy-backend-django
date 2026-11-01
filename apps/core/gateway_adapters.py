@@ -303,3 +303,4 @@ class PaymentGatewayRegistry:
     @classmethod
     def register_adapter(cls, adapter: PaymentGatewayAdapter) -> None:
         cls._adapters[adapter.gateway_name.upper()] = adapter
+

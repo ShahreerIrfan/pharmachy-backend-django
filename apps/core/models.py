@@ -2050,3 +2050,89 @@ class TenantAppliedEntitlement(models.Model):
 
     def __str__(self) -> str:
         return f"{self.tenant_id} Entitlement [{self.plan_code} v{self.plan_version}] - Active: {self.is_active}"
+
+
+class SubscriptionUpgradeStatus(models.TextChoices):
+    QUOTED = "QUOTED", "Quoted (Pending Confirmation)"
+    PENDING_PAYMENT = "PENDING_PAYMENT", "Pending Payment"
+    COMPLETED = "COMPLETED", "Completed (Entitlements Applied)"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class SubscriptionUpgradeRecord(models.Model):
+    """
+    Immutable audit record for prorated subscription upgrades.
+    Architecture Decision: ADR-0090
+    Tracks proration mathematics, daily rates, unused credits, target fees,
+    transition timestamp, and immediate entitlement application.
+    """
+
+    upgrade_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="subscription_upgrades")
+    subscription = models.ForeignKey(SubscriptionRecord, on_delete=models.CASCADE, related_name="upgrades")
+    invoice = models.ForeignKey(
+        SubscriptionRenewalInvoice,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="upgrade_records",
+    )
+
+    from_plan_tier = models.CharField(max_length=32, choices=PlanTier.choices)
+    from_plan_code = models.CharField(max_length=32)
+    from_billing_cycle = models.CharField(max_length=32, default="MONTHLY")
+
+    to_plan_tier = models.CharField(max_length=32, choices=PlanTier.choices)
+    to_plan_code = models.CharField(max_length=32)
+    to_billing_cycle = models.CharField(max_length=32, default="MONTHLY")
+
+    transition_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    total_cycle_days = models.PositiveIntegerField(default=30)
+    used_days = models.PositiveIntegerField(default=0)
+    remaining_days = models.PositiveIntegerField(default=30)
+
+    current_plan_amount_bdt = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    current_plan_daily_rate_bdt = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0.0000"))
+    unused_credit_bdt = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+
+    target_plan_amount_bdt = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    target_plan_daily_rate_bdt = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0.0000"))
+    prorated_charge_bdt = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+
+    net_payable_bdt = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+
+    status = models.CharField(
+        max_length=32,
+        choices=SubscriptionUpgradeStatus.choices,
+        default=SubscriptionUpgradeStatus.QUOTED,
+        db_index=True,
+    )
+    payment_method = models.CharField(max_length=32, blank=True, default="")
+    payment_reference = models.CharField(max_length=128, blank=True, default="")
+
+    applied_entitlement = models.ForeignKey(
+        TenantAppliedEntitlement,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="originating_upgrade",
+    )
+
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    executed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Subscription Upgrade Record"
+        verbose_name_plural = "Subscription Upgrade Records"
+        indexes = [
+            models.Index(fields=["tenant", "-created_at"]),
+            models.Index(fields=["subscription", "-transition_at"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Upgrade {self.upgrade_id}: {self.from_plan_tier} -> {self.to_plan_tier} ({self.status}) BDT {self.net_payable_bdt}"
+
