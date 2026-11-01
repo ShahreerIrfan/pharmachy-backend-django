@@ -762,6 +762,34 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.TENANT,
         min_plan=PlanTier.BASIC,
     ),
+    # 19. Cross-Tenant Metrics Safe Aggregation & Tenant Benchmarks (ADR-0075)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/cross-tenant-metrics/(?:[^/]+/(?:publish|archive)/?)?$",
+        method="GET",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/cross-tenant-metrics/(?:[^/]+/(?:publish|archive)/?)?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    # Tenant-Scoped Safe Platform Benchmarks (ADR-0075)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/analytics/platform-benchmarks/?$",
+        method="GET",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PLATFORM_OPERATOR,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+        ],
+        scope=ScopeLevel.TENANT,
+        min_plan=PlanTier.BASIC,
+    ),
 ]
 
 

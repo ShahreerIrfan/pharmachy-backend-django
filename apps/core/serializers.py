@@ -17,6 +17,7 @@ from apps.core.models import (
     BatchStock,
     Branch,
     ComplianceReminder,
+    CrossTenantMetricsSnapshot,
     DailyBranchAnalytics,
     MedicineProduct,
     PaymentMethod,
@@ -833,4 +834,52 @@ class TenantDeletionRequestSerializer(serializers.ModelSerializer):
             "assessed_at",
             "confirmed_at",
             "purged_at",
+        ]
+
+
+class CrossTenantMetricsSnapshotSerializer(serializers.ModelSerializer):
+    """
+    Architecture Decision: ADR-0075
+    Serializer for cross-tenant aggregated telemetry snapshots.
+    """
+
+    generated_by = serializers.CharField(source="generated_by.username", read_only=True)
+
+    class Meta:
+        model = CrossTenantMetricsSnapshot
+        fields = [
+            "snapshot_id",
+            "metric_period",
+            "start_date",
+            "end_date",
+            "status",
+            "total_active_tenants",
+            "contributing_tenants_count",
+            "min_cohort_threshold",
+            "privacy_filter_applied",
+            "clinical_metrics",
+            "financial_metrics",
+            "operational_metrics",
+            "cohort_breakdowns",
+            "generated_by",
+            "published_at",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "snapshot_id",
+            "status",
+            "total_active_tenants",
+            "contributing_tenants_count",
+            "min_cohort_threshold",
+            "privacy_filter_applied",
+            "clinical_metrics",
+            "financial_metrics",
+            "operational_metrics",
+            "cohort_breakdowns",
+            "generated_by",
+            "published_at",
+            "created_at",
+            "updated_at",
         ]

@@ -13,6 +13,10 @@ from rest_framework.routers import DefaultRouter
 
 from apps.audit_logging.views import AuditLogEntryViewSet
 from apps.build_pipeline.views import BuildSmokeViewSet
+from apps.core.cross_tenant_metrics_views import (
+    PlatformCrossTenantMetricsViewSet,
+    TenantPlatformBenchmarksViewSet,
+)
 from apps.core.feature_flag_views import (
     PlatformFeatureFlagViewSet,
     TenantFeatureFlagEvaluationViewSet,
@@ -89,6 +93,7 @@ router.register("products", MedicineProductViewSet, basename="product")
 router.register("batches", BatchStockViewSet, basename="batch")
 router.register("invoices", SaleInvoiceViewSet, basename="invoice")
 router.register("async-jobs", AsyncJobRecordViewSet, basename="async-job")
+router.register("analytics/platform-benchmarks", TenantPlatformBenchmarksViewSet, basename="tenant-platform-benchmarks")
 router.register("analytics", DailyBranchAnalyticsViewSet, basename="analytics")
 router.register("compliance-reminders", ComplianceReminderViewSet, basename="compliance-reminder")
 router.register("subscriptions", SubscriptionRecordViewSet, basename="subscription")
@@ -125,6 +130,9 @@ router.register("platform/feature-flags", PlatformFeatureFlagViewSet, basename="
 router.register("platform/data-exports", PlatformDataExportAdminViewSet, basename="platform-data-exports")
 router.register(
     "platform/deletion-assessments", PlatformDeletionAssessmentViewSet, basename="platform-deletion-assessments"
+)
+router.register(
+    "platform/cross-tenant-metrics", PlatformCrossTenantMetricsViewSet, basename="platform-cross-tenant-metrics"
 )
 
 

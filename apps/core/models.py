@@ -1351,3 +1351,73 @@ class TenantDeletionRequest(models.Model):
 
     def __str__(self) -> str:
         return f"{self.request_id} [{self.tenant_id}] ({self.status})"
+
+
+class CrossTenantMetricPeriod(models.TextChoices):
+    DAILY = "DAILY", "Daily"
+    WEEKLY = "WEEKLY", "Weekly"
+    MONTHLY = "MONTHLY", "Monthly"
+    QUARTERLY = "QUARTERLY", "Quarterly"
+    ANNUAL = "ANNUAL", "Annual"
+
+
+class CrossTenantMetricStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    PUBLISHED = "PUBLISHED", "Published"
+    SUPPRESSED = "SUPPRESSED", "Suppressed"
+    ARCHIVED = "ARCHIVED", "Archived"
+
+
+class CrossTenantMetricsSnapshot(models.Model):
+    """
+    Architecture Decision: ADR-0075
+    Immutable, privacy-preserving cross-tenant aggregated telemetry snapshot.
+    Enforces k-anonymity (min_cohort_threshold) and differential privacy.
+    Strictly excludes all patient PHI/PII and tenant confidential raw microdata.
+    """
+
+    snapshot_id = models.CharField(max_length=64, primary_key=True)
+    metric_period = models.CharField(
+        max_length=16,
+        choices=CrossTenantMetricPeriod.choices,
+        default=CrossTenantMetricPeriod.MONTHLY,
+    )
+    start_date = models.DateField()
+    end_date = models.DateField()
+    status = models.CharField(
+        max_length=16,
+        choices=CrossTenantMetricStatus.choices,
+        default=CrossTenantMetricStatus.DRAFT,
+    )
+    total_active_tenants = models.PositiveIntegerField(default=0)
+    contributing_tenants_count = models.PositiveIntegerField(default=0)
+    min_cohort_threshold = models.PositiveIntegerField(default=3)
+    privacy_filter_applied = models.BooleanField(default=True)
+    clinical_metrics = models.JSONField(default=dict, blank=True)
+    financial_metrics = models.JSONField(default=dict, blank=True)
+    operational_metrics = models.JSONField(default=dict, blank=True)
+    cohort_breakdowns = models.JSONField(default=list, blank=True)
+    generated_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="generated_metric_snapshots",
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True, default="")
+    audit_metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Cross-Tenant Metrics Snapshot"
+        verbose_name_plural = "Cross-Tenant Metrics Snapshots"
+        indexes = [
+            models.Index(fields=["metric_period", "start_date", "end_date"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.snapshot_id} [{self.metric_period}: {self.start_date} to {self.end_date}] ({self.status})"
