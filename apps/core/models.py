@@ -2375,3 +2375,48 @@ class LapsedSubscriptionHoldQueue(models.Model):
 
     def __str__(self) -> str:
         return f"HoldEvent {self.hold_id}: {self.event_type} ({self.financial_total_bdt} BDT) [{self.hold_status}]"
+
+
+class QuotaResourceType(models.TextChoices):
+    BRANCHES = "BRANCHES", "Active Pharmacy Branches"
+    STAFF_SEATS = "STAFF_SEATS", "Staff User Seats"
+    DEVICES = "DEVICES", "POS Devices / Terminals"
+    PREMIUM_FEATURE = "PREMIUM_FEATURE", "Premium Feature Usage"
+
+
+class TenantQuotaUsageCounter(models.Model):
+    """
+    Authoritative usage counter with row-level locking for concurrency race prevention.
+    Architecture Decision: ADR-0095
+    Requirement Trace: FR-070, FR-071, FR-072 (SaaS Plans, Billing and Tenant Lifecycle)
+
+    Maintains row-locked transactional counters for branches, staff seats, and devices.
+    Prevents race-induced over-consumption during simultaneous requests.
+    """
+
+    counter_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="quota_counters")
+    resource_type = models.CharField(
+        max_length=64,
+        choices=QuotaResourceType.choices,
+        default=QuotaResourceType.BRANCHES,
+    )
+    current_used = models.PositiveIntegerField(default=0)
+    max_limit = models.PositiveIntegerField(default=1)
+    reserved = models.PositiveIntegerField(default=0)
+    version = models.PositiveIntegerField(default=1)
+    last_calculated_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["tenant", "resource_type"]
+        verbose_name = "Tenant Quota Usage Counter"
+        verbose_name_plural = "Tenant Quota Usage Counters"
+        unique_together = ("tenant", "resource_type")
+        indexes = [
+            models.Index(fields=["tenant", "resource_type"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.tenant_id} - {self.resource_type}: {self.current_used}/{self.max_limit} (v{self.version})"

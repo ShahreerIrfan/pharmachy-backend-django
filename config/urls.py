@@ -44,6 +44,7 @@ from apps.core.downgrade_views import SubscriptionDowngradeViewSet
 from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
 from apps.core.offline_lapse_views import LapsedPlanReconciliationViewSet
+from apps.core.quota_counter_views import TenantQuotaUsageViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -180,6 +181,7 @@ router.register("billing/downgrade", SubscriptionDowngradeViewSet, basename="bil
 router.register("billing/lifecycle", SubscriptionLifecycleViewSet, basename="billing-lifecycle")
 router.register("billing/offline-leases", OfflineEntitlementViewSet, basename="billing-offline-leases")
 router.register("billing/offline-reconciliation", LapsedPlanReconciliationViewSet, basename="billing-offline-reconciliation")
+router.register("billing/quota-usage", TenantQuotaUsageViewSet, basename="billing-quota-usage")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
