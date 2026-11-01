@@ -13,6 +13,10 @@ from rest_framework.routers import DefaultRouter
 
 from apps.audit_logging.views import AuditLogEntryViewSet
 from apps.build_pipeline.views import BuildSmokeViewSet
+from apps.core.feature_flag_views import (
+    PlatformFeatureFlagViewSet,
+    TenantFeatureFlagEvaluationViewSet,
+)
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
@@ -22,9 +26,9 @@ from apps.core.support_ticket_views import (
     PlatformSupportTicketViewSet,
     TenantSupportTicketViewSet,
 )
-from apps.core.feature_flag_views import (
-    PlatformFeatureFlagViewSet,
-    TenantFeatureFlagEvaluationViewSet,
+from apps.core.tenant_deletion_views import (
+    PlatformDeletionAssessmentViewSet,
+    TenantDeletionRequestViewSet,
 )
 from apps.core.tenant_export_views import (
     PlatformDataExportAdminViewSet,
@@ -77,6 +81,7 @@ router.register("tenants/support-access", TenantSupportAccessViewSet, basename="
 router.register("tenants/support/tickets", TenantSupportTicketViewSet, basename="tenant-support-tickets")
 router.register("tenants/feature-flags", TenantFeatureFlagEvaluationViewSet, basename="tenant-feature-flags")
 router.register("tenants/data-exports", TenantDataExportViewSet, basename="tenant-data-exports")
+router.register("tenants/deletion-requests", TenantDeletionRequestViewSet, basename="tenant-deletion-requests")
 router.register("tenants", TenantViewSet, basename="tenant")
 router.register("branches", BranchViewSet, basename="branch")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
@@ -118,6 +123,9 @@ router.register("platform/support-access", PlatformSupportAccessViewSet, basenam
 router.register("platform/support/tickets", PlatformSupportTicketViewSet, basename="platform-support-tickets")
 router.register("platform/feature-flags", PlatformFeatureFlagViewSet, basename="platform-feature-flags")
 router.register("platform/data-exports", PlatformDataExportAdminViewSet, basename="platform-data-exports")
+router.register(
+    "platform/deletion-assessments", PlatformDeletionAssessmentViewSet, basename="platform-deletion-assessments"
+)
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

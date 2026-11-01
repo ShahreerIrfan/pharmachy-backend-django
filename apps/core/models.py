@@ -1278,3 +1278,76 @@ class TenantDataExportRequest(models.Model):
 
     def __str__(self) -> str:
         return f"{self.export_id} [{self.tenant_id}] ({self.status})"
+
+
+class TenantDeletionStatus(models.TextChoices):
+    SUBMITTED = "SUBMITTED", "Submitted"
+    UNDER_REVIEW = "UNDER_REVIEW", "Under Review"
+    HOLD_ACTIVE = "HOLD_ACTIVE", "Hold Active"
+    ELIGIBLE_FOR_PURGE = "ELIGIBLE_FOR_PURGE", "Eligible for Purge"
+    CONFIRMED = "CONFIRMED", "Confirmed"
+    PURGED = "PURGED", "Purged"
+    REJECTED = "REJECTED", "Rejected"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class TenantDeletionRequest(models.Model):
+    """
+    Architecture Decision: ADR-0074
+    Governed tenant deletion request, statutory retention hold assessment,
+    multi-step confirmation, and purge metadata.
+    """
+
+    request_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="deletion_requests")
+    status = models.CharField(
+        max_length=32,
+        choices=TenantDeletionStatus.choices,
+        default=TenantDeletionStatus.SUBMITTED,
+        db_index=True,
+    )
+    reason = models.TextField(help_text="Operational or regulatory justification for tenant deletion")
+    has_active_holds = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True if DGDA clinical or financial tax retention holds block physical deletion",
+    )
+    active_holds_summary = models.JSONField(default=dict, blank=True)
+    hold_statutory_horizon_days = models.PositiveIntegerField(
+        default=730,
+        help_text="Statutory retention horizon in days (e.g. 730d Rx, 1825d controlled)",
+    )
+    confirmation_code = models.CharField(max_length=32, blank=True, default="")
+    confirmation_text = models.CharField(max_length=128, blank=True, default="")
+    rejection_reason = models.TextField(blank=True, default="")
+    requested_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="requested_tenant_deletions",
+    )
+    assessed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assessed_tenant_deletions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    assessed_at = models.DateTimeField(null=True, blank=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    purged_at = models.DateTimeField(null=True, blank=True)
+    audit_metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Tenant Deletion Request"
+        verbose_name_plural = "Tenant Deletion Requests"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.request_id} [{self.tenant_id}] ({self.status})"

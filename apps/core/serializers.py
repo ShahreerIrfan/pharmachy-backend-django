@@ -30,6 +30,7 @@ from apps.core.models import (
     SubscriptionRecord,
     Tenant,
     TenantDataExportRequest,
+    TenantDeletionRequest,
     TenantFeatureFlagOverride,
     TenantMedicineConfig,
 )
@@ -791,3 +792,45 @@ class TenantDataExportRequestSerializer(serializers.ModelSerializer):
         if obj.status == "COMPLETED" and obj.download_token:
             return f"/api/v2/tenants/data-exports/{obj.export_id}/download/?token={obj.download_token}"
         return None
+
+
+class TenantDeletionRequestSerializer(serializers.ModelSerializer):
+    tenant_id = serializers.CharField(source="tenant.tenant_id", read_only=True)
+
+    class Meta:
+        model = TenantDeletionRequest
+        fields = [
+            "request_id",
+            "tenant_id",
+            "status",
+            "reason",
+            "has_active_holds",
+            "active_holds_summary",
+            "hold_statutory_horizon_days",
+            "confirmation_code",
+            "confirmation_text",
+            "rejection_reason",
+            "requested_by",
+            "assessed_by",
+            "created_at",
+            "assessed_at",
+            "confirmed_at",
+            "purged_at",
+        ]
+        read_only_fields = [
+            "request_id",
+            "tenant_id",
+            "status",
+            "has_active_holds",
+            "active_holds_summary",
+            "hold_statutory_horizon_days",
+            "confirmation_code",
+            "confirmation_text",
+            "rejection_reason",
+            "requested_by",
+            "assessed_by",
+            "created_at",
+            "assessed_at",
+            "confirmed_at",
+            "purged_at",
+        ]
