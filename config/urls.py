@@ -38,6 +38,7 @@ from apps.core.subscription_views import SubscriptionViewSet
 from apps.core.trial_policy_views import TrialPolicyViewSet
 from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
 from apps.core.manual_payment_views import ManualPaymentClaimViewSet
+from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -168,6 +169,7 @@ router.register("billing/subscriptions", SubscriptionViewSet, basename="billing-
 router.register("billing/trial", TrialPolicyViewSet, basename="billing-trial")
 router.register("billing/invoices", RenewalInvoiceViewSet, basename="billing-invoices")
 router.register("billing/payment-claims", ManualPaymentClaimViewSet, basename="billing-payment-claims")
+router.register("billing/gateway", PaymentGatewayViewSet, basename="billing-gateway")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

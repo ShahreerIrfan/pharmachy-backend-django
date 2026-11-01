@@ -341,3 +341,4 @@ class ManualPaymentService:
             "verified_at": claim.verified_at.isoformat() if claim.verified_at else None,
             "activation_outcomes": claim.activation_outcomes_json or None,
         }
+

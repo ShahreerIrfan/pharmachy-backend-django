@@ -305,3 +305,4 @@ class ManualPaymentClaimViewSet(viewsets.ViewSet):
                 {"success": False, "error_code": "ERR_PAYMENT_CANCEL_FAILED", "message": msg},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+

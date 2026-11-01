@@ -985,6 +985,59 @@ class ManualPaymentClaim(models.Model):
         return f"{self.claim_number} [{self.tenant.tenant_id}] - {self.claimed_amount_bdt} BDT ({self.status})"
 
 
+class PaymentGatewayName(models.TextChoices):
+    BKASH = "BKASH", "bKash"
+    NAGAD = "NAGAD", "Nagad"
+    SSLCOMMERZ = "SSLCOMMERZ", "SSLCommerz"
+    MOCK_GATEWAY = "MOCK_GATEWAY", "Mock Gateway"
+
+
+class GatewayWebhookStatus(models.TextChoices):
+    RECEIVED = "RECEIVED", "Received"
+    PROCESSED = "PROCESSED", "Processed"
+    DUPLICATE = "DUPLICATE", "Duplicate"
+    FAILED = "FAILED", "Failed"
+    SIGNATURE_INVALID = "SIGNATURE_INVALID", "Signature Invalid"
+
+
+class PaymentGatewayWebhookLog(models.Model):
+    """
+    Architecture Decision: ADR-0015, ADR-0033 & ADR-0089
+    Immutable log of incoming payment gateway webhooks, signed verification,
+    and idempotent deduplication. NO payment secrets are stored here.
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    gateway_name = models.CharField(max_length=32, choices=PaymentGatewayName.choices, default=PaymentGatewayName.BKASH)
+    event_type = models.CharField(max_length=64, default="PAYMENT_COMPLETED", db_index=True)
+    idempotency_key = models.CharField(max_length=128, db_index=True)
+    gateway_payment_id = models.CharField(max_length=128, db_index=True)
+    invoice_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.SET_NULL, null=True, blank=True, related_name="gateway_webhook_logs")
+    amount_bdt = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    currency = models.CharField(max_length=8, default="BDT")
+    payload_hash = models.CharField(max_length=64)
+    payload_json = models.JSONField(default=dict, blank=True)
+    status = models.CharField(max_length=32, choices=GatewayWebhookStatus.choices, default=GatewayWebhookStatus.RECEIVED, db_index=True)
+    signature_verified = models.BooleanField(default=False)
+    error_message = models.TextField(blank=True, default="")
+    processed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Payment Gateway Webhook Log"
+        verbose_name_plural = "Payment Gateway Webhook Logs"
+        indexes = [
+            models.Index(fields=["gateway_name", "idempotency_key"]),
+            models.Index(fields=["gateway_payment_id", "status"]),
+            models.Index(fields=["invoice_number", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.gateway_name}:{self.event_type} [{self.gateway_payment_id}] - {self.status}"
+
+
 class StaffRole(models.TextChoices):
     PLATFORM_SUPER_ADMIN = "PLATFORM_SUPER_ADMIN", "Platform Super Admin"
     TENANT_OWNER = "TENANT_OWNER", "Tenant Owner"
