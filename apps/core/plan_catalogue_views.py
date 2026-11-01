@@ -25,6 +25,7 @@ from apps.core.plan_catalogue_service import PlanCatalogueService
 from apps.core.serializers import (
     ApplyPlanRequestSerializer,
     PlanCatalogueRecordSerializer,
+    PlanQuoteRequestSerializer,
 )
 
 logger = logging.getLogger("pharmacy.billing.views")
@@ -101,6 +102,73 @@ class PlanCatalogueViewSet(viewsets.ViewSet):
                 "data": serializer.data,
             },
             status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=["get"], url_path="comparison", permission_classes=[permissions.AllowAny])
+    def comparison(self, request):
+        """
+        Public comparison matrix for Basic, Standard, and Pro plans (ADR-0083).
+        Includes annual savings breakdown, usage quotas, and guaranteed clinical safety features.
+        """
+        matrix = PlanCatalogueService.get_plan_comparison_matrix()
+        return Response(
+            {
+                "success": True,
+                "data": matrix,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="quote", permission_classes=[permissions.IsAuthenticated])
+    def quote(self, request):
+        """
+        Calculates checkout quote, savings, and validates quota compliance for a tenant (ADR-0083).
+        Enforces tenant owner RBAC and cross-tenant isolation.
+        """
+        serializer = PlanQuoteRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        tenant_id = data["tenant_id"]
+
+        # Enforce Tenant Access & Owner Role
+        user = request.user
+        if not _is_platform_superadmin(user):
+            user_tenant_id = getattr(user, "tenant_id", None)
+            if hasattr(user, "tenant") and user.tenant:
+                user_tenant_id = getattr(user.tenant, "tenant_id", user_tenant_id)
+
+            if not user_tenant_id or str(user_tenant_id) != str(tenant_id):
+                raise CrossTenantViolationError(
+                    message_en=f"Tenant '{user_tenant_id}' cannot generate quotes for tenant '{tenant_id}'.",
+                    message_bn="অন্য ফার্মেসির জন্য প্ল্যান কোট তৈরি করার অনুমতি নেই।",
+                )
+
+            user_role = str(getattr(user, "role", "")).upper()
+            if user_role not in ["TENANT_OWNER", "OWNER", "PHARMACY_OWNER"]:
+                raise PermissionDenied(
+                    detail={
+                        "error_code": "ROLE_PERMISSION_DENIED",
+                        "message_en": "Only Tenant Owner or Platform Super Admin can generate checkout quotes.",
+                        "message_bn": "শুধুমাত্র ফার্মেসি ওনার বা সুপার অ্যাডমিন চেকআউট কোট তৈরি করতে পারেন।",
+                    }
+                )
+
+        try:
+            quote_data = PlanCatalogueService.calculate_plan_quote(
+                tenant_id=tenant_id,
+                plan_code=data["plan_code"],
+                billing_cycle=data.get("billing_cycle", "MONTHLY"),
+            )
+        except ValueError as err:
+            raise ValidationError(detail={"error": [str(err)]})
+
+        return Response(
+            {
+                "success": True,
+                "data": quote_data,
+            },
+            status=status.HTTP_200_OK,
         )
 
 

@@ -1207,3 +1207,11 @@ class ApplyPlanRequestSerializer(serializers.Serializer):
     plan_code = serializers.CharField(max_length=32)
     billing_cycle = serializers.ChoiceField(choices=["MONTHLY", "ANNUAL"], default="MONTHLY")
     notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class PlanQuoteRequestSerializer(serializers.Serializer):
+    """Input serializer for calculating a subscription plan quote before checkout (ADR-0083)."""
+
+    tenant_id = serializers.CharField(max_length=64)
+    plan_code = serializers.CharField(max_length=32)
+    billing_cycle = serializers.ChoiceField(choices=["MONTHLY", "ANNUAL"], default="MONTHLY")
