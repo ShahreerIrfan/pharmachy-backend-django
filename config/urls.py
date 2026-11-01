@@ -11,9 +11,9 @@ from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from rest_framework.routers import DefaultRouter
 
+from apps.audit_logging.platform_audit_views import PlatformAuditSearchViewSet
 from apps.audit_logging.views import AuditLogEntryViewSet
 from apps.build_pipeline.views import BuildSmokeViewSet
-from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.announcement_views import (
     PlatformAnnouncementViewSet,
     TenantAnnouncementViewSet,
@@ -27,6 +27,7 @@ from apps.core.feature_flag_views import (
     TenantFeatureFlagEvaluationViewSet,
 )
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
+from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -131,6 +132,7 @@ router.register("permissions/matrix", EndpointPermissionMatrixViewSet, basename=
 router.register("security/baseline", SecurityBaselineViewSet, basename="security-baseline")
 router.register("platform/announcements", PlatformAnnouncementViewSet, basename="platform-announcements")
 router.register("platform/access-policies", PlatformAccessPolicyViewSet, basename="platform-access-policies")
+router.register("platform/audit-search", PlatformAuditSearchViewSet, basename="platform-audit-search")
 router.register("platform/console", PlatformConsoleViewSet, basename="platform-console")
 router.register("platform/support-access", PlatformSupportAccessViewSet, basename="platform-support-access")
 router.register("platform/support/tickets", PlatformSupportTicketViewSet, basename="platform-support-tickets")

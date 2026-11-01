@@ -870,6 +870,29 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.GLOBAL,
         min_plan=PlanTier.BASIC,
     ),
+    # 22. Platform Admin Audit Search & Forbidden Payload Redaction (ADR-0078)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/audit-search/(?:export|[^/]+/)?$",
+        method="GET",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR, UserRole.PLATFORM_AUDITOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/audit-search/(?:export/)?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR, UserRole.PLATFORM_AUDITOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/audit-search/[^/]+/?$",
+        method="DELETE",
+        allowed_roles=[],
+        is_absolute_blocked=True,
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
 ]
 
 

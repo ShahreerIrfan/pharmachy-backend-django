@@ -9,6 +9,7 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from apps.audit_logging.models import AuditLogEntry
+from apps.audit_logging.redaction import SensitiveDataRedactor
 
 
 class AuditLogEntrySerializer(serializers.ModelSerializer):
@@ -69,3 +70,81 @@ class AuditLogQueryFilterSerializer(serializers.Serializer):
     resource_type = serializers.CharField(required=False, max_length=64)
     status = serializers.ChoiceField(choices=["SUCCESS", "DENIED", "ERROR"], required=False)
     limit = serializers.IntegerField(required=False, default=50, min_value=1, max_value=200)
+
+
+class SanitizedAuditLogEntrySerializer(serializers.ModelSerializer):
+    """
+    Architecture Decision: ADR-0078
+    Serializer ensuring zero exposure of forbidden payloads in search results.
+    """
+
+    before_state = serializers.SerializerMethodField()
+    after_state = serializers.SerializerMethodField()
+    metadata_json = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AuditLogEntry
+        fields = [
+            "entry_id",
+            "timestamp",
+            "tenant_id",
+            "branch_id",
+            "user_id",
+            "actor_email",
+            "actor_role",
+            "device_id",
+            "request_id",
+            "operation_id",
+            "action",
+            "resource_type",
+            "resource_id",
+            "status",
+            "before_state",
+            "after_state",
+            "retention_days",
+            "retention_until",
+            "is_immutable",
+            "ip_address",
+            "metadata_json",
+        ]
+        read_only_fields = fields
+
+    def get_before_state(self, obj):
+        if not obj.before_state:
+            return {}
+        return SensitiveDataRedactor.redact(obj.before_state)
+
+    def get_after_state(self, obj):
+        if not obj.after_state:
+            return {}
+        return SensitiveDataRedactor.redact(obj.after_state)
+
+    def get_metadata_json(self, obj):
+        if not obj.metadata_json:
+            return {}
+        return SensitiveDataRedactor.redact(obj.metadata_json)
+
+
+class PlatformAuditSearchFilterSerializer(serializers.Serializer):
+    """
+    Architecture Decision: ADR-0078
+    Validates criteria for platform-wide administrative audit searches.
+    """
+
+    actor = serializers.CharField(required=False, max_length=255, allow_blank=True, default="")
+    tenant = serializers.CharField(required=False, max_length=64, allow_blank=True, default="")
+    date_from = serializers.DateTimeField(required=False, allow_null=True, default=None)
+    date_to = serializers.DateTimeField(required=False, allow_null=True, default=None)
+    entity_type = serializers.CharField(required=False, max_length=64, allow_blank=True, default="")
+    entity_id = serializers.CharField(required=False, max_length=128, allow_blank=True, default="")
+    reason = serializers.CharField(required=False, max_length=255, allow_blank=True, default="")
+    status = serializers.ChoiceField(choices=["SUCCESS", "DENIED", "ERROR", "ALL"], required=False, default="ALL")
+    limit = serializers.IntegerField(required=False, default=50, min_value=1, max_value=200)
+    offset = serializers.IntegerField(required=False, default=0, min_value=0)
+
+    def validate(self, attrs):
+        d_from = attrs.get("date_from")
+        d_to = attrs.get("date_to")
+        if d_from and d_to and d_to < d_from:
+            raise serializers.ValidationError({"date_to": ["date_to must be equal to or after date_from."]})
+        return attrs
