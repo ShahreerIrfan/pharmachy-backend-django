@@ -18,6 +18,10 @@ from apps.core.announcement_views import (
     PlatformAnnouncementViewSet,
     TenantAnnouncementViewSet,
 )
+from apps.core.billing_report_views import (
+    PlatformBillingReportViewSet,
+    TenantBillingReportViewSet,
+)
 from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
 from apps.core.cross_tenant_metrics_views import (
     PlatformCrossTenantMetricsViewSet,
@@ -186,6 +190,10 @@ router.register("billing/offline-reconciliation", LapsedPlanReconciliationViewSe
 router.register("billing/quota-usage", TenantQuotaUsageViewSet, basename="billing-quota-usage")
 router.register("billing/devices", DeviceSeatViewSet, basename="billing-devices")
 router.register("billing/portal", SubscriptionCustomerPortalViewSet, basename="billing-portal")
+router.register("billing/reports", TenantBillingReportViewSet, basename="billing-reports")
+router.register(
+    "platform/billing-reports", PlatformBillingReportViewSet, basename="platform-billing-reports"
+)
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

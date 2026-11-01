@@ -2486,3 +2486,74 @@ class DeviceSeat(models.Model):
 
     def __str__(self) -> str:
         return f"{self.device_name} [{self.device_id}] ({self.status}) - {self.branch.name}"
+
+
+class BillingReportType(models.TextChoices):
+    FULL_SUMMARY = "FULL_SUMMARY", "Full Platform Summary"
+    MRR_CHURN = "MRR_CHURN", "MRR & Churn Report"
+    COLLECTIONS = "COLLECTIONS", "Verified Collections Report"
+    OUTSTANDING_INVOICES = "OUTSTANDING_INVOICES", "Outstanding Invoices & Aging Report"
+    SUBSCRIPTION_AUDIT = "SUBSCRIPTION_AUDIT", "Subscription Audit Trail Report"
+
+
+class BillingReportPeriod(models.TextChoices):
+    CURRENT = "CURRENT", "Current Month / Period"
+    MONTHLY = "MONTHLY", "Monthly"
+    QUARTERLY = "QUARTERLY", "Quarterly"
+    ANNUAL = "ANNUAL", "Annual"
+    CUSTOM = "CUSTOM", "Custom Date Range"
+
+
+class PlatformBillingReportSnapshot(models.Model):
+    """
+    Platform MRR, Churn, Collections, Outstanding Invoices, and Subscription Audit Snapshot.
+    Architecture Decision: ADR-0098
+    Requirement Trace: FR-044, FR-064, FR-066, FR-067, FR-074
+
+    Persists audited platform-wide billing aggregates calculated from verified billing records.
+    """
+
+    report_id = models.CharField(max_length=64, primary_key=True)
+    report_type = models.CharField(
+        max_length=32,
+        choices=BillingReportType.choices,
+        default=BillingReportType.FULL_SUMMARY,
+        db_index=True,
+    )
+    period = models.CharField(
+        max_length=16,
+        choices=BillingReportPeriod.choices,
+        default=BillingReportPeriod.CURRENT,
+        db_index=True,
+    )
+    start_date = models.DateField()
+    end_date = models.DateField()
+    currency = models.CharField(max_length=8, default="BDT")
+    total_mrr_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    total_arr_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    arpu_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    total_collected_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    total_outstanding_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    churn_rate_pct = models.DecimalField(max_digits=6, decimal_places=2, default=Decimal("0.00"))
+    active_subscriptions_count = models.PositiveIntegerField(default=0)
+    churned_subscriptions_count = models.PositiveIntegerField(default=0)
+    outstanding_invoices_count = models.PositiveIntegerField(default=0)
+    mrr_breakdown_json = models.JSONField(default=dict, blank=True)
+    churn_details_json = models.JSONField(default=dict, blank=True)
+    collections_breakdown_json = models.JSONField(default=dict, blank=True)
+    aging_brackets_json = models.JSONField(default=dict, blank=True)
+    audit_events_sample_json = models.JSONField(default=list, blank=True)
+    generated_by_user_id = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Platform Billing Report Snapshot"
+        verbose_name_plural = "Platform Billing Report Snapshots"
+        indexes = [
+            models.Index(fields=["report_type", "created_at"]),
+            models.Index(fields=["period", "start_date", "end_date"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.report_id} - {self.report_type} ({self.period}: {self.start_date} to {self.end_date})"
