@@ -739,6 +739,9 @@ class SubscriptionRecord(models.Model):
     renewal_date = models.DateField(db_index=True)
     grace_period_end_date = models.DateField(null=True, blank=True)
     is_auto_renew = models.BooleanField(default=True)
+    cancel_at_period_end = models.BooleanField(default=False)
+    cancellation_reason = models.TextField(blank=True, default="")
+    cancelled_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -2214,3 +2217,44 @@ class SubscriptionDowngradeRecord(models.Model):
 
     def __str__(self) -> str:
         return f"Downgrade {self.downgrade_id}: {self.from_plan_tier} -> {self.to_plan_tier} ({self.status})"
+
+
+class CancellationEffectiveMode(models.TextChoices):
+    END_OF_BILLING_PERIOD = "END_OF_BILLING_PERIOD", "End of Current Billing Period"
+    IMMEDIATE = "IMMEDIATE", "Immediate"
+
+
+class SubscriptionCancellationRecord(models.Model):
+    """
+    Immutable audit record for subscription cancellations, grace periods, and reactivations.
+    Architecture Decision: ADR-0092
+    Guarantees zero data loss and preserves historical auditability.
+    """
+
+    cancellation_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="cancellations")
+    subscription = models.ForeignKey(SubscriptionRecord, on_delete=models.CASCADE, related_name="cancellation_events")
+    requested_by = models.CharField(max_length=128)
+    reason = models.TextField()
+    effective_mode = models.CharField(
+        max_length=32,
+        choices=CancellationEffectiveMode.choices,
+        default=CancellationEffectiveMode.END_OF_BILLING_PERIOD,
+    )
+    effective_date = models.DateField()
+    grace_period_end_date = models.DateField(null=True, blank=True)
+    is_reactivated = models.BooleanField(default=False)
+    reactivated_at = models.DateTimeField(null=True, blank=True)
+    reactivated_by = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Subscription Cancellation Record"
+        verbose_name_plural = "Subscription Cancellation Records"
+        indexes = [
+            models.Index(fields=["tenant", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Cancellation {self.cancellation_id} for {self.tenant_id} ({self.effective_mode})"
