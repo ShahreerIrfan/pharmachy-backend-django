@@ -25,6 +25,7 @@ from apps.core.models import (
     OnboardingWizardStatus,
     PaymentMethod,
     PaymentTransaction,
+    PlanCatalogueRecord,
     PlatformApiAccessPolicy,
     PlatformFeatureFlag,
     PrescriptionItem,
@@ -35,6 +36,7 @@ from apps.core.models import (
     SubscriptionRecord,
     SystemAnnouncement,
     Tenant,
+    TenantAppliedEntitlement,
     TenantDataExportRequest,
     TenantDeletionRequest,
     TenantFeatureFlagOverride,
@@ -1139,3 +1141,69 @@ class TenantOnboardingCompleteSerializer(serializers.Serializer):
     owner_password = serializers.CharField(min_length=8, write_only=True)
     operator_notes = serializers.CharField(required=False, allow_blank=True, default="")
     mfa_code = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class PlanCatalogueRecordSerializer(serializers.ModelSerializer):
+    """Serializer for SaaS Plan Catalogue records (ADR-0015 and ADR-0081)."""
+
+    class Meta:
+        model = PlanCatalogueRecord
+        fields = [
+            "plan_code",
+            "tier",
+            "name",
+            "description_en",
+            "description_bn",
+            "version",
+            "monthly_price_bdt",
+            "annual_price_bdt",
+            "currency",
+            "supported_billing_cycles",
+            "max_branches",
+            "max_devices_per_branch",
+            "max_total_devices",
+            "max_staff_users",
+            "features",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class TenantAppliedEntitlementSerializer(serializers.ModelSerializer):
+    """Serializer for immutable Tenant Applied Entitlement snapshots (ADR-0081)."""
+
+    tenant_name = serializers.CharField(source="tenant.name", read_only=True)
+
+    class Meta:
+        model = TenantAppliedEntitlement
+        fields = [
+            "entitlement_id",
+            "tenant",
+            "tenant_name",
+            "plan_code",
+            "plan_tier",
+            "plan_version",
+            "billing_cycle",
+            "unit_price_bdt",
+            "currency",
+            "effective_from",
+            "effective_until",
+            "max_branches",
+            "max_devices_per_branch",
+            "max_total_devices",
+            "max_staff_users",
+            "features_snapshot",
+            "is_active",
+            "applied_by",
+            "notes",
+            "created_at",
+        ]
+
+
+class ApplyPlanRequestSerializer(serializers.Serializer):
+    """Input serializer for applying a catalogue plan to a tenant."""
+
+    plan_code = serializers.CharField(max_length=32)
+    billing_cycle = serializers.ChoiceField(choices=["MONTHLY", "ANNUAL"], default="MONTHLY")
+    notes = serializers.CharField(required=False, allow_blank=True, default="")

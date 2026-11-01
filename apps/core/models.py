@@ -1672,3 +1672,89 @@ class TenantOnboardingSession(models.Model):
         return f"OnboardingSession {self.session_id} - {self.pharmacy_name} ({self.status})"
 
 
+class PlanCatalogueRecord(models.Model):
+    """
+    SaaS Plan Catalogue Record.
+    Architecture Decision: ADR-0015 & ADR-0081
+    Defines versioned commercial tiers (Basic, Standard, Pro), BDT pricing, billing cycles, quotas and feature matrix.
+    """
+
+    plan_code = models.CharField(max_length=32, primary_key=True)  # e.g. PLAN_BASIC, PLAN_STANDARD, PLAN_PRO
+    tier = models.CharField(max_length=32, choices=PlanTier.choices, db_index=True)
+    name = models.CharField(max_length=128)
+    description_en = models.TextField(blank=True, default="")
+    description_bn = models.TextField(blank=True, default="")
+    version = models.PositiveIntegerField(default=1)
+    monthly_price_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Standard monthly pricing in BDT.",
+    )
+    annual_price_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Discounted annual pricing in BDT.",
+    )
+    currency = models.CharField(max_length=8, default="BDT")
+    supported_billing_cycles = models.JSONField(default=list)  # ["MONTHLY", "ANNUAL"]
+    max_branches = models.PositiveIntegerField(default=1)
+    max_devices_per_branch = models.PositiveIntegerField(default=1)
+    max_total_devices = models.PositiveIntegerField(default=1)
+    max_staff_users = models.PositiveIntegerField(default=3)
+    features = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["monthly_price_bdt"]
+        verbose_name = "Plan Catalogue Record"
+        verbose_name_plural = "Plan Catalogue Records"
+        indexes = [
+            models.Index(fields=["tier", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.plan_code} v{self.version}) - {self.monthly_price_bdt} BDT/mo"
+
+
+class TenantAppliedEntitlement(models.Model):
+    """
+    Immutable snapshot of applied plan entitlements, quotas, and terms locked into a tenant.
+    Architecture Decision: ADR-0081
+    Ensures existing subscriptions remain unaffected by future plan catalogue updates.
+    """
+
+    entitlement_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="applied_entitlements")
+    plan_code = models.CharField(max_length=32, db_index=True)
+    plan_tier = models.CharField(max_length=32, choices=PlanTier.choices, db_index=True)
+    plan_version = models.PositiveIntegerField(default=1)
+    billing_cycle = models.CharField(max_length=32, default="MONTHLY")
+    unit_price_bdt = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=8, default="BDT")
+    effective_from = models.DateTimeField(default=timezone.now)
+    effective_until = models.DateTimeField(null=True, blank=True)
+    max_branches = models.PositiveIntegerField(default=1)
+    max_devices_per_branch = models.PositiveIntegerField(default=1)
+    max_total_devices = models.PositiveIntegerField(default=1)
+    max_staff_users = models.PositiveIntegerField(default=3)
+    features_snapshot = models.JSONField(default=dict, blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    applied_by = models.CharField(max_length=64, default="SYSTEM")
+    notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-effective_from"]
+        verbose_name = "Tenant Applied Entitlement"
+        verbose_name_plural = "Tenant Applied Entitlements"
+        indexes = [
+            models.Index(fields=["tenant", "is_active"]),
+            models.Index(fields=["tenant", "-effective_from"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.tenant_id} Entitlement [{self.plan_code} v{self.plan_version}] - Active: {self.is_active}"
