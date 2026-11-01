@@ -35,6 +35,7 @@ from apps.core.plan_catalogue_views import (
 )
 from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.subscription_views import SubscriptionViewSet
+from apps.core.trial_policy_views import TrialPolicyViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -162,6 +163,7 @@ router.register(
     "billing/effective-entitlements", TenantEffectiveEntitlementViewSet, basename="billing-effective-entitlements"
 )
 router.register("billing/subscriptions", SubscriptionViewSet, basename="billing-subscriptions")
+router.register("billing/trial", TrialPolicyViewSet, basename="billing-trial")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

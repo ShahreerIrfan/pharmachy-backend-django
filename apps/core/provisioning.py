@@ -127,6 +127,17 @@ class TenantProvisioningEngine:
         if clean_plan_tier not in PlanTier.values:
             field_errors["plan_tier"] = [f"Invalid plan tier '{clean_plan_tier}'. Must be BASIC, STANDARD, or PRO."]
 
+        if is_trial:
+            from apps.core.trial_policy_service import TrialPolicyService
+
+            is_eligible, abuse_code, abuse_reason = TrialPolicyService.validate_trial_eligibility(
+                license_number=branch_license,
+                phone=owner_phone,
+                email=clean_owner_email,
+            )
+            if not is_eligible:
+                field_errors["trial_abuse"] = [f"{abuse_code}: {abuse_reason}"]
+
         if field_errors:
             raise ValidationError(field_errors)
 

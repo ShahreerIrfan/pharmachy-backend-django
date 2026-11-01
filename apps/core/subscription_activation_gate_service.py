@@ -114,6 +114,32 @@ class SubscriptionActivationGateService:
         sub = SubscriptionRecord.objects.filter(tenant=tenant).first()
         sub_status = sub.status if sub else None
 
+        # Check Trial Expiration (ADR-0086)
+        from django.utils import timezone
+        now = timezone.now()
+        is_trial_expired = (
+            (sub_status == SubscriptionStatus.TRIAL or tenant.status == TenantLifecycleStatus.TRIAL)
+            and tenant.trial_ends_at is not None
+            and now >= tenant.trial_ends_at
+        )
+        if is_trial_expired:
+            reason = (
+                f"Operational ERP write rejected: Tenant evaluation trial expired on "
+                f"{tenant.trial_ends_at.strftime('%Y-%m-%d')}. Data mutations are locked while historical records "
+                f"are safely preserved. Please upgrade to a commercial subscription plan."
+            )
+            return (
+                False,
+                "ERR_SUBSCRIPTION_UNENTITLED_WRITE_BLOCKED",
+                reason,
+                {
+                    "tenant_id": clean_tenant_id,
+                    "subscription_status": "TRIAL_EXPIRED",
+                    "trial_ends_at": tenant.trial_ends_at.isoformat(),
+                    "billing_url": f"/api/v2/billing/subscriptions/{clean_tenant_id}/",
+                },
+            )
+
         # Unentitled Subscription Statuses
         unentitled_sub_statuses = [
             SubscriptionStatus.SUSPENDED,
@@ -160,3 +186,4 @@ class SubscriptionActivationGateService:
             )
 
         return True, "ENTITLED", "Subscription status permits operational ERP mutations.", {"status": sub_status or tenant.status}
+
