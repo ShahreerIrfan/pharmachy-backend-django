@@ -50,6 +50,7 @@ from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
 from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
 from apps.core.subscription_portal_views import SubscriptionCustomerPortalViewSet
+from apps.core.subscription_support_views import SubscriptionSupportOverrideViewSet
 from apps.core.subscription_views import SubscriptionViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
@@ -193,6 +194,7 @@ router.register("billing/devices", DeviceSeatViewSet, basename="billing-devices"
 router.register("billing/portal", SubscriptionCustomerPortalViewSet, basename="billing-portal")
 router.register("billing/reports", TenantBillingReportViewSet, basename="billing-reports")
 router.register("billing/dunning", DunningNotificationViewSet, basename="billing-dunning")
+router.register("billing/support-overrides", SubscriptionSupportOverrideViewSet, basename="billing-support-overrides")
 router.register(
     "platform/billing-reports", PlatformBillingReportViewSet, basename="platform-billing-reports"
 )

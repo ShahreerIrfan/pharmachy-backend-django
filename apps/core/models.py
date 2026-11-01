@@ -2655,3 +2655,76 @@ class DunningNotification(models.Model):
 
     def __str__(self) -> str:
         return f"{self.notification_id} [{self.stage}] - {self.tenant_id} ({self.delivery_status})"
+
+
+class SubscriptionOverrideType(models.TextChoices):
+    GRACE_EXTENSION = "GRACE_EXTENSION", "Grace Extension"
+    EMERGENCY_UNBLOCK = "EMERGENCY_UNBLOCK", "Emergency Unblock"
+    QUOTA_OVERRIDE = "QUOTA_OVERRIDE", "Quota Override"
+    REACTIVATION = "REACTIVATION", "Reactivation"
+
+
+class SubscriptionOverrideStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active"
+    EXPIRED = "EXPIRED", "Expired"
+    REVOKED = "REVOKED", "Revoked"
+
+
+class SubscriptionSupportOverride(models.Model):
+    """
+    Subscription Support Override Model (P100 / ADR-0100).
+    Requirement Trace: FR-044, FR-066, FR-070
+
+    Audited platform operational exceptions granted by platform administrators:
+    - Time-bound grace extensions during banking/clearance delays.
+    - Emergency temporary unblocks for critical healthcare dispensing.
+    - Temporary workstation / branch quota overrides.
+    - Supervised emergency reactivations.
+    """
+
+    override_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="subscription_overrides")
+    subscription = models.ForeignKey(
+        SubscriptionRecord,
+        on_delete=models.CASCADE,
+        related_name="subscription_overrides",
+    )
+    override_type = models.CharField(
+        max_length=32,
+        choices=SubscriptionOverrideType.choices,
+        default=SubscriptionOverrideType.GRACE_EXTENSION,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=SubscriptionOverrideStatus.choices,
+        default=SubscriptionOverrideStatus.ACTIVE,
+        db_index=True,
+    )
+    extension_days = models.PositiveIntegerField(null=True, blank=True, default=7)
+    quota_bonus = models.PositiveIntegerField(null=True, blank=True, default=0)
+    justification = models.TextField()
+    ticket_reference = models.CharField(max_length=64, db_index=True)
+    granted_by_user_id = models.CharField(max_length=64)
+    granted_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField(db_index=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by_user_id = models.CharField(max_length=64, blank=True, default="")
+    revocation_reason = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-granted_at"]
+        verbose_name = "Subscription Support Override"
+        verbose_name_plural = "Subscription Support Overrides"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "override_type", "status"]),
+            models.Index(fields=["expires_at", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.override_id} [{self.override_type}] - {self.tenant_id} ({self.status})"
+

@@ -234,7 +234,7 @@ class RenewalInvoiceService:
             sub.amount_bdt = invoice.total_bdt
             sub.billing_cycle = invoice.billing_cycle
             sub.plan_tier = invoice.plan_tier
-            if sub.status in [SubscriptionStatus.PAST_DUE, SubscriptionStatus.SUSPENDED, SubscriptionStatus.GRACE_PERIOD]:
+            if sub.status in [SubscriptionStatus.TRIAL, SubscriptionStatus.PAST_DUE, SubscriptionStatus.SUSPENDED, SubscriptionStatus.GRACE_PERIOD]:
                 sub.status = SubscriptionStatus.ACTIVE
             sub.save(update_fields=["renewal_date", "amount_bdt", "billing_cycle", "plan_tier", "status"])
 
