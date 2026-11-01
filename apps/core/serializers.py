@@ -28,6 +28,7 @@ from apps.core.models import (
     StaffMember,
     SubscriptionRecord,
     Tenant,
+    TenantMedicineConfig,
 )
 from apps.core.validators import (
     validate_bangladesh_phone_number,
@@ -89,6 +90,7 @@ class BranchSerializer(serializers.ModelSerializer):
 
 class MedicineProductSerializer(serializers.ModelSerializer):
     status_chip = serializers.SerializerMethodField()
+    tenant_override = serializers.SerializerMethodField()
 
     class Meta:
         model = MedicineProduct
@@ -113,16 +115,51 @@ class MedicineProductSerializer(serializers.ModelSerializer):
             "is_narcotic",
             "is_antibiotic",
             "status_chip",
+            "tenant_override",
             "reviewed_at",
             "curation_notes",
             "created_at",
         ]
-        read_only_fields = ["created_at", "version_number", "immutable_version_hash", "status_chip", "reviewed_at"]
+        read_only_fields = [
+            "created_at",
+            "version_number",
+            "immutable_version_hash",
+            "status_chip",
+            "tenant_override",
+            "reviewed_at",
+        ]
 
     def get_status_chip(self, obj):
         from apps.core.global_medicine_service import GlobalMedicineCatalogService
 
         return GlobalMedicineCatalogService.resolve_status_chip(obj.curation_status)
+
+    def get_tenant_override(self, obj):
+        request = self.context.get("request")
+        if not request:
+            return None
+        user = getattr(request, "user", None)
+        tenant_id = (
+            getattr(request, "tenant_id", None)
+            or getattr(user, "tenant_id", None)
+            or (
+                request.query_params.get("tenant_id")
+                if getattr(user, "is_superuser", False)
+                or str(getattr(user, "role", "")).upper() in ["SUPERADMIN", "SUPER_ADMIN", "PLATFORM_OPERATOR"]
+                else None
+            )
+        )
+        if not tenant_id or str(tenant_id).strip() in ["", "platform-global"]:
+            return None
+
+        from apps.core.models import TenantMedicineConfig
+
+        config = TenantMedicineConfig.objects.filter(tenant_id=str(tenant_id).strip(), product=obj).first()
+        if not config:
+            return None
+        from apps.core.tenant_medicine_config_service import TenantMedicineConfigService
+
+        return TenantMedicineConfigService.serialize_config(config)
 
     def validate_mrp_unit(self, value):
         return validate_money_decimal(value, "mrp_unit", min_value=Decimal("0.01"))
@@ -142,6 +179,81 @@ class MedicineProductSerializer(serializers.ModelSerializer):
         min_d, max_d = validate_cold_chain_temps(requires_cold, min_temp, max_temp)
         attrs["min_temp_celsius"] = min_d
         attrs["max_temp_celsius"] = max_d
+        return attrs
+
+
+class TenantMedicineConfigSerializer(serializers.ModelSerializer):
+    effective_brand_name = serializers.CharField(read_only=True)
+    effective_mrp_unit = serializers.CharField(read_only=True)
+    effective_cost_unit = serializers.CharField(read_only=True)
+    effective_requires_prescription = serializers.BooleanField(read_only=True)
+    product_details = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = TenantMedicineConfig
+        fields = [
+            "config_id",
+            "tenant",
+            "product",
+            "local_brand_name",
+            "local_sku",
+            "custom_mrp_unit",
+            "custom_cost_unit",
+            "is_visible",
+            "shelf_location",
+            "low_stock_threshold",
+            "requires_prescription_override",
+            "notes",
+            "effective_brand_name",
+            "effective_mrp_unit",
+            "effective_cost_unit",
+            "effective_requires_prescription",
+            "product_details",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "config_id",
+            "effective_brand_name",
+            "effective_mrp_unit",
+            "effective_cost_unit",
+            "effective_requires_prescription",
+            "product_details",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_product_details(self, obj):
+        if not obj.product:
+            return None
+        return {
+            "product_id": obj.product.product_id,
+            "master_brand_name": obj.product.brand_name,
+            "generic_name": obj.product.generic_name,
+            "dosage_form": obj.product.dosage_form,
+            "strength": obj.product.strength,
+            "manufacturer": obj.product.manufacturer,
+            "master_mrp_unit": str(obj.product.mrp_unit),
+            "dgda_dar_number": obj.product.dgda_dar_number,
+            "is_prescription_only": obj.product.is_prescription_only,
+        }
+
+    def validate(self, attrs):
+        product = attrs.get("product") or (self.instance.product if self.instance else None)
+        req_rx_override = attrs.get("requires_prescription_override")
+        if req_rx_override is False and product:
+            if product.is_prescription_only or product.is_narcotic or product.is_antibiotic:
+                raise serializers.ValidationError(
+                    {
+                        "requires_prescription_override": (
+                            "Cannot relax DGDA regulatory prescription requirement. "
+                            "Global master product is prescription-only (POM)."
+                        )
+                    }
+                )
+        custom_mrp = attrs.get("custom_mrp_unit")
+        if custom_mrp is not None and custom_mrp < Decimal("0.01"):
+            raise serializers.ValidationError({"custom_mrp_unit": "Custom MRP must be at least 0.01 BDT."})
         return attrs
 
 

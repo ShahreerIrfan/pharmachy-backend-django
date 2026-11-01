@@ -22,6 +22,7 @@ from apps.core.support_ticket_views import (
     PlatformSupportTicketViewSet,
     TenantSupportTicketViewSet,
 )
+from apps.core.tenant_medicine_config_views import TenantMedicineConfigViewSet
 from apps.core.views import (
     ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
@@ -63,6 +64,9 @@ from apps.secrets_vault.views import TenantSecretViewSet
 
 router = DefaultRouter()
 router.register("auth", AuthenticationViewSet, basename="auth")
+router.register("tenants/medicine-configs", TenantMedicineConfigViewSet, basename="tenant-medicine-configs")
+router.register("tenants/support-access", TenantSupportAccessViewSet, basename="tenant-support-access")
+router.register("tenants/support/tickets", TenantSupportTicketViewSet, basename="tenant-support-tickets")
 router.register("tenants", TenantViewSet, basename="tenant")
 router.register("branches", BranchViewSet, basename="branch")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
@@ -101,9 +105,7 @@ router.register("permissions/matrix", EndpointPermissionMatrixViewSet, basename=
 router.register("security/baseline", SecurityBaselineViewSet, basename="security-baseline")
 router.register("platform/console", PlatformConsoleViewSet, basename="platform-console")
 router.register("platform/support-access", PlatformSupportAccessViewSet, basename="platform-support-access")
-router.register("tenants/support-access", TenantSupportAccessViewSet, basename="tenant-support-access")
 router.register("platform/support/tickets", PlatformSupportTicketViewSet, basename="platform-support-tickets")
-router.register("tenants/support/tickets", TenantSupportTicketViewSet, basename="tenant-support-tickets")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

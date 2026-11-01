@@ -327,6 +327,152 @@ class MedicineCurationHistory(models.Model):
         verbose_name_plural = "Medicine Curation Histories"
 
 
+class TenantMedicineConfig(models.Model):
+    """
+    Architecture Decision: ADR-0071
+    Tenant-specific configuration and local overrides for a global master medicine.
+    Enables tenant-scoped brand aliases, local SKUs, custom retail MRP, shelf locations,
+    reorder thresholds, and visibility toggles without mutating the immutable global master.
+    Strictly prevents relaxing global DGDA regulatory mandates (e.g. prescription requirements).
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="medicine_configs", db_index=True)
+    product = models.ForeignKey(MedicineProduct, on_delete=models.CASCADE, related_name="tenant_configs", db_index=True)
+
+    local_brand_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Tenant-customized brand alias, nickname, or colloquial Bengali name.",
+    )
+    local_sku = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Internal barcode or SKU specific to this tenant store.",
+    )
+    custom_mrp_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        help_text="Tenant custom retail price (BDT). If null, master mrp_unit is used.",
+    )
+    custom_cost_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Tenant default acquisition cost (BDT). If null, master cost_unit is used.",
+    )
+    is_visible = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Store visibility toggle. Set to False to hide this product from POS search and cashier view.",
+    )
+    shelf_location = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="Physical shelf, rack, or bin location in store.",
+    )
+    low_stock_threshold = models.PositiveIntegerField(
+        default=10,
+        help_text="Branch low stock reorder alert threshold.",
+    )
+    requires_prescription_override = models.BooleanField(
+        null=True,
+        blank=True,
+        help_text="Tenant can enforce stricter prescription rules. Strictly cannot relax master is_prescription_only=True!",
+    )
+    notes = models.TextField(blank=True, default="", help_text="Internal pharmacy notes for dispensing or sourcing.")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Tenant Medicine Configuration"
+        verbose_name_plural = "Tenant Medicine Configurations"
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "product"], name="unique_tenant_medicine_config"),
+            models.CheckConstraint(
+                condition=models.Q(custom_mrp_unit__isnull=True) | models.Q(custom_mrp_unit__gte=Decimal("0.01")),
+                name="check_positive_custom_mrp",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "is_visible"]),
+            models.Index(fields=["tenant", "local_sku"]),
+            models.Index(fields=["tenant", "product"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        from django.core.exceptions import ValidationError
+
+        # Invariant 1: Cannot relax global prescription requirement
+        if self.product_id and hasattr(self, "product") and self.product:
+            if self.product.is_prescription_only and self.requires_prescription_override is False:
+                raise ValidationError(
+                    {
+                        "requires_prescription_override": (
+                            "Cannot relax DGDA regulatory prescription requirement. "
+                            "Global master product is prescription-only (POM)."
+                        )
+                    }
+                )
+            if (
+                self.product.is_narcotic or self.product.is_antibiotic
+            ) and self.requires_prescription_override is False:
+                raise ValidationError(
+                    {
+                        "requires_prescription_override": (
+                            "Cannot relax DGDA narcotic/antibiotic dispensing verification mandate."
+                        )
+                    }
+                )
+        # Invariant 2: Positive custom MRP
+        if self.custom_mrp_unit is not None and self.custom_mrp_unit < Decimal("0.01"):
+            raise ValidationError({"custom_mrp_unit": "Custom MRP must be at least 0.01 BDT."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    @property
+    def effective_brand_name(self) -> str:
+        if self.local_brand_name and self.local_brand_name.strip():
+            return self.local_brand_name.strip()
+        return self.product.brand_name if self.product else ""
+
+    @property
+    def effective_mrp_unit(self) -> Decimal:
+        if self.custom_mrp_unit is not None:
+            return self.custom_mrp_unit
+        return self.product.mrp_unit if self.product else Decimal("0.00")
+
+    @property
+    def effective_cost_unit(self) -> Decimal:
+        if self.custom_cost_unit is not None:
+            return self.custom_cost_unit
+        return self.product.cost_unit if self.product else Decimal("0.00")
+
+    @property
+    def effective_requires_prescription(self) -> bool:
+        if not self.product:
+            return bool(self.requires_prescription_override)
+        if self.product.is_prescription_only or self.product.is_narcotic or self.product.is_antibiotic:
+            return True
+        return bool(self.requires_prescription_override)
+
+    def __str__(self) -> str:
+        return f"{self.tenant_id} -> {self.effective_brand_name} (MRP: {self.effective_mrp_unit})"
+
+
 class BatchStock(models.Model):
     """Individual manufactured batch of a medicine stored in a specific tenant branch with FEFO expiry."""
 

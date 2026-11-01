@@ -421,6 +421,8 @@ class MedicineProductViewSet(viewsets.ModelViewSet):
         "is_prescription_only",
         "is_narcotic",
         "is_antibiotic",
+        "include_hidden",
+        "tenant_id",
     }
 
     def _require_platform_operator(self, request):
@@ -455,10 +457,22 @@ class MedicineProductViewSet(viewsets.ModelViewSet):
                 or str(getattr(user, "role", "")).upper() in ["SUPERADMIN", "SUPER_ADMIN", "PLATFORM_OPERATOR"]
             )
         )
+        caller_tenant = getattr(user, "tenant_id", None) or getattr(self.request, "tenant_id", None)
         if not is_platform:
             from apps.core.models import MedicineCurationStatus
 
             qs = qs.filter(curation_status__in=[MedicineCurationStatus.APPROVED, MedicineCurationStatus.DEPRECATED])
+
+        if caller_tenant and str(caller_tenant).strip() not in ["", "platform-global"]:
+            include_hidden = self.request.query_params.get("include_hidden", "").lower() in ("true", "1")
+            if not include_hidden:
+                from apps.core.models import TenantMedicineConfig
+
+                hidden_ids = TenantMedicineConfig.objects.filter(tenant_id=caller_tenant, is_visible=False).values_list(
+                    "product_id", flat=True
+                )
+                if hidden_ids:
+                    qs = qs.exclude(product_id__in=list(hidden_ids))
         return qs
 
     def perform_create(self, serializer):
