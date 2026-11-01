@@ -187,6 +187,7 @@ class Branch(models.Model):
     license_number = models.CharField(max_length=128)  # DGDA Pharmacy License Number
     address = models.TextField(blank=True)
     is_active = models.BooleanField(default=True)
+    is_over_quota_locked = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -2136,3 +2137,80 @@ class SubscriptionUpgradeRecord(models.Model):
     def __str__(self) -> str:
         return f"Upgrade {self.upgrade_id}: {self.from_plan_tier} -> {self.to_plan_tier} ({self.status}) BDT {self.net_payable_bdt}"
 
+
+
+class DowngradeEffectiveMode(models.TextChoices):
+    IMMEDIATE = "IMMEDIATE", "Immediate"
+    END_OF_CYCLE = "END_OF_CYCLE", "End of Billing Cycle"
+
+
+class SubscriptionDowngradeStatus(models.TextChoices):
+    SCHEDULED = "SCHEDULED", "Scheduled for Next Renewal"
+    APPLIED = "APPLIED", "Applied"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class SubscriptionDowngradeRecord(models.Model):
+    """
+    Immutable audit record for subscription downgrades and over-quota handling.
+    Architecture Decision: ADR-0091
+    Tracks downgrade transitions, retained vs locked excess branches,
+    and preserves 100% of historical data without deletion.
+    """
+
+    downgrade_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="subscription_downgrades")
+    subscription = models.ForeignKey(SubscriptionRecord, on_delete=models.CASCADE, related_name="downgrades")
+
+    from_plan_tier = models.CharField(max_length=32, choices=PlanTier.choices)
+    from_plan_code = models.CharField(max_length=32)
+    from_billing_cycle = models.CharField(max_length=32, default="MONTHLY")
+
+    to_plan_tier = models.CharField(max_length=32, choices=PlanTier.choices)
+    to_plan_code = models.CharField(max_length=32)
+    to_billing_cycle = models.CharField(max_length=32, default="MONTHLY")
+
+    effective_mode = models.CharField(
+        max_length=32,
+        choices=DowngradeEffectiveMode.choices,
+        default=DowngradeEffectiveMode.IMMEDIATE,
+    )
+    scheduled_effective_date = models.DateField(null=True, blank=True)
+
+    active_branches_at_downgrade = models.PositiveIntegerField(default=1)
+    allowed_branches_quota = models.PositiveIntegerField(default=1)
+    is_over_quota = models.BooleanField(default=False)
+
+    retained_branch_ids = models.JSONField(default=list, blank=True)
+    locked_branch_ids = models.JSONField(default=list, blank=True)
+
+    status = models.CharField(
+        max_length=32,
+        choices=SubscriptionDowngradeStatus.choices,
+        default=SubscriptionDowngradeStatus.APPLIED,
+        db_index=True,
+    )
+
+    applied_entitlement = models.ForeignKey(
+        TenantAppliedEntitlement,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="originating_downgrade",
+    )
+
+    notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    executed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Subscription Downgrade Record"
+        verbose_name_plural = "Subscription Downgrade Records"
+        indexes = [
+            models.Index(fields=["tenant", "-created_at"]),
+            models.Index(fields=["status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Downgrade {self.downgrade_id}: {self.from_plan_tier} -> {self.to_plan_tier} ({self.status})"
