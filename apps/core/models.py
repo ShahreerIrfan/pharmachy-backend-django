@@ -2316,3 +2316,62 @@ class DeviceLeaseCertificate(models.Model):
 
     def __str__(self) -> str:
         return f"Lease {self.lease_id} ({self.device_id} at branch {self.branch_id}) [{self.status}]"
+
+
+class HoldQueueStatus(models.TextChoices):
+    HELD_PENDING_RECONCILIATION = "HELD_PENDING_RECONCILIATION", "Held Pending Reconciliation"
+    RECONCILED = "RECONCILED", "Reconciled"
+    REJECTED = "REJECTED", "Rejected"
+
+
+class LapsedSubscriptionHoldQueue(models.Model):
+    """
+    Queue for holding pending offline transactions pushed when a plan lapses or lease expires.
+    Architecture Decision: ADR-0094
+    Requirement Trace: FR-072 (Do not silently discard valid pending events if plan lapses)
+
+    Preserves 100% of offline counter sales, prescriptions, and financial amounts for authorized reconciliation.
+    Guarantees idempotency via unique(tenant, offline_event_id).
+    """
+
+    hold_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="lapsed_hold_events")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="lapsed_hold_events")
+    device_id = models.CharField(max_length=128, db_index=True)
+    offline_event_id = models.CharField(max_length=128, db_index=True)
+    event_type = models.CharField(max_length=64, default="OFFLINE_SALE")
+    occurred_at = models.DateTimeField(help_text="When transaction occurred offline at terminal")
+    payload_json = models.JSONField(default=dict, help_text="Full transaction payload")
+    financial_total_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    subscription_status_at_intake = models.CharField(max_length=32, default="EXPIRED")
+    lease_status_at_intake = models.CharField(max_length=32, default="EXPIRED")
+    hold_status = models.CharField(
+        max_length=32,
+        choices=HoldQueueStatus.choices,
+        default=HoldQueueStatus.HELD_PENDING_RECONCILIATION,
+    )
+    reconciled_at = models.DateTimeField(null=True, blank=True)
+    reconciled_by = models.CharField(max_length=128, blank=True, default="")
+    reconciliation_target_id = models.CharField(max_length=64, blank=True, default="")
+    resolution_notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-occurred_at"]
+        verbose_name = "Lapsed Subscription Hold Queue"
+        verbose_name_plural = "Lapsed Subscription Hold Queues"
+        unique_together = ("tenant", "offline_event_id")
+        indexes = [
+            models.Index(fields=["tenant", "hold_status", "-occurred_at"]),
+            models.Index(fields=["tenant", "device_id"]),
+            models.Index(fields=["branch", "hold_status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"HoldEvent {self.hold_id}: {self.event_type} ({self.financial_total_bdt} BDT) [{self.hold_status}]"
