@@ -25,6 +25,7 @@ from apps.core.models import (
     Branch,
     StaffMember,
     SubscriptionRecord,
+    SubscriptionStatus,
     Tenant,
     TenantLifecycleStatus,
 )
@@ -117,6 +118,8 @@ class FeatureEntitlementEngine:
 
         # Counter dispensing checkout capability
         is_checkout_allowed = tenant.is_checkout_allowed()
+        if sub and not sub.is_checkout_allowed():
+            is_checkout_allowed = False
         capabilities["CHECKOUT_DISPENSING"] = is_checkout_allowed
 
         # Mandatory Clinical Safety Invariant (INV-SAFETY-01)
@@ -124,8 +127,11 @@ class FeatureEntitlementEngine:
         for safety_feature in CLINICALLY_PROTECTED_FEATURES:
             capabilities[safety_feature] = True
 
-        # 5. Offline Lease Evaluation (ADR-0082: 72 hours bounded validity)
-        is_suspended = tenant.status in [TenantLifecycleStatus.SUSPENDED, TenantLifecycleStatus.ARCHIVED]
+        # 5. Offline Lease Evaluation (ADR-0082 & ADR-0084: 72 hours bounded validity)
+        is_suspended = tenant.status in [TenantLifecycleStatus.SUSPENDED, TenantLifecycleStatus.ARCHIVED] or (
+            sub
+            and sub.status in [SubscriptionStatus.SUSPENDED, SubscriptionStatus.EXPIRED, SubscriptionStatus.CANCELLED]
+        )
         if is_suspended:
             lease_status = "SUSPENDED"
             lease_expires_at = None

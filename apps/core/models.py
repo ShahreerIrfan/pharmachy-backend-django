@@ -702,17 +702,20 @@ class ComplianceReminder(models.Model):
 
 
 class SubscriptionStatus(models.TextChoices):
-    TRIAL = "TRIAL", "Trial"
-    ACTIVE = "ACTIVE", "Active"
+    PENDING = "PENDING", "Pending Payment"
+    TRIAL = "TRIAL", "Active Evaluation Trial"
+    ACTIVE = "ACTIVE", "Active & In Good Standing"
+    PAST_DUE = "PAST_DUE", "Past Due Payment"
     GRACE_PERIOD = "GRACE_PERIOD", "Grace Period"
-    EXPIRED = "EXPIRED", "Expired"
+    SUSPENDED = "SUSPENDED", "Temporarily Suspended"
     CANCELLED = "CANCELLED", "Cancelled"
+    EXPIRED = "EXPIRED", "Expired"
 
 
 class SubscriptionRecord(models.Model):
     """
     SaaS Tenant Subscription entitlement, branch limits, and lifecycle record.
-    Architecture Decision: ADR-0015 & ADR-0033
+    Architecture Decision: ADR-0015, ADR-0033 & ADR-0084
     """
 
     subscription_id = models.CharField(max_length=64, primary_key=True)
@@ -744,6 +747,76 @@ class SubscriptionRecord(models.Model):
 
     def __str__(self) -> str:
         return f"{self.tenant.name} [{self.plan_tier}] - Status: {self.status} (Exp: {self.renewal_date})"
+
+    def can_transition_to(self, target_status: str) -> bool:
+        """Evaluates whether the subscription can transition to the target status under ADR-0084."""
+        target = str(target_status).upper().strip()
+        if target not in SubscriptionStatus.values:
+            return False
+        if self.status == target:
+            return True
+
+        valid_transitions = {
+            SubscriptionStatus.PENDING: [
+                SubscriptionStatus.TRIAL,
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.CANCELLED,
+            ],
+            SubscriptionStatus.TRIAL: [
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.EXPIRED,
+                SubscriptionStatus.CANCELLED,
+            ],
+            SubscriptionStatus.ACTIVE: [
+                SubscriptionStatus.PAST_DUE,
+                SubscriptionStatus.GRACE_PERIOD,
+                SubscriptionStatus.SUSPENDED,
+                SubscriptionStatus.CANCELLED,
+            ],
+            SubscriptionStatus.PAST_DUE: [
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.GRACE_PERIOD,
+                SubscriptionStatus.SUSPENDED,
+                SubscriptionStatus.CANCELLED,
+            ],
+            SubscriptionStatus.GRACE_PERIOD: [
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.SUSPENDED,
+                SubscriptionStatus.EXPIRED,
+                SubscriptionStatus.CANCELLED,
+            ],
+            SubscriptionStatus.SUSPENDED: [
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.CANCELLED,
+                SubscriptionStatus.EXPIRED,
+            ],
+            SubscriptionStatus.CANCELLED: [
+                SubscriptionStatus.ACTIVE,
+                SubscriptionStatus.EXPIRED,
+            ],
+            SubscriptionStatus.EXPIRED: [
+                SubscriptionStatus.ACTIVE,
+            ],
+        }
+        return target in valid_transitions.get(self.status, [])
+
+    def is_checkout_allowed(self) -> bool:
+        """Returns True if the subscription status permits POS checkout dispensing."""
+        return self.status in [
+            SubscriptionStatus.TRIAL,
+            SubscriptionStatus.ACTIVE,
+            SubscriptionStatus.PAST_DUE,
+            SubscriptionStatus.GRACE_PERIOD,
+        ]
+
+    def is_delinquent(self) -> bool:
+        """Returns True if subscription payment is past due, in grace, or suspended."""
+        return self.status in [
+            SubscriptionStatus.PAST_DUE,
+            SubscriptionStatus.GRACE_PERIOD,
+            SubscriptionStatus.SUSPENDED,
+            SubscriptionStatus.EXPIRED,
+        ]
 
 
 class StaffRole(models.TextChoices):

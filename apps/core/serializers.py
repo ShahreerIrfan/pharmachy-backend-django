@@ -34,6 +34,7 @@ from apps.core.models import (
     SaleInvoiceItem,
     StaffMember,
     SubscriptionRecord,
+    SubscriptionStatus,
     SystemAnnouncement,
     Tenant,
     TenantAppliedEntitlement,
@@ -1215,3 +1216,20 @@ class PlanQuoteRequestSerializer(serializers.Serializer):
     tenant_id = serializers.CharField(max_length=64)
     plan_code = serializers.CharField(max_length=32)
     billing_cycle = serializers.ChoiceField(choices=["MONTHLY", "ANNUAL"], default="MONTHLY")
+
+
+class SubscriptionTransitionRequestSerializer(serializers.Serializer):
+    """Input serializer for guarded subscription state transitions (ADR-0084)."""
+
+    target_status = serializers.ChoiceField(choices=SubscriptionStatus.choices)
+    reason = serializers.CharField(required=False, allow_blank=True, default="")
+    metadata = serializers.JSONField(required=False, default=dict)
+
+
+class SubscriptionPaymentVerificationSerializer(serializers.Serializer):
+    """Input serializer for verifying subscription payment and renewal (ADR-0084)."""
+
+    amount_bdt = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    transaction_ref = serializers.CharField(min_length=4, max_length=128)
+    payment_method = serializers.CharField(max_length=32, default="BKASH")
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
