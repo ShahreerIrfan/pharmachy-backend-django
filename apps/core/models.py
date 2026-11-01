@@ -1575,3 +1575,100 @@ class PlatformApiAccessPolicy(models.Model):
     def __str__(self) -> str:
         return f"{self.policy_id}: {self.name} ({self.http_method} {self.endpoint_pattern})"
 
+
+class OnboardingWizardStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    IN_PROGRESS = "IN_PROGRESS", "In Progress"
+    COMPLETED = "COMPLETED", "Completed"
+    ABANDONED = "ABANDONED", "Abandoned"
+
+
+class InitialInventoryMode(models.TextChoices):
+    EMPTY = "EMPTY_CATALOG", "Empty Catalog (Zero Stock)"
+    SEED_BASELINE = "SEED_BASELINE", "Seed Essential BD Medicines Baseline"
+    CUSTOM = "CUSTOM_OPENING_STOCK", "Custom Opening Stock"
+
+
+class TenantOnboardingSession(models.Model):
+    """
+    Architecture Decision: ADR-0079
+    Progressive and atomic Tenant Onboarding Wizard Session.
+    Guides multi-step setup across:
+      Step 1: Pharmacy Details (Name, Subdomain, Contact Info, Location)
+      Step 2: Regulatory & Licensing (DGDA Drug License, Trade License, TIN, Pharmacist)
+      Step 3: Branch & Staff Setup (Primary Branch, Initial Staff with PCB Numbers)
+      Step 4: Initial Inventory (Seed Essential Catalog or Zero-Stock Baseline)
+      Step 5: Subscription & Plan Purchase (Plan Tier, Billing Cycle, Payment Mode)
+      Step 6: Atomic Finalization & Audit Trail
+    """
+
+    session_id = models.CharField(max_length=64, primary_key=True)
+    pharmacy_name = models.CharField(max_length=255)
+    trade_license_number = models.CharField(max_length=128, blank=True, default="")
+    drug_license_number = models.CharField(max_length=128)  # Mandatory per DGDA
+    tin_number = models.CharField(max_length=64, blank=True, default="")
+    subdomain = models.CharField(max_length=64, unique=True)
+    contact_email = models.EmailField()
+    contact_phone = models.CharField(max_length=32)
+    owner_full_name = models.CharField(max_length=255)
+
+    # Branch configuration
+    branch_name = models.CharField(max_length=255, default="Main Branch")
+    branch_address = models.TextField(default="Dhaka, Bangladesh")
+
+    # Step data payloads (JSON)
+    initial_staff_data = models.JSONField(default=list, blank=True)
+    initial_inventory_mode = models.CharField(
+        max_length=32,
+        choices=InitialInventoryMode.choices,
+        default=InitialInventoryMode.SEED_BASELINE,
+    )
+    initial_inventory_data = models.JSONField(default=list, blank=True)
+
+    # Subscription & Plan
+    plan_tier = models.CharField(max_length=32, choices=PlanTier.choices, default=PlanTier.STANDARD)
+    billing_cycle = models.CharField(max_length=32, default="MONTHLY")
+    is_trial = models.BooleanField(default=False)
+    payment_method = models.CharField(max_length=32, default="BKASH")
+
+    # Wizard Lifecycle
+    current_step = models.PositiveSmallIntegerField(default=1)
+    status = models.CharField(
+        max_length=32,
+        choices=OnboardingWizardStatus.choices,
+        default=OnboardingWizardStatus.DRAFT,
+    )
+
+    # Provisioned Outcome
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="onboarding_sessions",
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_onboarding_sessions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Tenant Onboarding Session"
+        verbose_name_plural = "Tenant Onboarding Sessions"
+        indexes = [
+            models.Index(fields=["status", "-created_at"]),
+            models.Index(fields=["subdomain"]),
+            models.Index(fields=["drug_license_number"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"OnboardingSession {self.session_id} - {self.pharmacy_name} ({self.status})"
+
+

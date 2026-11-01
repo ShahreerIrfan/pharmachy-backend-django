@@ -27,6 +27,7 @@ from apps.core.feature_flag_views import (
     TenantFeatureFlagEvaluationViewSet,
 )
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
+from apps.core.onboarding_views import PlatformTenantOnboardingWizardViewSet
 from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
@@ -133,6 +134,9 @@ router.register("security/baseline", SecurityBaselineViewSet, basename="security
 router.register("platform/announcements", PlatformAnnouncementViewSet, basename="platform-announcements")
 router.register("platform/access-policies", PlatformAccessPolicyViewSet, basename="platform-access-policies")
 router.register("platform/audit-search", PlatformAuditSearchViewSet, basename="platform-audit-search")
+router.register(
+    "platform/onboarding-wizard", PlatformTenantOnboardingWizardViewSet, basename="platform-onboarding-wizard"
+)
 router.register("platform/console", PlatformConsoleViewSet, basename="platform-console")
 router.register("platform/support-access", PlatformSupportAccessViewSet, basename="platform-support-access")
 router.register("platform/support/tickets", PlatformSupportTicketViewSet, basename="platform-support-tickets")

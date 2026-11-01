@@ -20,7 +20,9 @@ from apps.core.models import (
     ComplianceReminder,
     CrossTenantMetricsSnapshot,
     DailyBranchAnalytics,
+    InitialInventoryMode,
     MedicineProduct,
+    OnboardingWizardStatus,
     PaymentMethod,
     PaymentTransaction,
     PlatformApiAccessPolicy,
@@ -37,6 +39,7 @@ from apps.core.models import (
     TenantDeletionRequest,
     TenantFeatureFlagOverride,
     TenantMedicineConfig,
+    TenantOnboardingSession,
 )
 from apps.core.validators import (
     validate_bangladesh_phone_number,
@@ -1014,3 +1017,125 @@ class StepUpVerificationRequestSerializer(serializers.Serializer):
     """
 
     code = serializers.CharField(min_length=6, max_length=6)
+
+
+class TenantOnboardingSessionSerializer(serializers.ModelSerializer):
+    """
+    Architecture Decision: ADR-0079
+    Serializer for progressive and full Tenant Onboarding Wizard Session.
+    """
+
+    class Meta:
+        model = TenantOnboardingSession
+        fields = [
+            "session_id",
+            "pharmacy_name",
+            "trade_license_number",
+            "drug_license_number",
+            "tin_number",
+            "subdomain",
+            "contact_email",
+            "contact_phone",
+            "owner_full_name",
+            "branch_name",
+            "branch_address",
+            "initial_staff_data",
+            "initial_inventory_mode",
+            "initial_inventory_data",
+            "plan_tier",
+            "billing_cycle",
+            "is_trial",
+            "payment_method",
+            "current_step",
+            "status",
+            "tenant",
+            "completed_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "session_id",
+            "status",
+            "tenant",
+            "completed_at",
+            "created_at",
+            "updated_at",
+        ]
+
+    def validate_subdomain(self, value: str) -> str:
+        from apps.core.provisioning import RESERVED_SUBDOMAINS, SUBDOMAIN_REGEX
+
+        clean = str(value or "").strip().lower()
+        if not clean:
+            raise serializers.ValidationError("Subdomain is required.")
+        if clean in RESERVED_SUBDOMAINS:
+            raise serializers.ValidationError(f"Subdomain '{clean}' is a reserved platform name.")
+        if not SUBDOMAIN_REGEX.match(clean):
+            raise serializers.ValidationError(
+                "Invalid subdomain format. Must be 3-64 characters, lowercase alphanumeric and hyphens."
+            )
+        if Tenant.objects.filter(subdomain=clean).exists():
+            raise serializers.ValidationError(f"Subdomain '{clean}' is already registered to another pharmacy.")
+        session_id = self.instance.session_id if self.instance else None
+        existing = TenantOnboardingSession.objects.filter(
+            subdomain=clean,
+            status__in=[OnboardingWizardStatus.DRAFT, OnboardingWizardStatus.IN_PROGRESS],
+        )
+        if session_id:
+            existing = existing.exclude(session_id=session_id)
+        if existing.exists():
+            raise serializers.ValidationError(
+                f"Subdomain '{clean}' is already reserved in another active onboarding session."
+            )
+        return clean
+
+    def validate_contact_phone(self, value: str) -> str:
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from apps.identity.models import normalize_bangladesh_phone
+
+        try:
+            return normalize_bangladesh_phone(value)
+        except DjangoValidationError as e:
+            raise serializers.ValidationError(list(e.messages))
+
+    def validate_drug_license_number(self, value: str) -> str:
+        clean = str(value or "").strip()
+        if not clean or len(clean) < 3:
+            raise serializers.ValidationError("Valid DGDA Drug License number is mandatory for pharmacy onboarding.")
+        return clean
+
+
+class TenantOnboardingStepUpdateSerializer(serializers.Serializer):
+    """
+    Serializer for updating individual steps in the onboarding wizard.
+    """
+
+    step = serializers.IntegerField(min_value=1, max_value=6)
+    pharmacy_name = serializers.CharField(max_length=255, required=False)
+    trade_license_number = serializers.CharField(max_length=128, required=False, allow_blank=True)
+    drug_license_number = serializers.CharField(max_length=128, required=False)
+    tin_number = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    subdomain = serializers.CharField(max_length=64, required=False)
+    contact_email = serializers.EmailField(required=False)
+    contact_phone = serializers.CharField(max_length=32, required=False)
+    owner_full_name = serializers.CharField(max_length=255, required=False)
+    branch_name = serializers.CharField(max_length=255, required=False)
+    branch_address = serializers.CharField(required=False)
+    initial_staff_data = serializers.ListField(child=serializers.DictField(), required=False)
+    initial_inventory_mode = serializers.ChoiceField(choices=InitialInventoryMode.choices, required=False)
+    initial_inventory_data = serializers.ListField(child=serializers.DictField(), required=False)
+    plan_tier = serializers.CharField(max_length=32, required=False)
+    billing_cycle = serializers.CharField(max_length=32, required=False)
+    is_trial = serializers.BooleanField(required=False)
+    payment_method = serializers.CharField(max_length=32, required=False)
+
+
+class TenantOnboardingCompleteSerializer(serializers.Serializer):
+    """
+    Serializer for final atomic execution and completion of onboarding wizard.
+    """
+
+    owner_password = serializers.CharField(min_length=8, write_only=True)
+    operator_notes = serializers.CharField(required=False, allow_blank=True, default="")
+    mfa_code = serializers.CharField(required=False, allow_blank=True, default="")
