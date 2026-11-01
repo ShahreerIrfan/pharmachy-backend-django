@@ -146,109 +146,124 @@ class TenantContextMiddleware:
         # 2. If session user exists and no JWT user set
         if not user and hasattr(request, "user") and request.user and request.user.is_authenticated:
             user = request.user
+        elif not user and hasattr(request, "_force_auth_user") and request._force_auth_user:
+            user = request._force_auth_user
+            request.user = user
 
         client_tenant_id = request.META.get("HTTP_X_TENANT_ID") or request.GET.get("tenant_id")
         client_branch_id = request.META.get("HTTP_X_BRANCH_ID") or request.GET.get("branch_id")
 
         # 3. Authenticated Request: Enforce Trusted Signed Claims / Membership
         if user and user.is_authenticated:
-            trusted_tenant_id = (token_claims.get("tenant_id") if token_claims else None) or user.tenant_id
-            trusted_branch_id = (token_claims.get("branch_id") if token_claims else None) or user.branch_id
-            user_role = (token_claims.get("role") if token_claims else None) or user.role
-            is_superadmin = (user_role == UserRole.SUPERADMIN) or user.is_superuser
+            user_role = (token_claims.get("role") if token_claims else None) or getattr(user, "role", None)
+            is_superadmin = (
+                (user_role == UserRole.SUPERADMIN)
+                or getattr(user, "is_superuser", False)
+                or str(user_role).upper() in ["SUPERADMIN", "SUPER_ADMIN", "PLATFORM_SUPER_ADMIN", "PLATFORM_OPERATOR"]
+            )
 
-            resolution_source = "JWT_SIGNED_CLAIMS" if token_claims else "SESSION_MEMBERSHIP"
-            resolved_tenant_id = trusted_tenant_id
+            if is_superadmin:
+                trusted_tenant_id = None
+                trusted_branch_id = None
+                resolved_tenant_id = client_tenant_id.strip() if client_tenant_id else None
+                resolution_source = "SUPERADMIN_OVERRIDE" if resolved_tenant_id else "PLATFORM_GLOBAL"
+            else:
+                trusted_tenant_id = (token_claims.get("tenant_id") if token_claims else None) or getattr(user, "tenant_id", None)
+                trusted_branch_id = (token_claims.get("branch_id") if token_claims else None) or getattr(user, "branch_id", None)
+                resolution_source = "JWT_SIGNED_CLAIMS" if token_claims else "SESSION_MEMBERSHIP"
+                resolved_tenant_id = trusted_tenant_id
 
             # Verify client-supplied tenant ID (Never trust client-supplied tenant IDs alone)
             if client_tenant_id and client_tenant_id.strip():
                 client_tenant_id = client_tenant_id.strip()
-                if client_tenant_id != trusted_tenant_id:
-                    if is_superadmin:
-                        # Superadmin override allowed, but tenant must exist and be active
-                        target_tenant = Tenant.objects.filter(tenant_id=client_tenant_id).first()
-                        if not target_tenant:
-                            return self._build_error_response(
-                                error_code="ERR_TENANT_NOT_FOUND",
-                                http_status=status.HTTP_404_NOT_FOUND,
-                                message_en=f"Target tenant '{client_tenant_id}' does not exist.",
-                                message_bn=f"উদ্দিষ্ট টেন্যান্ট '{client_tenant_id}' খুঁজে পাওয়া যায়নি।",
-                                recovery_action="CHECK_TENANT_IDENTIFIER",
-                                details={"target_tenant_id": client_tenant_id},
-                                request_id=request_id,
-                            )
-                        resolved_tenant_id = client_tenant_id
-                        resolution_source = "SUPERADMIN_OVERRIDE"
-                        try:
-                            AuditLogEntry.objects.create(
-                                tenant_id=client_tenant_id,
-                                user_id=str(user.user_id),
-                                request_id=request_id,
-                                action="SUPERADMIN_TENANT_CONTEXT_SWITCH",
-                                resource_type="TENANT",
-                                resource_id=client_tenant_id,
-                                status=AuditActionStatus.SUCCESS,
-                                metadata_json={
-                                    "original_tenant": trusted_tenant_id,
-                                    "target_tenant": client_tenant_id,
-                                    "user_email": user.email,
-                                },
-                            )
-                        except Exception as log_err:
-                            logger.error(f"Failed to record superadmin audit switch: {log_err}")
-                    else:
-                        # Cross-tenant violation: non-superadmin tried to access different tenant
-                        try:
-                            AuditLogEntry.objects.create(
-                                tenant_id=trusted_tenant_id,
-                                user_id=str(user.user_id),
-                                request_id=request_id,
-                                action="CROSS_TENANT_ACCESS_ATTEMPT",
-                                resource_type="TENANT",
-                                resource_id=client_tenant_id,
-                                status=AuditActionStatus.DENIED,
-                                metadata_json={
-                                    "claimed_tenant": trusted_tenant_id,
-                                    "attempted_tenant": client_tenant_id,
-                                    "user_email": user.email,
-                                },
-                            )
-                        except Exception as log_err:
-                            logger.error(f"Failed to record cross-tenant violation audit: {log_err}")
-
+                if is_superadmin:
+                    # Superadmin override allowed, but tenant must exist and be active
+                    target_tenant = Tenant.objects.filter(tenant_id=client_tenant_id).first()
+                    if not target_tenant:
                         return self._build_error_response(
-                            error_code="ERR_CROSS_TENANT_VIOLATION",
-                            http_status=status.HTTP_403_FORBIDDEN,
-                            message_en=(
-                                f"Cross-tenant access violation: Client-supplied tenant ID '{client_tenant_id}' "
-                                f"does not match trusted signed claims '{trusted_tenant_id}'."
-                            ),
-                            message_bn=(
-                                f"অন্য ফার্মেসির তথ্যে প্রবেশাধিকার কঠোরভাবে নিষিদ্ধ। "
-                                f"ক্লায়েন্ট প্রদত্ত টেন্যান্ট '{client_tenant_id}' অনুমোদিত তথ্যের সাথে মেলেনি।"
-                            ),
-                            recovery_action="ABORT_SECURITY_INCIDENT",
-                            details={
-                                "trusted_tenant_id": trusted_tenant_id,
-                                "supplied_tenant_id": client_tenant_id,
-                            },
+                            error_code="ERR_TENANT_NOT_FOUND",
+                            http_status=status.HTTP_404_NOT_FOUND,
+                            message_en=f"Target tenant '{client_tenant_id}' does not exist.",
+                            message_bn=f"উদ্দিষ্ট টেন্যান্ট '{client_tenant_id}' খুঁজে পাওয়া যায়নি।",
+                            recovery_action="CHECK_TENANT_IDENTIFIER",
+                            details={"target_tenant_id": client_tenant_id},
                             request_id=request_id,
                         )
+                    resolved_tenant_id = client_tenant_id
+                    resolution_source = "SUPERADMIN_OVERRIDE"
+                    try:
+                        AuditLogEntry.objects.create(
+                            tenant_id=client_tenant_id,
+                            user_id=str(user.user_id),
+                            request_id=request_id,
+                            action="SUPERADMIN_TENANT_CONTEXT_SWITCH",
+                            resource_type="TENANT",
+                            resource_id=client_tenant_id,
+                            status=AuditActionStatus.SUCCESS,
+                            metadata_json={
+                                "original_tenant": "PLATFORM_GLOBAL",
+                                "target_tenant": client_tenant_id,
+                                "user_email": user.email,
+                            },
+                        )
+                    except Exception as log_err:
+                        logger.error(f"Failed to record superadmin audit switch: {log_err}")
+                elif client_tenant_id != trusted_tenant_id:
+                    # Cross-tenant violation: non-superadmin tried to access different tenant
+                    try:
+                        AuditLogEntry.objects.create(
+                            tenant_id=trusted_tenant_id,
+                            user_id=str(user.user_id),
+                            request_id=request_id,
+                            action="CROSS_TENANT_ACCESS_ATTEMPT",
+                            resource_type="TENANT",
+                            resource_id=client_tenant_id,
+                            status=AuditActionStatus.DENIED,
+                            metadata_json={
+                                "claimed_tenant": trusted_tenant_id,
+                                "attempted_tenant": client_tenant_id,
+                                "user_email": user.email,
+                            },
+                        )
+                    except Exception as log_err:
+                        logger.error(f"Failed to record cross-tenant violation audit: {log_err}")
+
+                    return self._build_error_response(
+                        error_code="ERR_CROSS_TENANT_VIOLATION",
+                        http_status=status.HTTP_403_FORBIDDEN,
+                        message_en=(
+                            f"Cross-tenant access violation: Client-supplied tenant ID '{client_tenant_id}' "
+                            f"does not match trusted signed claims '{trusted_tenant_id}'."
+                        ),
+                        message_bn=(
+                            f"অন্য ফার্মেসির তথ্যে প্রবেশাধিকার কঠোরভাবে নিষিদ্ধ। "
+                            f"ক্লায়েন্ট প্রদত্ত টেন্যান্ট '{client_tenant_id}' অনুমোদিত তথ্যের সাথে মেলেনি।"
+                        ),
+                        recovery_action="ABORT_SECURITY_INCIDENT",
+                        details={
+                            "trusted_tenant_id": trusted_tenant_id,
+                            "supplied_tenant_id": client_tenant_id,
+                        },
+                        request_id=request_id,
+                    )
 
             # Load active Tenant record from DB
-            tenant = Tenant.objects.filter(tenant_id=resolved_tenant_id).first()
+            tenant = Tenant.objects.filter(tenant_id=resolved_tenant_id).first() if resolved_tenant_id else None
             if not tenant:
-                return self._build_error_response(
-                    error_code="ERR_TENANT_NOT_FOUND",
-                    http_status=status.HTTP_403_FORBIDDEN,
-                    message_en=f"Tenant '{resolved_tenant_id}' not found in active records.",
-                    message_bn=f"টেন্যান্ট '{resolved_tenant_id}' সিস্টেমে পাওয়া যায়নি।",
-                    recovery_action="CONTACT_SUPPORT",
-                    details={"tenant_id": resolved_tenant_id},
-                    request_id=request_id,
-                )
+                if is_superadmin and not resolved_tenant_id:
+                    tenant = None
+                else:
+                    return self._build_error_response(
+                        error_code="ERR_TENANT_NOT_FOUND",
+                        http_status=status.HTTP_403_FORBIDDEN,
+                        message_en=f"Tenant '{resolved_tenant_id}' not found in active records.",
+                        message_bn=f"টেন্যান্ট '{resolved_tenant_id}' সিস্টেমে পাওয়া যায়নি।",
+                        recovery_action="CONTACT_SUPPORT",
+                        details={"tenant_id": resolved_tenant_id},
+                        request_id=request_id,
+                    )
 
-            if not tenant.is_active:
+            if tenant and not tenant.is_active:
                 return self._build_error_response(
                     error_code="ERR_TENANT_INACTIVE",
                     http_status=status.HTTP_403_FORBIDDEN,
@@ -263,7 +278,7 @@ class TenantContextMiddleware:
             resolved_branch: Optional[Branch] = None
             target_branch_id = client_branch_id.strip() if client_branch_id else (trusted_branch_id or None)
 
-            if target_branch_id:
+            if tenant and target_branch_id:
                 branch = Branch.objects.filter(branch_id=target_branch_id).first()
                 if not branch or branch.tenant_id != tenant.tenant_id:
                     if client_branch_id:
@@ -298,34 +313,41 @@ class TenantContextMiddleware:
                         resolved_branch = branch
 
             # Construct security context
-            security_context = TenantSecurityContext(
-                tenant_id=tenant.tenant_id,
-                tenant_name=tenant.name,
-                subdomain=tenant.subdomain,
-                plan_tier=tenant.plan_tier,
-                branch_id=resolved_branch.branch_id if resolved_branch else None,
-                branch_name=resolved_branch.name if resolved_branch else None,
-                user_id=str(user.user_id),
-                user_role=user_role,
-                resolution_source=resolution_source,
-                is_active=tenant.is_active,
-            )
+            if tenant:
+                security_context = TenantSecurityContext(
+                    tenant_id=tenant.tenant_id,
+                    tenant_name=tenant.name,
+                    subdomain=tenant.subdomain,
+                    plan_tier=tenant.plan_tier,
+                    branch_id=resolved_branch.branch_id if resolved_branch else None,
+                    branch_name=resolved_branch.name if resolved_branch else None,
+                    user_id=str(user.user_id),
+                    user_role=user_role,
+                    resolution_source=resolution_source,
+                    is_active=tenant.is_active,
+                )
 
-            request.tenant = tenant
-            request.tenant_id = tenant.tenant_id
-            request.branch = resolved_branch
-            request.branch_id = resolved_branch.branch_id if resolved_branch else None
-            request.tenant_context = security_context
+                request.tenant = tenant
+                request.tenant_id = tenant.tenant_id
+                request.branch = resolved_branch
+                request.branch_id = resolved_branch.branch_id if resolved_branch else None
+                request.tenant_context = security_context
 
-            # Propagate verified tenant context into thread-safe logging
-            LogContextManager.set_context(
-                request_id=request_id,
-                tenant_id=tenant.tenant_id,
-                device_id=request.META.get("HTTP_X_DEVICE_ID"),
-                operation_id=request.META.get("HTTP_X_OPERATION_ID"),
-                user_id=str(user.user_id),
-                client_ip=request.META.get("REMOTE_ADDR", "127.0.0.1"),
-            )
+                # Propagate verified tenant context into thread-safe logging
+                LogContextManager.set_context(
+                    request_id=request_id,
+                    tenant_id=tenant.tenant_id,
+                    device_id=request.META.get("HTTP_X_DEVICE_ID"),
+                    operation_id=request.META.get("HTTP_X_OPERATION_ID"),
+                    user_id=str(user.user_id),
+                    client_ip=request.META.get("REMOTE_ADDR", "127.0.0.1"),
+                )
+            else:
+                request.tenant = None
+                request.tenant_id = None
+                request.branch = None
+                request.branch_id = None
+                request.tenant_context = None
 
         # 4. Anonymous / Unauthenticated Request
         else:
@@ -413,4 +435,59 @@ class GlobalExceptionMiddleware:
         response["X-Request-ID"] = correlation_id
         response["X-Correlation-ID"] = correlation_id
         return response
+
+
+class SubscriptionActivationGateMiddleware:
+    """
+    Middleware that rejects unentitled operational ERP writes on the server (ADR-0085).
+    Allows authorized billing, read-only, and policy-approved reconciliation endpoints.
+    """
+
+    def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
+        self.get_response = get_response
+
+    def __call__(self, request: HttpRequest) -> HttpResponse:
+        from apps.core.subscription_activation_gate_service import SubscriptionActivationGateService
+
+        user = getattr(request, "user", None)
+        if (not user or not getattr(user, "is_authenticated", False)) and hasattr(request, "_force_auth_user") and request._force_auth_user:
+            user = request._force_auth_user
+
+        tenant_id = getattr(request, "tenant_id", None)
+        if not tenant_id and hasattr(request, "tenant") and request.tenant:
+            tenant_id = getattr(request.tenant, "tenant_id", None)
+        if not tenant_id and user and hasattr(user, "tenant_id") and user.tenant_id:
+            tenant_id = user.tenant_id
+
+        is_permitted, code, reason, details = SubscriptionActivationGateService.is_operational_write_permitted(
+            tenant_id=tenant_id,
+            path=request.path,
+            method=request.method,
+            user=user,
+        )
+
+        if not is_permitted:
+            request_id = LogContextManager.get_request_id() or request.META.get("HTTP_X_REQUEST_ID", "req-unbound")
+            payload = {
+                "success": False,
+                "error_code": code,
+                "error": code,
+                "code": code,
+                "http_status": status.HTTP_403_FORBIDDEN,
+                "is_retryable": False,
+                "retryable": False,
+                "message": reason,
+                "message_en": reason,
+                "message_bn": "অপারেশনাল ডেটা পরিবর্তন প্রত্যাখ্যাত: ফার্মেসির বর্তমান সাবস্ক্রিপশন নতুন তথ্য যুক্ত বা পরিবর্তন করার অনুমতি দেয় না। অনুগ্রহ করে বিল পরিশোধ বা সাবস্ক্রিপশন সক্রিয় করুন।",
+                "recovery_action": "RENEW_SUBSCRIPTION",
+                "field_errors": {},
+                "details": details,
+                "request_id": request_id,
+            }
+            res = JsonResponse(payload, status=status.HTTP_403_FORBIDDEN)
+            res["X-Request-ID"] = request_id
+            return res
+
+        return self.get_response(request)
+
 
