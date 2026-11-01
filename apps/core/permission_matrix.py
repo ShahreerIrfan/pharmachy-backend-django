@@ -834,6 +834,42 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.TENANT,
         min_plan=PlanTier.BASIC,
     ),
+    # Platform API Access Policies & MFA Step-Up (ADR-0077)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/access-policies/(?:[^/]+/)?$",
+        method="GET",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR, UserRole.PLATFORM_AUDITOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/access-policies/(?:evaluate|verify-step-up)/?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR, UserRole.PLATFORM_AUDITOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/access-policies/(?:[^/]+/)?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/access-policies/[^/]+/?$",
+        method="PATCH",
+        allowed_roles=[UserRole.SUPERADMIN],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/access-policies/[^/]+/?$",
+        method="DELETE",
+        allowed_roles=[UserRole.SUPERADMIN],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
 ]
 
 

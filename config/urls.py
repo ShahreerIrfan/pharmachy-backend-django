@@ -13,6 +13,7 @@ from rest_framework.routers import DefaultRouter
 
 from apps.audit_logging.views import AuditLogEntryViewSet
 from apps.build_pipeline.views import BuildSmokeViewSet
+from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.announcement_views import (
     PlatformAnnouncementViewSet,
     TenantAnnouncementViewSet,
@@ -129,6 +130,7 @@ router.register("health/diagnostics", HealthDiagnosticsViewSet, basename="health
 router.register("permissions/matrix", EndpointPermissionMatrixViewSet, basename="permission-matrix")
 router.register("security/baseline", SecurityBaselineViewSet, basename="security-baseline")
 router.register("platform/announcements", PlatformAnnouncementViewSet, basename="platform-announcements")
+router.register("platform/access-policies", PlatformAccessPolicyViewSet, basename="platform-access-policies")
 router.register("platform/console", PlatformConsoleViewSet, basename="platform-console")
 router.register("platform/support-access", PlatformSupportAccessViewSet, basename="platform-support-access")
 router.register("platform/support/tickets", PlatformSupportTicketViewSet, basename="platform-support-tickets")

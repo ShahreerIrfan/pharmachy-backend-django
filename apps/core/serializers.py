@@ -23,6 +23,7 @@ from apps.core.models import (
     MedicineProduct,
     PaymentMethod,
     PaymentTransaction,
+    PlatformApiAccessPolicy,
     PlatformFeatureFlag,
     PrescriptionItem,
     PrescriptionRecord,
@@ -953,3 +954,63 @@ class AnnouncementReadReceiptSerializer(serializers.ModelSerializer):
             "read_at",
             "acknowledged",
         ]
+
+
+class PlatformApiAccessPolicySerializer(serializers.ModelSerializer):
+    """
+    Architecture Decision: ADR-0077
+    Serializer for Platform API Access Policies.
+    """
+
+    class Meta:
+        model = PlatformApiAccessPolicy
+        fields = [
+            "policy_id",
+            "name",
+            "description",
+            "endpoint_pattern",
+            "http_method",
+            "allowed_roles",
+            "require_mfa",
+            "require_step_up",
+            "enforce_zero_implicit_tenant_access",
+            "ip_allowlist",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["policy_id", "created_at", "updated_at"]
+
+    def validate_endpoint_pattern(self, value):
+        import re
+
+        if not value or len(value.strip()) < 3:
+            raise serializers.ValidationError("Endpoint pattern must be at least 3 characters.")
+        try:
+            re.compile(value)
+        except re.error as e:
+            raise serializers.ValidationError(f"Invalid regex pattern: {e}")
+        return value.strip()
+
+    def validate_name(self, value):
+        if not value or len(value.strip()) < 3:
+            raise serializers.ValidationError("Policy name must be at least 3 characters.")
+        return value.strip()
+
+
+class PlatformPolicyEvaluationRequestSerializer(serializers.Serializer):
+    """
+    Serializer for probing / evaluating access against policies.
+    """
+
+    path = serializers.CharField(max_length=255)
+    method = serializers.CharField(max_length=10, default="GET")
+    client_ip = serializers.CharField(max_length=45, required=False, allow_blank=True)
+
+
+class StepUpVerificationRequestSerializer(serializers.Serializer):
+    """
+    Serializer for submitting a TOTP verification code for step-up challenge.
+    """
+
+    code = serializers.CharField(min_length=6, max_length=6)

@@ -50,6 +50,7 @@ def normalize_bangladesh_phone(raw_phone: str) -> str:
 class UserRole(models.TextChoices):
     SUPERADMIN = "SUPERADMIN", "Platform Super Administrator"
     PLATFORM_OPERATOR = "PLATFORM_OPERATOR", "Platform Operator / DevOps"
+    PLATFORM_AUDITOR = "PLATFORM_AUDITOR", "Platform Security & Compliance Auditor"
     PHARMACY_OWNER = "PHARMACY_OWNER", "Pharmacy Owner / Licensee"
     BRANCH_MANAGER = "BRANCH_MANAGER", "Branch Manager"
     STAFF_PHARMACIST = "STAFF_PHARMACIST", "Registered Pharmacist (DGDA/PCB)"

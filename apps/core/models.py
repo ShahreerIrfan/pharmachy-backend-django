@@ -1532,3 +1532,46 @@ class AnnouncementReadReceipt(models.Model):
 
     def __str__(self) -> str:
         return f"Receipt {self.receipt_id} for {self.user_id} on {self.announcement_id} (ack: {self.acknowledged})"
+
+
+class PlatformApiAccessPolicy(models.Model):
+    """
+    Architecture Decision: ADR-0077
+    Configurable access control policies protecting platform admin APIs,
+    enforcing separate roles, mandatory MFA, step-up MFA for critical operations,
+    and zero implicit tenant access.
+    """
+
+    policy_id = models.CharField(max_length=64, primary_key=True)
+    name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default="")
+    endpoint_pattern = models.CharField(max_length=255)
+    http_method = models.CharField(max_length=10, default="*")
+    allowed_roles = models.JSONField(default=list, blank=True)
+    require_mfa = models.BooleanField(default=True)
+    require_step_up = models.BooleanField(default=False)
+    enforce_zero_implicit_tenant_access = models.BooleanField(default=True)
+    ip_allowlist = models.JSONField(default=list, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_platform_policies",
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Platform API Access Policy"
+        verbose_name_plural = "Platform API Access Policies"
+        indexes = [
+            models.Index(fields=["is_active", "endpoint_pattern"]),
+            models.Index(fields=["require_mfa", "require_step_up"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.policy_id}: {self.name} ({self.http_method} {self.endpoint_pattern})"
+
