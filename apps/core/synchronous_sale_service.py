@@ -76,6 +76,11 @@ class SynchronousSaleService:
         except Tenant.DoesNotExist as err:
             raise PermissionError(f"Tenant '{tenant_id}' is inactive or does not exist.") from err
 
+        if not tenant.is_checkout_allowed():
+            raise PermissionError(
+                f"Checkout rejected: Tenant '{tenant_id}' is in status '{tenant.status}'. Dispensing operations are blocked."
+            )
+
         try:
             branch = Branch.objects.get(branch_id=branch_id, tenant=tenant, is_active=True)
         except Branch.DoesNotExist as err:

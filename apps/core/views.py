@@ -209,14 +209,15 @@ class TenantViewSet(viewsets.ModelViewSet):
         )
 
     def destroy(self, request, *args, **kwargs):
-        from rest_framework.exceptions import PermissionDenied
-
-        raise PermissionDenied(
-            detail={
+        return Response(
+            {
+                "success": False,
                 "error_code": "ABSOLUTE_SYSTEM_BLOCK",
+                "code": "ABSOLUTE_SYSTEM_BLOCK",
                 "message_en": "Absolute Block: Tenant accounts cannot be hard-deleted. Use transition-status to archive.",
                 "message_bn": "স্থায়ী নিষেধাজ্ঞা: টেন্যান্ট অ্যাকাউন্ট হার্ড-ডিলিট করা নিষিদ্ধ। আর্কাইভ করতে transition-status ব্যবহার করুন।",
-            }
+            },
+            status=status.HTTP_403_FORBIDDEN,
         )
 
     @action(detail=True, methods=["post"], url_path="transition-status")
@@ -330,6 +331,112 @@ class TenantViewSet(viewsets.ModelViewSet):
             raise ValidationError(detail={"restoration_error": [str(err)]})
 
         return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="activate-subscription")
+    def activate_subscription(self, request, pk=None):
+        """Audited subscription activation executed exclusively by Platform Super Admin."""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        from apps.core.platform_tenant_lifecycle_service import PlatformTenantLifecycleService
+
+        if not self._is_superadmin(request):
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": "Only Platform Super Admin is authorized to activate tenant subscriptions.",
+                    "message_bn": "শুধুমাত্র প্ল্যাটফর্ম সুপার অ্যাডমিনের টেন্যান্ট সাবস্ক্রিপশন অ্যাক্টিভেট করার অনুমতি আছে।",
+                }
+            )
+
+        tenant = self.get_object()
+        data = request.data or {}
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+        operator_email = getattr(request.user, "email", None)
+
+        try:
+            result = PlatformTenantLifecycleService.activate_subscription(
+                tenant_id=tenant.tenant_id,
+                plan_tier=data.get("plan_tier", "STANDARD"),
+                billing_cycle=data.get("billing_cycle", "MONTHLY"),
+                payment_reference=data.get("payment_reference", ""),
+                operator_id=operator_id,
+                operator_email=operator_email,
+                notes=data.get("notes", ""),
+            )
+        except Exception as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"activation_error": [str(err)]}
+            raise ValidationError(detail=err_dict)
+
+        return Response(
+            {
+                "success": True,
+                "code": "TENANT_SUBSCRIPTION_ACTIVATED",
+                "message_en": f"Tenant '{tenant.tenant_id}' subscription activated successfully.",
+                "message_bn": f"টেন্যান্ট '{tenant.tenant_id}' সাবস্ক্রিপশন সফলভাবে অ্যাক্টিভেট করা হয়েছে।",
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["post"], url_path="change-plan")
+    def change_plan(self, request, pk=None):
+        """Audited plan tier and quota change executed exclusively by Platform Super Admin."""
+        from rest_framework.exceptions import PermissionDenied, ValidationError
+
+        from apps.core.platform_tenant_lifecycle_service import PlatformTenantLifecycleService
+
+        if not self._is_superadmin(request):
+            raise PermissionDenied(
+                detail={
+                    "error_code": "ROLE_PERMISSION_DENIED",
+                    "message_en": "Only Platform Super Admin is authorized to change tenant subscription plans.",
+                    "message_bn": "শুধুমাত্র প্ল্যাটফর্ম সুপার অ্যাডমিনের টেন্যান্ট প্ল্যান পরিবর্তনের অনুমতি আছে।",
+                }
+            )
+
+        tenant = self.get_object()
+        data = request.data or {}
+        operator_id = str(getattr(request.user, "user_id", None) or request.user)
+
+        try:
+            result = PlatformTenantLifecycleService.change_plan_tier(
+                tenant_id=tenant.tenant_id,
+                target_plan_tier=data.get("plan_tier", "PRO"),
+                target_billing_cycle=data.get("billing_cycle", "MONTHLY"),
+                operator_id=operator_id,
+                reason=data.get("reason", ""),
+            )
+        except Exception as err:
+            err_dict = err.message_dict if hasattr(err, "message_dict") else {"plan_error": [str(err)]}
+            raise ValidationError(detail=err_dict)
+
+        return Response(
+            {
+                "success": True,
+                "code": "TENANT_PLAN_CHANGED",
+                "message_en": f"Tenant '{tenant.tenant_id}' plan changed successfully to '{result['current_plan']}'.",
+                "message_bn": f"টেন্যান্ট '{tenant.tenant_id}' প্ল্যান সফলভাবে '{result['current_plan']}'-এ পরিবর্তিত হয়েছে।",
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=["get"], url_path="lifecycle-timeline")
+    def lifecycle_timeline(self, request, pk=None):
+        """Returns the ordered immutable lifecycle audit history for this tenant."""
+        from apps.core.platform_tenant_lifecycle_service import PlatformTenantLifecycleService
+
+        tenant = self.get_object()
+        timeline = PlatformTenantLifecycleService.inspect_lifecycle_timeline(tenant.tenant_id)
+        return Response(
+            {
+                "success": True,
+                "tenant_id": tenant.tenant_id,
+                "count": len(timeline),
+                "data": timeline,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=["get", "patch"], url_path="canonical-settings")
     def canonical_settings(self, request, pk=None):

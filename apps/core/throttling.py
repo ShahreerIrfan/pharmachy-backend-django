@@ -84,7 +84,11 @@ class SensitiveMutationRateThrottle(BaseIdentityRateThrottle):
             or (request.data.get("tenant_id") if hasattr(request, "data") and isinstance(request.data, dict) else None)
             or "public-tenant"
         )
-        user_id = str(request.user.id) if getattr(request, "user", None) and request.user.is_authenticated else "anon"
+        user_id = (
+            str(getattr(request.user, "user_id", getattr(request.user, "id", "anon")))
+            if getattr(request, "user", None) and request.user.is_authenticated
+            else "anon"
+        )
         device_id = request.META.get("HTTP_X_DEVICE_ID", "")
 
         return f"throttle_{self.scope}_{tenant_id}_{user_id}_{device_id}"
@@ -104,7 +108,11 @@ class DataExportRateThrottle(BaseIdentityRateThrottle):
             or (getattr(request.user, "tenant_id", None) if getattr(request, "user", None) else None)
             or "public-tenant"
         )
-        user_id = str(request.user.id) if getattr(request, "user", None) and request.user.is_authenticated else "anon"
+        user_id = (
+            str(getattr(request.user, "user_id", getattr(request.user, "id", "anon")))
+            if getattr(request, "user", None) and request.user.is_authenticated
+            else "anon"
+        )
         return f"throttle_{self.scope}_{tenant_id}_{user_id}"
 
 
@@ -132,7 +140,11 @@ class TestStrictRateThrottle(BaseIdentityRateThrottle):
     def get_cache_key(self, request: Any, view: Any) -> str:
         ip = self.get_client_ip(request)
         action_name = getattr(view, "action", "test_action")
-        user_id = str(request.user.id) if getattr(request, "user", None) and request.user.is_authenticated else "anon"
+        user_id = (
+            str(getattr(request.user, "user_id", getattr(request.user, "id", "anon")))
+            if getattr(request, "user", None) and request.user.is_authenticated
+            else "anon"
+        )
         device_id = request.META.get("HTTP_X_DEVICE_ID", "default-dev")
         return f"throttle_{self.scope}_{action_name}_{ip}_{user_id}_{device_id}"
 

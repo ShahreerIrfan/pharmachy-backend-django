@@ -695,7 +695,8 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
         return Response(payload, status=status.HTTP_401_UNAUTHORIZED)
 
     # 4. Permission Denied Errors (403 Forbidden)
-    if isinstance(exc, (DRFPermissionDenied, DjangoPermissionDenied)):
+    if isinstance(exc, (DRFPermissionDenied, DjangoPermissionDenied, PermissionError)):
+        msg = str(exc) if str(exc) else "You do not have permission to perform this action."
         payload = {
             "success": False,
             "error_code": "ERR_PERMISSION_DENIED",
@@ -705,8 +706,8 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
             "http_status": 403,
             "is_retryable": False,
             "retryable": False,
-            "message": "You do not have permission to perform this action.",
-            "message_en": "You do not have permission to perform this action.",
+            "message": msg,
+            "message_en": msg,
             "message_bn": "এই কাজটি সম্পাদন করার অনুমতি আপনার নেই।",
             "recovery_action": RecoveryAction.REQUEST_MANAGER_OVERRIDE.value,
             "field_errors": {},

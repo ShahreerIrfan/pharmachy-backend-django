@@ -14,6 +14,7 @@ Core stock and ledger mutations are strictly prohibited from this module.
 from __future__ import annotations
 
 import logging
+import uuid
 from decimal import Decimal
 
 from celery import shared_task
@@ -196,18 +197,22 @@ def aggregate_daily_sales_analytics_task(self, job_id: str) -> dict:
         total_items = items_sold_agg if items_sold_agg is not None else 0
 
         # Persist derived analytics record in DB
-        analytics_id = f"anl_{job.tenant_id[:6]}_{branch.branch_id[:6]}_{target_date.strftime('%Y%m%d')}"
-        analytics, _ = DailyBranchAnalytics.objects.update_or_create(
+        analytics = DailyBranchAnalytics.objects.filter(
             tenant=job.tenant,
             branch=branch,
             date=target_date,
-            defaults={
-                "analytics_id": analytics_id,
-                "total_sales_amount": total_sales,
-                "total_orders_count": total_orders,
-                "total_items_sold": total_items,
-            },
-        )
+        ).first()
+        if not analytics:
+            analytics = DailyBranchAnalytics(
+                analytics_id=f"anl_{uuid.uuid4().hex[:16]}_{target_date.strftime('%Y%m%d')}",
+                tenant=job.tenant,
+                branch=branch,
+                date=target_date,
+            )
+        analytics.total_sales_amount = total_sales
+        analytics.total_orders_count = total_orders
+        analytics.total_items_sold = total_items
+        analytics.save()
 
         # Warm Redis cache for instantaneous mobile manager KPI loading
         cache_key = f"kpi:{job.tenant_id}:{branch.branch_id}:{target_date.strftime('%Y-%m-%d')}"
