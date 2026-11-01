@@ -819,6 +819,94 @@ class SubscriptionRecord(models.Model):
         ]
 
 
+class RenewalInvoiceStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    ISSUED = "ISSUED", "Issued"
+    PAID = "PAID", "Paid"
+    PAST_DUE = "PAST_DUE", "Past Due"
+    VOID = "VOID", "Void"
+    REFUNDED = "REFUNDED", "Refunded"
+
+
+class SubscriptionRenewalInvoice(models.Model):
+    """
+    Architecture Decision: ADR-0015, ADR-0033 & ADR-0087
+    SaaS commercial subscription renewal invoice, tax computation,
+    and append-only status transition history.
+    """
+
+    invoice_id = models.CharField(max_length=64, primary_key=True)
+    invoice_number = models.CharField(max_length=64, unique=True, db_index=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="renewal_invoices")
+    subscription = models.ForeignKey(
+        SubscriptionRecord, on_delete=models.SET_NULL, null=True, blank=True, related_name="renewal_invoices"
+    )
+    plan_tier = models.CharField(max_length=32, choices=PlanTier.choices, default=PlanTier.STANDARD)
+    billing_cycle = models.CharField(max_length=32, default="MONTHLY")
+    period_start = models.DateField(db_index=True)
+    period_end = models.DateField(db_index=True)
+
+    subtotal_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Base tier plan charge + addon units in BDT.",
+    )
+    discount_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Promotional or annual prepay savings in BDT.",
+    )
+    tax_rate_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("5.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Statutory SaaS VAT rate percentage (e.g. 5.00%).",
+    )
+    tax_amount_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Calculated statutory VAT in BDT.",
+    )
+    total_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Net payable amount in BDT.",
+    )
+
+    status = models.CharField(
+        max_length=32,
+        choices=RenewalInvoiceStatus.choices,
+        default=RenewalInvoiceStatus.ISSUED,
+        db_index=True,
+    )
+    payment_method = models.CharField(max_length=64, blank=True, default="")
+    payment_reference = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+
+    status_history_json = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Subscription Renewal Invoice"
+        verbose_name_plural = "Subscription Renewal Invoices"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["period_start", "period_end"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.invoice_number} [{self.tenant.tenant_id}] - {self.total_bdt} BDT ({self.status})"
+
+
 class StaffRole(models.TextChoices):
     PLATFORM_SUPER_ADMIN = "PLATFORM_SUPER_ADMIN", "Platform Super Admin"
     TENANT_OWNER = "TENANT_OWNER", "Tenant Owner"
