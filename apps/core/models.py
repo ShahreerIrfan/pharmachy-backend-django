@@ -2258,3 +2258,61 @@ class SubscriptionCancellationRecord(models.Model):
 
     def __str__(self) -> str:
         return f"Cancellation {self.cancellation_id} for {self.tenant_id} ({self.effective_mode})"
+
+
+class OfflineLeaseStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active"
+    REVOKED = "REVOKED", "Revoked"
+    EXPIRED = "EXPIRED", "Expired"
+    SUPERSEDED = "SUPERSEDED", "Superseded"
+
+
+class DeviceLeaseCertificate(models.Model):
+    """
+    Cryptographically signed, time-bound offline entitlement lease certificate.
+    Architecture Decision: ADR-0082, ADR-0092 and ADR-0093
+    Requirement Trace: FR-071 (SaaS Plans, Billing and Tenant Lifecycle)
+
+    Binds tenant, branch, device_id, authenticated user, role snapshot, and policy version.
+    Signed using HMAC-SHA256 for zero-trust offline POS terminal verification.
+    """
+
+    lease_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="offline_leases")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="offline_leases")
+    device_id = models.CharField(max_length=128, db_index=True)
+    device_name = models.CharField(max_length=255, blank=True, default="")
+    user_id = models.CharField(max_length=128, blank=True, default="")
+    user_email = models.EmailField(blank=True, default="")
+    role_snapshot = models.CharField(max_length=64, default="CASHIER")
+    plan_tier = models.CharField(max_length=32, choices=PlanTier.choices, default=PlanTier.BASIC)
+    policy_version = models.CharField(max_length=32, default="v2.0")
+    duration_hours = models.PositiveIntegerField(default=72)
+    issued_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    capabilities_snapshot = models.JSONField(default=dict)
+    signature_algorithm = models.CharField(max_length=32, default="HMAC-SHA256")
+    signature = models.CharField(max_length=256)
+    status = models.CharField(
+        max_length=32,
+        choices=OfflineLeaseStatus.choices,
+        default=OfflineLeaseStatus.ACTIVE,
+    )
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revocation_reason = models.TextField(blank=True, default="")
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-issued_at"]
+        verbose_name = "Device Lease Certificate"
+        verbose_name_plural = "Device Lease Certificates"
+        indexes = [
+            models.Index(fields=["tenant", "device_id", "-issued_at"]),
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Lease {self.lease_id} ({self.device_id} at branch {self.branch_id}) [{self.status}]"

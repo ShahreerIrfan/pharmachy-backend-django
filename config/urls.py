@@ -42,6 +42,7 @@ from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
 from apps.core.downgrade_views import SubscriptionDowngradeViewSet
 from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
+from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -176,6 +177,7 @@ router.register("billing/gateway", PaymentGatewayViewSet, basename="billing-gate
 router.register("billing/upgrade", ProratedUpgradeViewSet, basename="billing-upgrade")
 router.register("billing/downgrade", SubscriptionDowngradeViewSet, basename="billing-downgrade")
 router.register("billing/lifecycle", SubscriptionLifecycleViewSet, basename="billing-lifecycle")
+router.register("billing/offline-leases", OfflineEntitlementViewSet, basename="billing-offline-leases")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
