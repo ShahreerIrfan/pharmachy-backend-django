@@ -18,15 +18,22 @@ from apps.core.announcement_views import (
     PlatformAnnouncementViewSet,
     TenantAnnouncementViewSet,
 )
+from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
 from apps.core.cross_tenant_metrics_views import (
     PlatformCrossTenantMetricsViewSet,
     TenantPlatformBenchmarksViewSet,
 )
+from apps.core.device_seat_views import DeviceSeatViewSet
+from apps.core.downgrade_views import SubscriptionDowngradeViewSet
 from apps.core.feature_flag_views import (
     PlatformFeatureFlagViewSet,
     TenantFeatureFlagEvaluationViewSet,
 )
+from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
+from apps.core.manual_payment_views import ManualPaymentClaimViewSet
+from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
+from apps.core.offline_lapse_views import LapsedPlanReconciliationViewSet
 from apps.core.onboarding_views import PlatformTenantOnboardingWizardViewSet
 from apps.core.plan_catalogue_views import (
     PlanCatalogueViewSet,
@@ -34,18 +41,11 @@ from apps.core.plan_catalogue_views import (
     TenantEntitlementViewSet,
 )
 from apps.core.platform_access_views import PlatformAccessPolicyViewSet
-from apps.core.subscription_views import SubscriptionViewSet
-from apps.core.trial_policy_views import TrialPolicyViewSet
-from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
-from apps.core.manual_payment_views import ManualPaymentClaimViewSet
-from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
-from apps.core.downgrade_views import SubscriptionDowngradeViewSet
-from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
-from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
-from apps.core.offline_lapse_views import LapsedPlanReconciliationViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
-from apps.core.device_seat_views import DeviceSeatViewSet
+from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
+from apps.core.subscription_portal_views import SubscriptionCustomerPortalViewSet
+from apps.core.subscription_views import SubscriptionViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -63,6 +63,7 @@ from apps.core.tenant_export_views import (
     TenantDataExportViewSet,
 )
 from apps.core.tenant_medicine_config_views import TenantMedicineConfigViewSet
+from apps.core.trial_policy_views import TrialPolicyViewSet
 from apps.core.views import (
     ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
@@ -184,6 +185,7 @@ router.register("billing/offline-leases", OfflineEntitlementViewSet, basename="b
 router.register("billing/offline-reconciliation", LapsedPlanReconciliationViewSet, basename="billing-offline-reconciliation")
 router.register("billing/quota-usage", TenantQuotaUsageViewSet, basename="billing-quota-usage")
 router.register("billing/devices", DeviceSeatViewSet, basename="billing-devices")
+router.register("billing/portal", SubscriptionCustomerPortalViewSet, basename="billing-portal")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
