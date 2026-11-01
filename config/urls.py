@@ -40,6 +40,7 @@ from apps.core.manual_payment_views import ManualPaymentClaimViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
 from apps.core.offline_lapse_views import LapsedPlanReconciliationViewSet
 from apps.core.onboarding_views import PlatformTenantOnboardingWizardViewSet
+from apps.core.owner_dashboard_views import OwnerDashboardViewSet
 from apps.core.plan_catalogue_views import (
     PlanCatalogueViewSet,
     TenantEffectiveEntitlementViewSet,
@@ -195,6 +196,7 @@ router.register("billing/portal", SubscriptionCustomerPortalViewSet, basename="b
 router.register("billing/reports", TenantBillingReportViewSet, basename="billing-reports")
 router.register("billing/dunning", DunningNotificationViewSet, basename="billing-dunning")
 router.register("billing/support-overrides", SubscriptionSupportOverrideViewSet, basename="billing-support-overrides")
+router.register("owner/dashboard", OwnerDashboardViewSet, basename="owner-dashboard")
 router.register(
     "platform/billing-reports", PlatformBillingReportViewSet, basename="platform-billing-reports"
 )

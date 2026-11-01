@@ -43,6 +43,7 @@ class PaymentMethod(models.TextChoices):
     BKASH = "BKASH", "bKash"
     NAGAD = "NAGAD", "Nagad"
     CARD = "CARD", "Card"
+    DUE = "DUE", "Due / Credit"
 
 
 class TenantLifecycleStatus(models.TextChoices):
@@ -2728,3 +2729,72 @@ class SubscriptionSupportOverride(models.Model):
     def __str__(self) -> str:
         return f"{self.override_id} [{self.override_type}] - {self.tenant_id} ({self.status})"
 
+
+
+class DueStatus(models.TextChoices):
+    OUTSTANDING = "OUTSTANDING", "Outstanding"
+    PARTIAL = "PARTIAL", "Partially Paid"
+    SETTLED = "SETTLED", "Settled"
+    WRITTEN_OFF = "WRITTEN_OFF", "Written Off"
+
+
+class CustomerDueRecord(models.Model):
+    """
+    Tracks retail credit sales, outstanding balances, and customer repayments (P101 / ADR-0101).
+    Requirement Trace: FR-031, FR-032, FR-033
+    Strict Decimal precision (zero float).
+    """
+
+    due_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="customer_dues")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="customer_dues")
+    invoice = models.ForeignKey(
+        SaleInvoice,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="customer_dues",
+    )
+    customer_name = models.CharField(max_length=255)
+    customer_phone = models.CharField(max_length=32, db_index=True)
+    total_due_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    paid_amount_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    remaining_due_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=DueStatus.choices,
+        default=DueStatus.OUTSTANDING,
+        db_index=True,
+    )
+    due_date = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Customer Due Record"
+        verbose_name_plural = "Customer Due Records"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "customer_phone"]),
+            models.Index(fields=["branch", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Due {self.due_id} - {self.customer_name} ({self.remaining_due_bdt} BDT) [{self.status}]"
