@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from django.core.validators import MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -1108,3 +1108,100 @@ class TicketActionHistory(models.Model):
         ordering = ["-timestamp"]
         verbose_name = "Ticket Action History"
         verbose_name_plural = "Ticket Action Histories"
+
+
+class PlatformFeatureFlag(models.Model):
+    """
+    Architecture Decision: ADR-0072
+    Server-authoritative platform feature flag with gradual rollout,
+    subscription plan tier gating, and instant emergency kill switch.
+    """
+
+    flag_key = models.CharField(max_length=64, primary_key=True)
+    name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default="")
+    is_enabled_globally = models.BooleanField(default=False)
+    default_enabled = models.BooleanField(default=False, help_text="Safe default value when no targeting matches.")
+    rollout_percentage = models.PositiveSmallIntegerField(
+        default=0,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Targeted rollout percentage (0-100).",
+    )
+    min_plan_tier = models.CharField(
+        max_length=32,
+        choices=PlanTier.choices,
+        default=PlanTier.BASIC,
+    )
+    is_kill_switch_active = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Emergency kill switch. When True, forces flag to False platform-wide.",
+    )
+    kill_switch_reason = models.TextField(blank=True, default="")
+    kill_switch_tripped_at = models.DateTimeField(null=True, blank=True)
+    kill_switch_tripped_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tripped_kill_switches",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="updated_feature_flags",
+    )
+
+    class Meta:
+        ordering = ["flag_key"]
+        verbose_name = "Platform Feature Flag"
+        verbose_name_plural = "Platform Feature Flags"
+
+    def __str__(self) -> str:
+        status_str = (
+            "KILL-SWITCH"
+            if self.is_kill_switch_active
+            else ("ENABLED" if self.is_enabled_globally else f"{self.rollout_percentage}%")
+        )
+        return f"Flag {self.flag_key} [{status_str}]"
+
+
+class TenantFeatureFlagOverride(models.Model):
+    """
+    Architecture Decision: ADR-0072
+    Tenant-specific targeting or exclusion override for a platform feature flag.
+    """
+
+    override_id = models.CharField(max_length=64, primary_key=True)
+    flag = models.ForeignKey(PlatformFeatureFlag, on_delete=models.CASCADE, related_name="tenant_overrides")
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="feature_flag_overrides")
+    is_enabled = models.BooleanField(default=True)
+    notes = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_flag_overrides",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Tenant Feature Flag Override"
+        verbose_name_plural = "Tenant Feature Flag Overrides"
+        constraints = [
+            models.UniqueConstraint(fields=["flag", "tenant"], name="unique_flag_tenant_override"),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "flag"]),
+        ]
+
+    def __str__(self) -> str:
+        state = "ENABLED" if self.is_enabled else "DISABLED"
+        return f"{self.tenant_id} -> {self.flag_id}: {state}"

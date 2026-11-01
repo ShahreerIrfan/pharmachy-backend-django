@@ -21,6 +21,7 @@ from apps.core.models import (
     MedicineProduct,
     PaymentMethod,
     PaymentTransaction,
+    PlatformFeatureFlag,
     PrescriptionItem,
     PrescriptionRecord,
     SaleInvoice,
@@ -28,6 +29,7 @@ from apps.core.models import (
     StaffMember,
     SubscriptionRecord,
     Tenant,
+    TenantFeatureFlagOverride,
     TenantMedicineConfig,
 )
 from apps.core.validators import (
@@ -690,3 +692,49 @@ class PaymentTransactionSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["created_at"]
+
+
+class PlatformFeatureFlagSerializer(serializers.ModelSerializer):
+    overrides_count = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = PlatformFeatureFlag
+        fields = [
+            "flag_key",
+            "name",
+            "description",
+            "is_enabled_globally",
+            "default_enabled",
+            "rollout_percentage",
+            "min_plan_tier",
+            "is_kill_switch_active",
+            "kill_switch_reason",
+            "kill_switch_tripped_at",
+            "overrides_count",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["created_at", "updated_at", "kill_switch_tripped_at", "overrides_count"]
+
+    def get_overrides_count(self, obj):
+        return obj.tenant_overrides.count()
+
+    def validate_rollout_percentage(self, value):
+        if value < 0 or value > 100:
+            raise serializers.ValidationError("Rollout percentage must be an integer between 0 and 100.")
+        return value
+
+
+class TenantFeatureFlagOverrideSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenantFeatureFlagOverride
+        fields = [
+            "override_id",
+            "flag",
+            "tenant",
+            "is_enabled",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["override_id", "created_at", "updated_at"]

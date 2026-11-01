@@ -40,6 +40,7 @@ class PlanTier:
 
 class ScopeLevel:
     GLOBAL = "GLOBAL"
+    TENANT = "TENANT"
     BRANCH = "BRANCH"
     SHIFT = "SHIFT"
     PUBLIC = "PUBLIC"
@@ -616,6 +617,57 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
             UserRole.PHARMACY_OWNER,
             UserRole.BRANCH_MANAGER,
             UserRole.STAFF_PHARMACIST,
+        ],
+        scope=ScopeLevel.TENANT,
+        min_plan=PlanTier.BASIC,
+    ),
+    # 16. Platform Feature Flags & Tenant Targeting (ADR-0072)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/feature-flags/(?:[^/]+/(?:kill-switch|tenant-override(?:/[^/]+)?)?)?$",
+        method="GET",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/feature-flags/(?:[^/]+/(?:kill-switch|tenant-override(?:/[^/]+)?)?)?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/feature-flags/[^/]+/?$",
+        method="PUT",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/feature-flags/[^/]+/?$",
+        method="PATCH",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/feature-flags/(?:[^/]+/(?:kill-switch|tenant-override/[^/]+)?|[^/]+)/?$",
+        method="DELETE",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    # Tenant-Scoped Feature Flag Evaluation (ADR-0072)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/tenants/feature-flags/(?:eval(?:/[^/]+)?)?$",
+        method="GET",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PLATFORM_OPERATOR,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.STAFF_PHARMACIST,
+            UserRole.CASHIER,
         ],
         scope=ScopeLevel.TENANT,
         min_plan=PlanTier.BASIC,

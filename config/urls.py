@@ -22,6 +22,10 @@ from apps.core.support_ticket_views import (
     PlatformSupportTicketViewSet,
     TenantSupportTicketViewSet,
 )
+from apps.core.feature_flag_views import (
+    PlatformFeatureFlagViewSet,
+    TenantFeatureFlagEvaluationViewSet,
+)
 from apps.core.tenant_medicine_config_views import TenantMedicineConfigViewSet
 from apps.core.views import (
     ApiResponseConventionViewSet,
@@ -67,6 +71,7 @@ router.register("auth", AuthenticationViewSet, basename="auth")
 router.register("tenants/medicine-configs", TenantMedicineConfigViewSet, basename="tenant-medicine-configs")
 router.register("tenants/support-access", TenantSupportAccessViewSet, basename="tenant-support-access")
 router.register("tenants/support/tickets", TenantSupportTicketViewSet, basename="tenant-support-tickets")
+router.register("tenants/feature-flags", TenantFeatureFlagEvaluationViewSet, basename="tenant-feature-flags")
 router.register("tenants", TenantViewSet, basename="tenant")
 router.register("branches", BranchViewSet, basename="branch")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
@@ -106,6 +111,7 @@ router.register("security/baseline", SecurityBaselineViewSet, basename="security
 router.register("platform/console", PlatformConsoleViewSet, basename="platform-console")
 router.register("platform/support-access", PlatformSupportAccessViewSet, basename="platform-support-access")
 router.register("platform/support/tickets", PlatformSupportTicketViewSet, basename="platform-support-tickets")
+router.register("platform/feature-flags", PlatformFeatureFlagViewSet, basename="platform-feature-flags")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
