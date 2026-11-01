@@ -30,6 +30,7 @@ from apps.core.health import legacy_health_check, liveness_probe, readiness_prob
 from apps.core.onboarding_views import PlatformTenantOnboardingWizardViewSet
 from apps.core.plan_catalogue_views import (
     PlanCatalogueViewSet,
+    TenantEffectiveEntitlementViewSet,
     TenantEntitlementViewSet,
 )
 from apps.core.platform_access_views import PlatformAccessPolicyViewSet
@@ -156,6 +157,9 @@ router.register(
 
 router.register("billing/plans", PlanCatalogueViewSet, basename="billing-plans")
 router.register("billing/entitlements", TenantEntitlementViewSet, basename="billing-entitlements")
+router.register(
+    "billing/effective-entitlements", TenantEffectiveEntitlementViewSet, basename="billing-effective-entitlements"
+)
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers

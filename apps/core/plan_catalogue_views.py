@@ -208,3 +208,61 @@ class TenantEntitlementViewSet(viewsets.ViewSet):
                 "is_entitled": is_entitled,
             }
         )
+
+
+class TenantEffectiveEntitlementViewSet(viewsets.ViewSet):
+    """
+    Evaluates effective capabilities, limits, quotas, and offline lease for authenticated tenant/device.
+    Route: /api/v2/billing/effective-entitlements/{tenant_id}/
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _verify_tenant_access(self, request, tenant_id: str):
+        user = request.user
+        if _is_platform_superadmin(user):
+            return
+
+        user_tenant_id = getattr(user, "tenant_id", None)
+        if hasattr(user, "tenant") and user.tenant:
+            user_tenant_id = getattr(user.tenant, "tenant_id", user_tenant_id)
+
+        if not user_tenant_id or str(user_tenant_id) != str(tenant_id):
+            raise CrossTenantViolationError(
+                message_en=f"Tenant '{user_tenant_id}' cannot access effective entitlements for tenant '{tenant_id}'.",
+                message_bn="অন্য ফার্মেসির কার্যকর এনটাইটেলমেন্ট ও কোটা দেখার অনুমতি নেই।",
+            )
+
+    def retrieve(self, request, pk=None):
+        tenant_id = str(pk or "").strip()
+        if not tenant_id:
+            raise ValidationError(detail={"tenant_id": ["Tenant ID is required."]})
+
+        self._verify_tenant_access(request, tenant_id)
+
+        device_id = request.query_params.get("device_id") or request.headers.get("X-Device-Id")
+        branch_id = request.query_params.get("branch_id") or request.headers.get("X-Branch-Id")
+
+        if device_id:
+            clean_dev = device_id.strip()
+            if len(clean_dev) < 3 or len(clean_dev) > 64:
+                raise ValidationError(detail={"device_id": ["Device ID must be between 3 and 64 characters."]})
+
+        from apps.core.feature_entitlement_service import FeatureEntitlementEngine
+
+        try:
+            result = FeatureEntitlementEngine.evaluate_effective_entitlements(
+                tenant_id=tenant_id,
+                device_id=device_id,
+                branch_id=branch_id,
+            )
+        except ValueError as err:
+            raise NotFound(detail=str(err))
+
+        return Response(
+            {
+                "success": True,
+                "data": result,
+            },
+            status=status.HTTP_200_OK,
+        )
