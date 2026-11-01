@@ -25,6 +25,8 @@ from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
 from apps.core.models import (
     Branch,
     DeviceLeaseCertificate,
+    DeviceSeat,
+    DeviceSeatStatus,
     OfflineLeaseStatus,
     QuotaResourceType,
     Tenant,
@@ -96,16 +98,24 @@ class SubscriptionQuotaCounterService:
                 is_archived=False,
             ).count()
 
-            actual_devices = (
-                DeviceLeaseCertificate.objects.filter(
-                    tenant=tenant,
-                    status=OfflineLeaseStatus.ACTIVE,
-                    expires_at__gt=now,
+            active_device_seats = DeviceSeat.objects.filter(
+                tenant=tenant,
+                status=DeviceSeatStatus.ACTIVE,
+            ).count()
+
+            if active_device_seats > 0 or DeviceSeat.objects.filter(tenant=tenant).exists():
+                actual_devices = active_device_seats
+            else:
+                actual_devices = (
+                    DeviceLeaseCertificate.objects.filter(
+                        tenant=tenant,
+                        status=OfflineLeaseStatus.ACTIVE,
+                        expires_at__gt=now,
+                    )
+                    .values("device_id")
+                    .distinct()
+                    .count()
                 )
-                .values("device_id")
-                .distinct()
-                .count()
-            )
 
             actual_counts = {
                 QuotaResourceType.BRANCHES: actual_branches,

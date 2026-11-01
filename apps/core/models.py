@@ -2420,3 +2420,69 @@ class TenantQuotaUsageCounter(models.Model):
 
     def __str__(self) -> str:
         return f"{self.tenant_id} - {self.resource_type}: {self.current_used}/{self.max_limit} (v{self.version})"
+
+
+class DeviceSeatStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active Enrolled Workstation"
+    REVOKED = "REVOKED", "Revoked / Decommissioned"
+    SUSPENDED = "SUSPENDED", "Suspended"
+    DECOMMISSIONED = "DECOMMISSIONED", "Permanently Decommissioned"
+
+
+class DeviceType(models.TextChoices):
+    DESKTOP_POS = "DESKTOP_POS", "Desktop POS Workstation"
+    TABLET_POS = "TABLET_POS", "Tablet POS Terminal"
+    MOBILE_SCANNER = "MOBILE_SCANNER", "Mobile Barcode Scanner"
+    COUNTER_TERMINAL = "COUNTER_TERMINAL", "Counter Billing Terminal"
+
+
+class DeviceSeat(models.Model):
+    """
+    Enrolled POS Workstation / Terminal seat bound to tenant and branch.
+    Architecture Decision: ADR-0096
+    Requirement Trace: FR-004, FR-070, FR-071 (SaaS Plans, Device Seats & Billing Lifecycle)
+
+    Represents an authorized device occupying a plan-allocated device seat.
+    Guarantees strict zero-data-loss and automatic lease invalidation upon revocation.
+    """
+
+    device_id = models.CharField(max_length=128, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="device_seats")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="device_seats")
+    device_name = models.CharField(max_length=255)
+    device_type = models.CharField(
+        max_length=64,
+        choices=DeviceType.choices,
+        default=DeviceType.DESKTOP_POS,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=DeviceSeatStatus.choices,
+        default=DeviceSeatStatus.ACTIVE,
+        db_index=True,
+    )
+    mac_address = models.CharField(max_length=64, blank=True, default="")
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    hardware_fingerprint = models.CharField(max_length=256, blank=True, default="")
+    enrolled_at = models.DateTimeField(default=timezone.now)
+    enrolled_by = models.CharField(max_length=128, blank=True, default="")
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by = models.CharField(max_length=128, blank=True, default="")
+    revocation_reason = models.TextField(blank=True, default="")
+    last_heartbeat_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-enrolled_at"]
+        verbose_name = "Device Seat"
+        verbose_name_plural = "Device Seats"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["tenant", "branch"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.device_name} [{self.device_id}] ({self.status}) - {self.branch.name}"

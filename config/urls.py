@@ -45,6 +45,7 @@ from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
 from apps.core.offline_lapse_views import LapsedPlanReconciliationViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
+from apps.core.device_seat_views import DeviceSeatViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -182,6 +183,7 @@ router.register("billing/lifecycle", SubscriptionLifecycleViewSet, basename="bil
 router.register("billing/offline-leases", OfflineEntitlementViewSet, basename="billing-offline-leases")
 router.register("billing/offline-reconciliation", LapsedPlanReconciliationViewSet, basename="billing-offline-reconciliation")
 router.register("billing/quota-usage", TenantQuotaUsageViewSet, basename="billing-quota-usage")
+router.register("billing/devices", DeviceSeatViewSet, basename="billing-devices")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
