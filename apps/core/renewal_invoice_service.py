@@ -120,7 +120,7 @@ class RenewalInvoiceService:
 
         if existing_invoice:
             logger.info(f"Returning existing open renewal invoice '{existing_invoice.invoice_number}' for tenant '{clean_tid}'.")
-            return existing_invoice, False
+            return existing_invoice
 
         now_iso = timezone.now().isoformat()
         clean_suffix = clean_tid.split("-")[-1].upper() if "-" in clean_tid else clean_tid[-4:].upper()
@@ -171,7 +171,7 @@ class RenewalInvoiceService:
             },
         )
 
-        return invoice, True
+        return invoice
 
     @classmethod
     def settle_renewal_invoice(
@@ -192,8 +192,11 @@ class RenewalInvoiceService:
         if not invoice:
             raise ValidationError(f"Renewal invoice '{clean_inv_id}' not found.")
 
-        if invoice.status not in [RenewalInvoiceStatus.ISSUED, RenewalInvoiceStatus.PAST_DUE]:
-            raise ValidationError(f"Invoice is in status '{invoice.status}' and cannot accept payment.")
+        if invoice.status == RenewalInvoiceStatus.PAID:
+            raise ValidationError(f"Renewal invoice '{invoice.invoice_number}' has already been paid on {invoice.paid_at} and cannot accept payment.")
+
+        if invoice.status == RenewalInvoiceStatus.VOID:
+            raise ValidationError(f"Renewal invoice '{invoice.invoice_number}' is VOID and cannot be settled.")
 
         clean_method = str(payment_method or "BKASH").upper().strip()
         clean_ref = str(payment_reference or "").strip()
@@ -283,3 +286,4 @@ class RenewalInvoiceService:
             "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None,
             "status_history": invoice.status_history_json or [],
         }
+

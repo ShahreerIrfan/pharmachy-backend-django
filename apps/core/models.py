@@ -907,6 +907,84 @@ class SubscriptionRenewalInvoice(models.Model):
         return f"{self.invoice_number} [{self.tenant.tenant_id}] - {self.total_bdt} BDT ({self.status})"
 
 
+class ManualPaymentClaimStatus(models.TextChoices):
+    PENDING_VERIFICATION = "PENDING_VERIFICATION", "Pending Verification"
+    APPROVED = "APPROVED", "Approved"
+    REJECTED = "REJECTED", "Rejected"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class ManualPaymentMethod(models.TextChoices):
+    BKASH = "BKASH", "bKash"
+    NAGAD = "NAGAD", "Nagad"
+    ROCKET = "ROCKET", "Rocket"
+    BANK_TRANSFER = "BANK_TRANSFER", "Bank Transfer"
+    CASH_DEPOSIT = "CASH_DEPOSIT", "Cash Deposit"
+
+
+class ManualPaymentClaim(models.Model):
+    """
+    Architecture Decision: ADR-0015, ADR-0033 & ADR-0088
+    Manual subscription payment verification claim with maker-checker approvals
+    and recorded activation outcomes.
+    """
+
+    claim_id = models.CharField(max_length=64, primary_key=True)
+    claim_number = models.CharField(max_length=64, unique=True, db_index=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="manual_payment_claims")
+    invoice = models.ForeignKey(SubscriptionRenewalInvoice, on_delete=models.CASCADE, related_name="manual_payment_claims")
+
+    payment_method = models.CharField(
+        max_length=32,
+        choices=ManualPaymentMethod.choices,
+        default=ManualPaymentMethod.BKASH,
+    )
+    transaction_reference = models.CharField(max_length=128, db_index=True)
+    sender_account_number = models.CharField(max_length=64)
+    claimed_amount_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        help_text="Claimed payment amount in BDT.",
+    )
+    evidence_file_url = models.CharField(max_length=512)
+    evidence_notes = models.TextField(blank=True, default="")
+
+    status = models.CharField(
+        max_length=32,
+        choices=ManualPaymentClaimStatus.choices,
+        default=ManualPaymentClaimStatus.PENDING_VERIFICATION,
+        db_index=True,
+    )
+
+    maker_user_id = models.CharField(max_length=64, db_index=True)
+    maker_user_email = models.EmailField(max_length=255)
+    checker_user_id = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    checker_user_email = models.CharField(max_length=255, null=True, blank=True)
+    checker_notes = models.TextField(blank=True, default="")
+    rejection_reason = models.TextField(blank=True, default="")
+
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    activation_outcomes_json = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Manual Payment Claim"
+        verbose_name_plural = "Manual Payment Claims"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["invoice", "status"]),
+            models.Index(fields=["transaction_reference"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.claim_number} [{self.tenant.tenant_id}] - {self.claimed_amount_bdt} BDT ({self.status})"
+
+
 class StaffRole(models.TextChoices):
     PLATFORM_SUPER_ADMIN = "PLATFORM_SUPER_ADMIN", "Platform Super Admin"
     TENANT_OWNER = "TENANT_OWNER", "Tenant Owner"

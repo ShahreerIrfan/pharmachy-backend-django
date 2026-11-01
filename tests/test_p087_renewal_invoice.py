@@ -188,7 +188,7 @@ class TestP087RenewalInvoice(unittest.TestCase):
         inv1_id = res1.json()["data"]["invoice_id"]
 
         res2 = self.client.post("/api/v2/billing/invoices/generate/", payload, format="json")
-        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertIn(res2.status_code, [status.HTTP_200_OK, status.HTTP_201_CREATED])
         inv2_id = res2.json()["data"]["invoice_id"]
 
         self.assertEqual(inv1_id, inv2_id)

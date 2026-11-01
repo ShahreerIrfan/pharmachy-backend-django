@@ -22,7 +22,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 
 from apps.core.errors import CrossTenantViolationError
-from apps.core.models import SubscriptionRenewalInvoice
+from apps.core.models import SubscriptionRenewalInvoice, Tenant
 from apps.core.renewal_invoice_service import RenewalInvoiceService
 from apps.identity.models import UserRole
 
@@ -153,7 +153,7 @@ class RenewalInvoiceViewSet(viewsets.ViewSet):
         operator = str(request.user.email or request.user.user_id)
 
         try:
-            invoice, created = RenewalInvoiceService.generate_renewal_invoice(
+            invoice = RenewalInvoiceService.generate_renewal_invoice(
                 tenant_id=target_tid,
                 billing_cycle=billing_cycle,
                 tax_rate_percent=tax_rate,
@@ -162,17 +162,17 @@ class RenewalInvoiceViewSet(viewsets.ViewSet):
             return Response(
                 {
                     "success": True,
-                    "code": "RENEWAL_INVOICE_GENERATED" if created else "RENEWAL_INVOICE_EXISTING",
-                    "message_en": f"Renewal invoice '{invoice.invoice_number}' {'generated' if created else 'retrieved'} successfully.",
-                    "message_bn": f"নবায়ন ইনভয়েস '{invoice.invoice_number}' সফলভাবে {'তৈরি' if created else 'পুনরুদ্ধার'} হয়েছে।",
+                    "code": "RENEWAL_INVOICE_GENERATED",
+                    "message_en": f"Renewal invoice '{invoice.invoice_number}' generated successfully.",
+                    "message_bn": f"নবায়ন ইনভয়েস '{invoice.invoice_number}' সফলভাবে তৈরি হয়েছে।",
                     "data": RenewalInvoiceService.serialize_invoice(invoice),
                 },
-                status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+                status=status.HTTP_201_CREATED,
             )
         except ValidationError as e:
             msg = e.messages[0] if hasattr(e, "messages") and e.messages else str(e)
             return Response(
-                {"success": False, "error_code": "ERR_INVALID_INVOICE_REQUEST", "message": msg},
+                {"success": False, "error_code": "ERR_RENEWAL_GENERATION_FAILED", "message": msg},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -224,3 +224,4 @@ class RenewalInvoiceViewSet(viewsets.ViewSet):
                 {"success": False, "error_code": "ERR_PAYMENT_SETTLEMENT_FAILED", "message": msg},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
