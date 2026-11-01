@@ -1205,3 +1205,76 @@ class TenantFeatureFlagOverride(models.Model):
     def __str__(self) -> str:
         state = "ENABLED" if self.is_enabled else "DISABLED"
         return f"{self.tenant_id} -> {self.flag_id}: {state}"
+
+
+class TenantDataExportStatus(models.TextChoices):
+    REQUESTED = "REQUESTED", "Requested"
+    APPROVED = "APPROVED", "Approved"
+    PROCESSING = "PROCESSING", "Processing"
+    COMPLETED = "COMPLETED", "Completed"
+    REJECTED = "REJECTED", "Rejected"
+    EXPIRED = "EXPIRED", "Expired"
+    FAILED = "FAILED", "Failed"
+
+
+class TenantDataExportRequest(models.Model):
+    """
+    Architecture Decision: ADR-0073
+    Governed tenant data export request, multi-tier approval workflow,
+    cryptographic verification, and expiring download tokens.
+    """
+
+    export_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="data_exports")
+    status = models.CharField(
+        max_length=32,
+        choices=TenantDataExportStatus.choices,
+        default=TenantDataExportStatus.REQUESTED,
+        db_index=True,
+    )
+    requested_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="requested_tenant_exports",
+    )
+    approved_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_tenant_exports",
+    )
+    rejection_reason = models.TextField(blank=True, default="")
+    include_patient_pii = models.BooleanField(
+        default=False,
+        help_text="When False, patient names and identifying contacts are redacted.",
+    )
+    include_financials = models.BooleanField(default=True)
+    include_prescriptions = models.BooleanField(default=True)
+    include_inventory = models.BooleanField(default=True)
+    file_format = models.CharField(max_length=16, default="JSON")
+    sha256_checksum = models.CharField(max_length=64, blank=True, default="")
+    artifact_storage_path = models.CharField(max_length=255, blank=True, default="")
+    file_size_bytes = models.BigIntegerField(default=0)
+    download_token = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    download_count = models.PositiveIntegerField(default=0)
+    max_downloads = models.PositiveIntegerField(default=5)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    audit_metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-requested_at"]
+        verbose_name = "Tenant Data Export Request"
+        verbose_name_plural = "Tenant Data Export Requests"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["download_token"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.export_id} [{self.tenant_id}] ({self.status})"

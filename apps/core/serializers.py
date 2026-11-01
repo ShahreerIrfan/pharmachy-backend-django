@@ -29,6 +29,7 @@ from apps.core.models import (
     StaffMember,
     SubscriptionRecord,
     Tenant,
+    TenantDataExportRequest,
     TenantFeatureFlagOverride,
     TenantMedicineConfig,
 )
@@ -738,3 +739,55 @@ class TenantFeatureFlagOverrideSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["override_id", "created_at", "updated_at"]
+
+
+class TenantDataExportRequestSerializer(serializers.ModelSerializer):
+    download_url = serializers.SerializerMethodField(read_only=True)
+    tenant_id = serializers.CharField(source="tenant.tenant_id", read_only=True)
+
+    class Meta:
+        model = TenantDataExportRequest
+        fields = [
+            "export_id",
+            "tenant_id",
+            "status",
+            "requested_by",
+            "approved_by",
+            "rejection_reason",
+            "include_patient_pii",
+            "include_financials",
+            "include_prescriptions",
+            "include_inventory",
+            "file_format",
+            "sha256_checksum",
+            "file_size_bytes",
+            "download_url",
+            "download_count",
+            "max_downloads",
+            "expires_at",
+            "requested_at",
+            "approved_at",
+            "completed_at",
+        ]
+        read_only_fields = [
+            "export_id",
+            "tenant_id",
+            "status",
+            "requested_by",
+            "approved_by",
+            "rejection_reason",
+            "sha256_checksum",
+            "file_size_bytes",
+            "download_url",
+            "download_count",
+            "max_downloads",
+            "expires_at",
+            "requested_at",
+            "approved_at",
+            "completed_at",
+        ]
+
+    def get_download_url(self, obj) -> str | None:
+        if obj.status == "COMPLETED" and obj.download_token:
+            return f"/api/v2/tenants/data-exports/{obj.export_id}/download/?token={obj.download_token}"
+        return None

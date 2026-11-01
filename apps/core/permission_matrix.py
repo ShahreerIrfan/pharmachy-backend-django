@@ -672,6 +672,51 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.TENANT,
         min_plan=PlanTier.BASIC,
     ),
+    # 17. Tenant Data Export Administration (ADR-0073)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/data-exports/(?:[^/]+/(?:approve|reject|revoke)/?)?$",
+        method="GET",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/data-exports/(?:[^/]+/(?:approve|reject|revoke)/?)?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/data-exports/[^/]+/?$",
+        method="DELETE",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    # Tenant-Scoped Data Export Request & Download (ADR-0073)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/tenants/data-exports/(?:[^/]+/(?:download/?)?)?$",
+        method="GET",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PLATFORM_OPERATOR,
+            UserRole.PHARMACY_OWNER,
+        ],
+        scope=ScopeLevel.TENANT,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/tenants/data-exports/(?:[^/]+/)?$",
+        method="POST",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PLATFORM_OPERATOR,
+            UserRole.PHARMACY_OWNER,
+        ],
+        scope=ScopeLevel.TENANT,
+        min_plan=PlanTier.BASIC,
+    ),
 ]
 
 

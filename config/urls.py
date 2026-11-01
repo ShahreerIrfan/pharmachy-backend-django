@@ -26,6 +26,10 @@ from apps.core.feature_flag_views import (
     PlatformFeatureFlagViewSet,
     TenantFeatureFlagEvaluationViewSet,
 )
+from apps.core.tenant_export_views import (
+    PlatformDataExportAdminViewSet,
+    TenantDataExportViewSet,
+)
 from apps.core.tenant_medicine_config_views import TenantMedicineConfigViewSet
 from apps.core.views import (
     ApiResponseConventionViewSet,
@@ -72,6 +76,7 @@ router.register("tenants/medicine-configs", TenantMedicineConfigViewSet, basenam
 router.register("tenants/support-access", TenantSupportAccessViewSet, basename="tenant-support-access")
 router.register("tenants/support/tickets", TenantSupportTicketViewSet, basename="tenant-support-tickets")
 router.register("tenants/feature-flags", TenantFeatureFlagEvaluationViewSet, basename="tenant-feature-flags")
+router.register("tenants/data-exports", TenantDataExportViewSet, basename="tenant-data-exports")
 router.register("tenants", TenantViewSet, basename="tenant")
 router.register("branches", BranchViewSet, basename="branch")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
@@ -112,6 +117,7 @@ router.register("platform/console", PlatformConsoleViewSet, basename="platform-c
 router.register("platform/support-access", PlatformSupportAccessViewSet, basename="platform-support-access")
 router.register("platform/support/tickets", PlatformSupportTicketViewSet, basename="platform-support-tickets")
 router.register("platform/feature-flags", PlatformFeatureFlagViewSet, basename="platform-feature-flags")
+router.register("platform/data-exports", PlatformDataExportAdminViewSet, basename="platform-data-exports")
 
 
 # Architecture Decision: ADR-0054 Centralized Global Exception & URL Fallback Handlers
