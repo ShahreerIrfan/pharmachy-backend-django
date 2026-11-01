@@ -2798,3 +2798,127 @@ class CustomerDueRecord(models.Model):
 
     def __str__(self) -> str:
         return f"Due {self.due_id} - {self.customer_name} ({self.remaining_due_bdt} BDT) [{self.status}]"
+
+
+class InvitationStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    ACCEPTED = "ACCEPTED", "Accepted"
+    REVOKED = "REVOKED", "Revoked"
+    EXPIRED = "EXPIRED", "Expired"
+
+
+class StaffInvitation(models.Model):
+    """
+    Audited owner or branch manager invitation for prospective pharmacy personnel (P102 / ADR-0102).
+    Supports branch scopes, custom role titles, secure tokens, expiration, resend and revocation.
+    """
+
+    invitation_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="staff_invitations")
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="staff_invitations",
+    )
+    email = models.EmailField(db_index=True)
+    phone_number = models.CharField(max_length=32, blank=True, default="")
+    full_name = models.CharField(max_length=255)
+    role = models.CharField(
+        max_length=32,
+        choices=StaffRole.choices,
+        default=StaffRole.CASHIER,
+        db_index=True,
+    )
+    custom_role_title = models.CharField(max_length=128, blank=True, default="")
+    pcb_registration_no = models.CharField(max_length=64, blank=True, default="")
+    invite_token = models.CharField(max_length=128, unique=True, db_index=True)
+    status = models.CharField(
+        max_length=32,
+        choices=InvitationStatus.choices,
+        default=InvitationStatus.PENDING,
+        db_index=True,
+    )
+    invited_by_username = models.CharField(max_length=128, blank=True, default="")
+    expires_at = models.DateTimeField(db_index=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    accepted_by_username = models.CharField(max_length=128, blank=True, default="")
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by_username = models.CharField(max_length=128, blank=True, default="")
+    revocation_reason = models.TextField(blank=True, default="")
+    resend_count = models.PositiveIntegerField(default=0)
+    last_resent_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Staff Invitation"
+        verbose_name_plural = "Staff Invitations"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "email"]),
+            models.Index(fields=["branch", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Invitation {self.invitation_id} -> {self.email} ({self.role}) [{self.status}]"
+
+
+class StaffMembership(models.Model):
+    """
+    Authoritative active or archived staff membership record within a tenant (P102 / ADR-0102).
+    Links StaffMember to primary and secondary branch scopes, custom role titles, and provenance invitation.
+    """
+
+    membership_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="memberships")
+    staff_member = models.OneToOneField(
+        StaffMember,
+        on_delete=models.CASCADE,
+        related_name="membership",
+    )
+    primary_branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="primary_memberships",
+    )
+    assigned_branches = models.ManyToManyField(
+        Branch,
+        blank=True,
+        related_name="scoped_memberships",
+    )
+    role = models.CharField(
+        max_length=32,
+        choices=StaffRole.choices,
+        default=StaffRole.CASHIER,
+        db_index=True,
+    )
+    custom_role_title = models.CharField(max_length=128, blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    invitation = models.ForeignKey(
+        StaffInvitation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="accepted_memberships",
+    )
+    joined_at = models.DateTimeField(auto_now_add=True)
+    deactivated_at = models.DateTimeField(null=True, blank=True)
+    deactivation_reason = models.TextField(blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-joined_at"]
+        verbose_name = "Staff Membership"
+        verbose_name_plural = "Staff Memberships"
+        indexes = [
+            models.Index(fields=["tenant", "is_active"]),
+            models.Index(fields=["primary_branch", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Membership {self.membership_id} - {self.staff_member.full_name} ({self.role})"

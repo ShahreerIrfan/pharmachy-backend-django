@@ -50,6 +50,10 @@ from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
 from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
+from apps.core.staff_membership_views import (
+    StaffInvitationViewSet,
+    StaffMembershipViewSet,
+)
 from apps.core.subscription_portal_views import SubscriptionCustomerPortalViewSet
 from apps.core.subscription_support_views import SubscriptionSupportOverrideViewSet
 from apps.core.subscription_views import SubscriptionViewSet
@@ -130,6 +134,8 @@ router.register("analytics/platform-benchmarks", TenantPlatformBenchmarksViewSet
 router.register("analytics", DailyBranchAnalyticsViewSet, basename="analytics")
 router.register("compliance-reminders", ComplianceReminderViewSet, basename="compliance-reminder")
 router.register("subscriptions", SubscriptionRecordViewSet, basename="subscription")
+router.register("staff/invitations", StaffInvitationViewSet, basename="staff-invitations")
+router.register("staff/memberships", StaffMembershipViewSet, basename="staff-memberships")
 router.register("staff", StaffMemberViewSet, basename="staff")
 router.register("prescriptions", PrescriptionRecordViewSet, basename="prescription")
 router.register("payments", PaymentTransactionViewSet, basename="payment")

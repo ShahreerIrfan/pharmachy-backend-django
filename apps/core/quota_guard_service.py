@@ -83,11 +83,21 @@ class SubscriptionQuotaGuardService:
                 plan_tier = entitlement.plan_tier
                 plan_code = entitlement.plan_code
             else:
-                allowed_branches = 1
-                allowed_staff = 3
-                allowed_devices = 2
-                plan_tier = tenant.plan_tier
-                plan_code = f"PLAN_{tenant.plan_tier}"
+                plan = PlanCatalogueRecord.objects.filter(
+                    tier=tenant.plan_tier, is_active=True
+                ).first()
+                if plan:
+                    allowed_branches = plan.max_branches
+                    allowed_staff = plan.max_staff_users
+                    allowed_devices = plan.max_total_devices
+                    plan_tier = plan.tier
+                    plan_code = plan.plan_code
+                else:
+                    allowed_branches = 1
+                    allowed_staff = 3
+                    allowed_devices = 2
+                    plan_tier = tenant.plan_tier
+                    plan_code = f"PLAN_{tenant.plan_tier}"
 
         # Count active vs locked branches
         all_branches = list(Branch.objects.filter(tenant=tenant))
