@@ -1421,3 +1421,114 @@ class CrossTenantMetricsSnapshot(models.Model):
 
     def __str__(self) -> str:
         return f"{self.snapshot_id} [{self.metric_period}: {self.start_date} to {self.end_date}] ({self.status})"
+
+
+class AnnouncementPriority(models.TextChoices):
+    INFO = "INFO", "Informational"
+    WARNING = "WARNING", "Warning"
+    CRITICAL = "CRITICAL", "Critical / High Priority"
+    MAINTENANCE = "MAINTENANCE", "Scheduled Maintenance"
+
+
+class AnnouncementTargetType(models.TextChoices):
+    ALL = "ALL", "All Tenants & Branches"
+    TENANT_LIST = "TENANT_LIST", "Specific Tenants"
+    ROLE_LIST = "ROLE_LIST", "Specific Roles"
+    BRANCH_LIST = "BRANCH_LIST", "Specific Branches"
+
+
+class AnnouncementStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    PUBLISHED = "PUBLISHED", "Published"
+    ARCHIVED = "ARCHIVED", "Archived"
+
+
+class SystemAnnouncement(models.Model):
+    """
+    Architecture Decision: ADR-0076
+    Audited platform broadcast bulletins with targeted tenant/role delivery.
+    """
+
+    announcement_id = models.CharField(max_length=64, primary_key=True)
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    priority = models.CharField(
+        max_length=16,
+        choices=AnnouncementPriority.choices,
+        default=AnnouncementPriority.INFO,
+    )
+    target_type = models.CharField(
+        max_length=16,
+        choices=AnnouncementTargetType.choices,
+        default=AnnouncementTargetType.ALL,
+    )
+    target_tenants = models.JSONField(default=list, blank=True)
+    target_roles = models.JSONField(default=list, blank=True)
+    target_branches = models.JSONField(default=list, blank=True)
+    starts_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(
+        max_length=16,
+        choices=AnnouncementStatus.choices,
+        default=AnnouncementStatus.DRAFT,
+    )
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_announcements",
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "System Announcement"
+        verbose_name_plural = "System Announcements"
+        indexes = [
+            models.Index(fields=["status", "-starts_at"]),
+            models.Index(fields=["target_type", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.announcement_id}: {self.title} ({self.status})"
+
+
+class AnnouncementReadReceipt(models.Model):
+    """
+    Architecture Decision: ADR-0076
+    Immutable delivery and read acknowledgement record for system announcements.
+    """
+
+    receipt_id = models.CharField(max_length=64, primary_key=True)
+    announcement = models.ForeignKey(
+        SystemAnnouncement,
+        on_delete=models.CASCADE,
+        related_name="receipts",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="announcement_receipts",
+    )
+    user = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.CASCADE,
+        related_name="announcement_receipts",
+    )
+    delivered_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    acknowledged = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ("announcement", "user")
+        ordering = ["-delivered_at"]
+        indexes = [
+            models.Index(fields=["announcement", "tenant"]),
+            models.Index(fields=["user", "acknowledged"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Receipt {self.receipt_id} for {self.user_id} on {self.announcement_id} (ack: {self.acknowledged})"

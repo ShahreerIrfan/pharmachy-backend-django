@@ -12,6 +12,7 @@ from typing import Any
 from rest_framework import serializers
 
 from apps.core.models import (
+    AnnouncementReadReceipt,
     AsyncJobRecord,
     BatchStatus,
     BatchStock,
@@ -29,6 +30,7 @@ from apps.core.models import (
     SaleInvoiceItem,
     StaffMember,
     SubscriptionRecord,
+    SystemAnnouncement,
     Tenant,
     TenantDataExportRequest,
     TenantDeletionRequest,
@@ -882,4 +884,72 @@ class CrossTenantMetricsSnapshotSerializer(serializers.ModelSerializer):
             "published_at",
             "created_at",
             "updated_at",
+        ]
+
+
+class SystemAnnouncementSerializer(serializers.ModelSerializer):
+    """
+    Architecture Decision: ADR-0076
+    Serializer for platform broadcast bulletins and targeting rules.
+    """
+
+    created_by = serializers.CharField(source="created_by.username", read_only=True)
+
+    class Meta:
+        model = SystemAnnouncement
+        fields = [
+            "announcement_id",
+            "title",
+            "message",
+            "priority",
+            "target_type",
+            "target_tenants",
+            "target_roles",
+            "target_branches",
+            "starts_at",
+            "expires_at",
+            "status",
+            "created_by",
+            "published_at",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "announcement_id",
+            "status",
+            "created_by",
+            "published_at",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class AnnouncementReadReceiptSerializer(serializers.ModelSerializer):
+    """
+    Architecture Decision: ADR-0076
+    Serializer for announcement read receipts.
+    """
+
+    user_name = serializers.CharField(source="user.full_name", read_only=True)
+
+    class Meta:
+        model = AnnouncementReadReceipt
+        fields = [
+            "receipt_id",
+            "announcement",
+            "tenant",
+            "user",
+            "user_name",
+            "delivered_at",
+            "read_at",
+            "acknowledged",
+        ]
+        read_only_fields = [
+            "receipt_id",
+            "announcement",
+            "tenant",
+            "user",
+            "delivered_at",
+            "read_at",
+            "acknowledged",
         ]

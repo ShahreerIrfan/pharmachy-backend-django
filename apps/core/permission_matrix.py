@@ -790,6 +790,50 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         scope=ScopeLevel.TENANT,
         min_plan=PlanTier.BASIC,
     ),
+    # 20. Audited Platform System Announcements & Read Receipts (ADR-0076)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/announcements/(?:[^/]+/(?:publish|archive|stats)/?)?$",
+        method="GET",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/platform/announcements/(?:[^/]+/(?:publish|archive)/?)?$",
+        method="POST",
+        allowed_roles=[UserRole.SUPERADMIN, UserRole.PLATFORM_OPERATOR],
+        scope=ScopeLevel.GLOBAL,
+        min_plan=PlanTier.BASIC,
+    ),
+    # Tenant-Scoped Announcement Feeds & Acknowledgements (ADR-0076)
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/tenants/announcements/(?:[^/]+/(?:acknowledge)/?)?$",
+        method="GET",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PLATFORM_OPERATOR,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.STAFF_PHARMACIST,
+            UserRole.CASHIER,
+        ],
+        scope=ScopeLevel.TENANT,
+        min_plan=PlanTier.BASIC,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/tenants/announcements/(?:[^/]+/(?:acknowledge)/?)?$",
+        method="POST",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PLATFORM_OPERATOR,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.STAFF_PHARMACIST,
+            UserRole.CASHIER,
+        ],
+        scope=ScopeLevel.TENANT,
+        min_plan=PlanTier.BASIC,
+    ),
 ]
 
 
