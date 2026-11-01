@@ -375,3 +375,4 @@ class TenantBillingReportViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+

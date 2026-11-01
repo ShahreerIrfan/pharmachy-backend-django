@@ -29,6 +29,7 @@ from apps.core.cross_tenant_metrics_views import (
 )
 from apps.core.device_seat_views import DeviceSeatViewSet
 from apps.core.downgrade_views import SubscriptionDowngradeViewSet
+from apps.core.dunning_views import DunningNotificationViewSet
 from apps.core.feature_flag_views import (
     PlatformFeatureFlagViewSet,
     TenantFeatureFlagEvaluationViewSet,
@@ -191,6 +192,7 @@ router.register("billing/quota-usage", TenantQuotaUsageViewSet, basename="billin
 router.register("billing/devices", DeviceSeatViewSet, basename="billing-devices")
 router.register("billing/portal", SubscriptionCustomerPortalViewSet, basename="billing-portal")
 router.register("billing/reports", TenantBillingReportViewSet, basename="billing-reports")
+router.register("billing/dunning", DunningNotificationViewSet, basename="billing-dunning")
 router.register(
     "platform/billing-reports", PlatformBillingReportViewSet, basename="platform-billing-reports"
 )

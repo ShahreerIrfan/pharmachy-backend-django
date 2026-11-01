@@ -2557,3 +2557,101 @@ class PlatformBillingReportSnapshot(models.Model):
 
     def __str__(self) -> str:
         return f"{self.report_id} - {self.report_type} ({self.period}: {self.start_date} to {self.end_date})"
+
+
+class DunningStage(models.TextChoices):
+    UPCOMING_RENEWAL = "UPCOMING_RENEWAL", "Upcoming Renewal Notice"
+    PAYMENT_FAILED = "PAYMENT_FAILED", "Payment Failure Alert"
+    GRACE_PERIOD_ACTIVE = "GRACE_PERIOD_ACTIVE", "Grace Period Warning"
+    SUBSCRIPTION_EXPIRED = "SUBSCRIPTION_EXPIRED", "Subscription Expired"
+    ACCOUNT_SUSPENDED = "ACCOUNT_SUSPENDED", "Account Suspended"
+    PAYMENT_RECOVERED = "PAYMENT_RECOVERED", "Payment Recovered & Restored"
+
+
+class DunningChannel(models.TextChoices):
+    IN_APP = "IN_APP", "In-App Banner / Notification"
+    SMS = "SMS", "SMS Message"
+    EMAIL = "EMAIL", "Email Notification"
+
+
+class DunningDeliveryStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending Delivery"
+    DELIVERED = "DELIVERED", "Delivered / Sent"
+    FAILED = "FAILED", "Delivery Failed"
+    SUPPRESSED = "SUPPRESSED", "Suppressed (De-duplicated)"
+
+
+class DunningNotification(models.Model):
+    """
+    Subscription Dunning Notification, De-duplication, and Recovery Record.
+    Architecture Decision: ADR-0099
+    Requirement Trace: FR-044, FR-066, FR-068, FR-070
+
+    Tracks localized communication regarding renewals, payment failures,
+    grace periods, and payment recoveries with deterministic de-duplication.
+    """
+
+    notification_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="dunning_notifications")
+    subscription = models.ForeignKey(
+        SubscriptionRecord,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="dunning_notifications",
+    )
+    invoice = models.ForeignKey(
+        SubscriptionRenewalInvoice,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="dunning_notifications",
+    )
+    stage = models.CharField(
+        max_length=32,
+        choices=DunningStage.choices,
+        default=DunningStage.UPCOMING_RENEWAL,
+        db_index=True,
+    )
+    channel = models.CharField(
+        max_length=16,
+        choices=DunningChannel.choices,
+        default=DunningChannel.IN_APP,
+    )
+    delivery_status = models.CharField(
+        max_length=16,
+        choices=DunningDeliveryStatus.choices,
+        default=DunningDeliveryStatus.DELIVERED,
+        db_index=True,
+    )
+    dedup_key = models.CharField(max_length=128, db_index=True)
+    title_en = models.CharField(max_length=255)
+    title_bn = models.CharField(max_length=255)
+    body_en = models.TextField()
+    body_bn = models.TextField()
+    amount_due_bdt = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    recipient_email = models.EmailField(max_length=255, blank=True, default="")
+    recipient_phone = models.CharField(max_length=64, blank=True, default="")
+    is_acknowledged = models.BooleanField(default=False, db_index=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    acknowledged_by_user_id = models.CharField(max_length=64, blank=True, default="")
+    retry_count = models.PositiveIntegerField(default=0)
+    max_retries = models.PositiveIntegerField(default=3)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+    last_error_message = models.TextField(blank=True, default="")
+    metadata_json = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Dunning Notification"
+        verbose_name_plural = "Dunning Notifications"
+        indexes = [
+            models.Index(fields=["tenant", "is_acknowledged"]),
+            models.Index(fields=["tenant", "stage"]),
+            models.Index(fields=["dedup_key", "delivery_status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.notification_id} [{self.stage}] - {self.tenant_id} ({self.delivery_status})"
