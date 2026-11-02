@@ -1052,10 +1052,16 @@ class StaffRole(models.TextChoices):
     AUDITOR = "AUDITOR", "Auditor"
 
 
+class StaffLifecycleStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active Staff"
+    DEACTIVATED = "DEACTIVATED", "Deactivated / Suspended"
+    TERMINATED = "TERMINATED", "Terminated / Separated"
+
+
 class StaffMember(models.Model):
     """
     Authorized pharmacy staff profile associated with a tenant, optional branch, and role.
-    Architecture Decision: ADR-0005 & ADR-0033
+    Architecture Decision: ADR-0005, ADR-0033 & ADR-0106
     """
 
     staff_id = models.CharField(max_length=64, primary_key=True)
@@ -1066,8 +1072,24 @@ class StaffMember(models.Model):
     role = models.CharField(max_length=32, choices=StaffRole.choices, default=StaffRole.CASHIER, db_index=True)
     mobile_number = models.CharField(max_length=32)
     pcb_registration_no = models.CharField(max_length=64, blank=True, default="")
-    is_active = models.BooleanField(default=True)
+    lifecycle_status = models.CharField(
+        max_length=32,
+        choices=StaffLifecycleStatus.choices,
+        default=StaffLifecycleStatus.ACTIVE,
+        db_index=True,
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    deactivated_at = models.DateTimeField(null=True, blank=True)
+    deactivated_by = models.CharField(max_length=128, blank=True, default="")
+    deactivation_reason = models.TextField(blank=True, default="")
+    terminated_at = models.DateTimeField(null=True, blank=True)
+    terminated_by = models.CharField(max_length=128, blank=True, default="")
+    termination_reason = models.TextField(blank=True, default="")
+    last_credential_reset_at = models.DateTimeField(null=True, blank=True)
+    last_mfa_reset_at = models.DateTimeField(null=True, blank=True)
+    last_session_revocation_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["full_name"]
@@ -3109,3 +3131,43 @@ class BranchStaffMembership(models.Model):
 
     def __str__(self) -> str:
         return f"BranchMembership {self.membership_id} - {self.staff_member.full_name} ({self.role}) @ {self.branch.name}"
+
+
+class StaffLifecycleEventType(models.TextChoices):
+    CREATED = "CREATED", "Staff Created"
+    UPDATED = "UPDATED", "Staff Details Updated"
+    DEACTIVATED = "DEACTIVATED", "Staff Deactivated"
+    REACTIVATED = "REACTIVATED", "Staff Reactivated"
+    TERMINATED = "TERMINATED", "Staff Terminated"
+    CREDENTIALS_RESET = "CREDENTIALS_RESET", "Credentials Reset"
+    MFA_RESET = "MFA_RESET", "MFA Reset / Recovered"
+    SESSIONS_REVOKED = "SESSIONS_REVOKED", "Sessions Revoked"
+    DEVICE_REVOKED = "DEVICE_REVOKED", "Device Credentials Revoked"
+
+
+class StaffLifecycleEvent(models.Model):
+    """
+    Immutable audit trail recording state transitions and credential revocations across a staff member's lifecycle (ADR-0106 / P106).
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="staff_lifecycle_events")
+    staff_member = models.ForeignKey(StaffMember, on_delete=models.CASCADE, related_name="lifecycle_events")
+    event_type = models.CharField(max_length=32, choices=StaffLifecycleEventType.choices, db_index=True)
+    performed_by_username = models.CharField(max_length=128, blank=True, default="")
+    reason = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict)
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Staff Lifecycle Event"
+        verbose_name_plural = "Staff Lifecycle Events"
+        indexes = [
+            models.Index(fields=["tenant", "event_type"]),
+            models.Index(fields=["staff_member", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Event {self.event_id} [{self.event_type}] for {self.staff_member.username}"
