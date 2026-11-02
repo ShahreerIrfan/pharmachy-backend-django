@@ -18,6 +18,7 @@ from django.db import connection
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -48,7 +49,6 @@ from apps.identity.serializers import (
     SessionRevokeResponseSerializer,
     TokenRefreshRequestSerializer,
     UserProfileUpdateSerializer,
-    UserSessionSerializer,
 )
 
 
@@ -205,7 +205,15 @@ class AuthenticationViewSet(viewsets.ViewSet):
         refresh["session_id"] = str(session.session_id)
         refresh["device_id"] = device_id
 
-        access_token = str(refresh.access_token)
+        access = refresh.access_token
+        access["email"] = user.email
+        access["tenant_id"] = user.tenant_id
+        access["branch_id"] = user.branch_id
+        access["role"] = user.role
+        access["session_id"] = str(session.session_id)
+        access["device_id"] = device_id
+
+        access_token = str(access)
         refresh_token = str(refresh)
 
         response_payload = {
@@ -386,13 +394,20 @@ class AuthenticationViewSet(viewsets.ViewSet):
             new_refresh["tenant_id"] = user.tenant_id
             new_refresh["branch_id"] = user.branch_id
             new_refresh["role"] = user.role
+            new_access = new_refresh.access_token
+            new_access["email"] = user.email
+            new_access["tenant_id"] = user.tenant_id
+            new_access["branch_id"] = user.branch_id
+            new_access["role"] = user.role
             if session:
                 new_refresh["session_id"] = str(session.session_id)
                 new_refresh["device_id"] = session.device_id
+                new_access["session_id"] = str(session.session_id)
+                new_access["device_id"] = session.device_id
                 session.rotate_token(old_jti=token_jti, new_jti=new_jti)
 
             data = {
-                "access": str(new_refresh.access_token),
+                "access": str(new_access),
                 "refresh": str(new_refresh),
                 "token_type": "Bearer",
                 "expires_in": 900,
@@ -797,7 +812,15 @@ class AuthenticationViewSet(viewsets.ViewSet):
             refresh["session_id"] = str(session.session_id)
             refresh["device_id"] = device_id
 
-            access_token = str(refresh.access_token)
+            access = refresh.access_token
+            access["email"] = user.email
+            access["tenant_id"] = user.tenant_id
+            access["branch_id"] = user.branch_id
+            access["role"] = user.role
+            access["session_id"] = str(session.session_id)
+            access["device_id"] = device_id
+
+            access_token = str(access)
             refresh_token = str(refresh)
 
             response_payload = {
@@ -914,15 +937,37 @@ class AuthenticationViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["get"], url_path="sessions", permission_classes=[permissions.IsAuthenticated])
     def sessions_list(self, request):
         """
-        Lists active and recent client device sessions for the authenticated user (ADR-0045).
+        Lists active and recent client device sessions for the authenticated user/staff (ADR-0045 / ADR-0112).
         """
-        sessions = UserSession.objects.filter(
-            user=request.user,
-            tenant_id=request.user.tenant_id,
-        ).order_by("-is_active", "-last_seen_at")
+        from apps.identity.active_session_service import ActiveSessionService
 
-        serializer = UserSessionSerializer(sessions, many=True, context={"request": request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        token_session_id = getattr(request, "auth_session_id", None)
+        if not token_session_id and hasattr(request, "auth") and isinstance(request.auth, dict):
+            token_session_id = request.auth.get("session_id")
+        if not token_session_id:
+            token_session_id = request.META.get("HTTP_X_SESSION_ID")
+
+        branch_id = request.query_params.get("branch_id")
+        target_user_id = request.query_params.get("user_id")
+        active_param = request.query_params.get("is_active")
+        is_active = None
+        if active_param is not None:
+            is_active = str(active_param).lower() in ["true", "1", "yes"]
+
+        try:
+            sessions = ActiveSessionService.list_sessions(
+                actor_user=request.user,
+                tenant_id=request.user.tenant_id,
+                branch_id=branch_id,
+                target_user_id=target_user_id,
+                is_active=is_active,
+                current_session_id=str(token_session_id) if token_session_id else None,
+            )
+            return Response(sessions, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
     @action(
         detail=False,
@@ -935,49 +980,56 @@ class AuthenticationViewSet(viewsets.ViewSet):
         Revokes a specific device session and terminates its active refresh token.
         Cross-tenant and unauthorized foreign user revocation is strictly blocked.
         """
-        session = UserSession.objects.filter(session_id=session_id).first()
-        if not session:
-            return Response(
-                {
-                    "error_code": "SESSION_NOT_FOUND",
-                    "message_en": "Session record not found.",
-                    "message_bn": "সেশন রেকর্ড পাওয়া যায়নি।",
-                },
-                status=status.HTTP_404_NOT_FOUND,
+        from apps.identity.active_session_service import ActiveSessionService
+
+        reason = request.data.get("reason", "MANUAL_REVOCATION") if hasattr(request, "data") else "MANUAL_REVOCATION"
+        try:
+            revoked = ActiveSessionService.revoke_session(
+                actor_user=request.user,
+                session_id=str(session_id),
+                reason=reason,
             )
-
-        # Cross-tenant security boundary check
-        if session.tenant_id != request.user.tenant_id:
-            return Response(
-                {
-                    "error_code": "CROSS_TENANT_SESSION_ACCESS_DENIED",
-                    "message_en": "Cross-tenant session access is strictly denied.",
-                    "message_bn": "ক্রস-টেন্যান্ট সেশন অ্যাক্সেস কঠোরভাবে নিষিদ্ধ।",
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        # Ownership check
-        if session.user_id != request.user.user_id and not request.user.is_superuser:
-            return Response(
-                {
-                    "error_code": "FORBIDDEN_SESSION_REVOCATION",
-                    "message_en": "You are not authorized to revoke another user's session.",
-                    "message_bn": "আপনি অন্য ব্যবহারকারীর সেশন বাতিল করার জন্য অনুমোদিত নন।",
-                },
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        session.revoke(reason="MANUAL_REVOCATION")
-
-        resp_data = {
-            "session_id": str(session.session_id),
-            "status": "SUCCESS",
-            "revoked": True,
-            "message_en": "Device session successfully revoked.",
-            "message_bn": "ডিভাইস সেশনটি সফলভাবে বাতিল করা হয়েছে।",
-        }
-        return Response(SessionRevokeResponseSerializer(resp_data).data, status=status.HTTP_200_OK)
+            resp_data = {
+                "session_id": revoked["session_id"],
+                "status": "SUCCESS",
+                "revoked": True,
+                "message_en": "Device session successfully revoked.",
+                "message_bn": "ডিভাইস সেশনটি সফলভাবে বাতিল করা হয়েছে।",
+            }
+            return Response(SessionRevokeResponseSerializer(resp_data).data, status=status.HTTP_200_OK)
+        except ValidationError as exc:
+            code = exc.detail.get("error_code") if isinstance(exc.detail, dict) else ""
+            if code == "SESSION_NOT_FOUND":
+                return Response(
+                    {
+                        "error_code": "SESSION_NOT_FOUND",
+                        "message_en": "Session record not found.",
+                        "message_bn": "সেশন রেকর্ড পাওয়া যায়নি।",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+        except PermissionDenied as exc:
+            code = exc.detail.get("error_code") if isinstance(exc.detail, dict) else ""
+            if code == "ERR_CROSS_TENANT_VIOLATION":
+                return Response(
+                    {
+                        "error_code": "CROSS_TENANT_SESSION_ACCESS_DENIED",
+                        "message_en": "Cross-tenant session access is strictly denied.",
+                        "message_bn": "ক্রস-টেন্যান্ট সেশন অ্যাক্সেস কঠোরভাবে নিষিদ্ধ।",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            elif code == "ERR_PERMISSION_DENIED":
+                return Response(
+                    {
+                        "error_code": "FORBIDDEN_SESSION_REVOCATION",
+                        "message_en": "You are not authorized to revoke another user's session.",
+                        "message_bn": "আপনি অন্য ব্যবহারকারীর সেশন বাতিল করার জন্য অনুমোদিত নন।",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
 
     @action(
         detail=False,

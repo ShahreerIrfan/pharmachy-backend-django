@@ -252,3 +252,54 @@ class LogoutAllResponseSerializer(serializers.Serializer):
     revoked_sessions_count = serializers.IntegerField()
     message_en = serializers.CharField()
     message_bn = serializers.CharField()
+
+
+class ActiveSessionSerializer(serializers.ModelSerializer):
+    """
+    Serializes active client device sessions with staff role and branch enrichment
+    conforming to active_sessions.schema.json (ADR-0112 / P112).
+    """
+
+    user_id = serializers.UUIDField(source="user.user_id", read_only=True)
+    user_email = serializers.CharField(source="user.email", read_only=True)
+    user_full_name = serializers.CharField(source="user.full_name", read_only=True)
+    user_role = serializers.CharField(source="user.role", read_only=True)
+    branch_id = serializers.CharField(source="user.branch_id", read_only=True)
+    is_current = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserSession
+        fields = [
+            "session_id",
+            "user_id",
+            "user_email",
+            "user_full_name",
+            "user_role",
+            "tenant_id",
+            "branch_id",
+            "device_id",
+            "device_name",
+            "client_platform",
+            "ip_address",
+            "is_active",
+            "is_current",
+            "revocation_reason",
+            "revoked_at",
+            "last_seen_at",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_is_current(self, obj) -> bool:
+        request = self.context.get("request")
+        if not request:
+            return False
+        token_session_id = getattr(request, "auth_session_id", None)
+        if not token_session_id and hasattr(request, "auth") and isinstance(request.auth, dict):
+            token_session_id = request.auth.get("session_id")
+        if token_session_id:
+            return str(obj.session_id) == str(token_session_id)
+        current_jti = getattr(request, "auth_token_jti", None)
+        if current_jti:
+            return obj.current_refresh_jti == current_jti
+        return False

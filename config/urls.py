@@ -117,6 +117,7 @@ from apps.data_privacy.views import DataPrivacyViewSet
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
 from apps.environment_governance.views import EnvironmentProfileViewSet
 from apps.file_storage.views import SecureFileDownloadView, SecureFileStorageViewSet
+from apps.identity.active_session_views import ActiveSessionViewSet
 from apps.identity.auth_views import AuthenticationViewSet
 from apps.identity.views import PharmacyUserViewSet
 from apps.quality_governance.views import (
@@ -142,6 +143,7 @@ router.register("approvals", ApprovalRequestViewSet, basename="approval-request"
 router.register("shifts", StaffShiftScheduleViewSet, basename="shift-schedule")
 router.register("field-visibility", FieldVisibilityViewSet, basename="field-visibility")
 router.register("devices/registrations", LoginDeviceRegistrationViewSet, basename="device-registration")
+router.register("sessions/active", ActiveSessionViewSet, basename="active-sessions")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
 router.register("products", MedicineProductViewSet, basename="product")
 router.register("batches", BatchStockViewSet, basename="batch")

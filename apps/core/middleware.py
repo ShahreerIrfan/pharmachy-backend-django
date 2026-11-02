@@ -155,6 +155,22 @@ class TenantContextMiddleware:
 
         # 3. Authenticated Request: Enforce Trusted Signed Claims / Membership
         if user and user.is_authenticated:
+            session_id_header = request.META.get("HTTP_X_SESSION_ID")
+            active_session_id = (token_claims.get("session_id") if token_claims else None) or session_id_header
+            if active_session_id and not any(request.path.startswith(prefix) for prefix in self.PUBLIC_PATH_PREFIXES):
+                from apps.identity.models import UserSession
+                sess = UserSession.objects.filter(session_id=active_session_id).first()
+                if sess and not sess.is_active:
+                    return self._build_error_response(
+                        error_code="ERR_SESSION_REVOKED",
+                        http_status=status.HTTP_401_UNAUTHORIZED,
+                        message_en="This session has been revoked. Access denied immediately.",
+                        message_bn="এই সেশনটি বাতিল করা হয়েছে। অ্যাক্সেস অবিলম্বে বন্ধ করা হলো।",
+                        recovery_action="REAUTHENTICATE",
+                        details={"session_id": str(active_session_id), "revocation_reason": sess.revocation_reason},
+                        request_id=request_id,
+                    )
+
             user_role = (token_claims.get("role") if token_claims else None) or getattr(user, "role", None)
             is_superadmin = (
                 (user_role == UserRole.SUPERADMIN)
