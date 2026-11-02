@@ -22,6 +22,7 @@ from apps.core.billing_report_views import (
     PlatformBillingReportViewSet,
     TenantBillingReportViewSet,
 )
+from apps.core.branch_lifecycle_views import BranchLifecycleViewSet
 from apps.core.branch_membership_views import BranchStaffMembershipViewSet
 from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
 from apps.core.cross_tenant_metrics_views import (
@@ -131,7 +132,8 @@ router.register("tenants/feature-flags", TenantFeatureFlagEvaluationViewSet, bas
 router.register("tenants/data-exports", TenantDataExportViewSet, basename="tenant-data-exports")
 router.register("tenants/deletion-requests", TenantDeletionRequestViewSet, basename="tenant-deletion-requests")
 router.register("tenants", TenantViewSet, basename="tenant")
-router.register("branches", BranchViewSet, basename="branch")
+router.register("branches/lifecycle", BranchLifecycleViewSet, basename="branch-lifecycle")
+router.register("branches", BranchLifecycleViewSet, basename="branch")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
 router.register("products", MedicineProductViewSet, basename="product")
 router.register("batches", BatchStockViewSet, basename="batch")

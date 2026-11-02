@@ -179,17 +179,38 @@ class Tenant(models.Model):
         )
 
 
+class BranchLifecycleStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active Store"
+    SUSPENDED = "SUSPENDED", "Temporarily Suspended"
+    CLOSED = "CLOSED", "Permanently Closed"
+
+
 class Branch(models.Model):
-    """Physical pharmacy store or dispensary branch belonging to a tenant."""
+    """Physical pharmacy store or dispensary branch belonging to a tenant (ADR-0005, ADR-0091 & ADR-0107)."""
 
     branch_id = models.CharField(max_length=64, primary_key=True)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="branches")
     name = models.CharField(max_length=255)
+    branch_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
     license_number = models.CharField(max_length=128)  # DGDA Pharmacy License Number
     address = models.TextField(blank=True)
-    is_active = models.BooleanField(default=True)
-    is_over_quota_locked = models.BooleanField(default=False)
+    phone_number = models.CharField(max_length=32, blank=True, default="")
+    email = models.EmailField(blank=True, default="")
+    manager_name = models.CharField(max_length=128, blank=True, default="")
+    is_main_branch = models.BooleanField(default=False)
+    status = models.CharField(
+        max_length=32,
+        choices=BranchLifecycleStatus.choices,
+        default=BranchLifecycleStatus.ACTIVE,
+        db_index=True,
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    is_over_quota_locked = models.BooleanField(default=False, db_index=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.CharField(max_length=128, blank=True, default="")
+    closure_reason = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["name"]
@@ -3171,3 +3192,41 @@ class StaffLifecycleEvent(models.Model):
 
     def __str__(self) -> str:
         return f"Event {self.event_id} [{self.event_type}] for {self.staff_member.username}"
+
+
+class BranchLifecycleEventType(models.TextChoices):
+    CREATED = "CREATED", "Branch Created"
+    UPDATED = "UPDATED", "Branch Details Updated"
+    SUSPENDED = "SUSPENDED", "Branch Suspended"
+    REACTIVATED = "REACTIVATED", "Branch Reactivated"
+    CLOSED = "CLOSED", "Branch Closed / Decommissioned"
+    QUOTA_LOCKED = "QUOTA_LOCKED", "Branch Over-Quota Locked"
+    QUOTA_UNLOCKED = "QUOTA_UNLOCKED", "Branch Quota Unlocked"
+
+
+class BranchLifecycleEvent(models.Model):
+    """
+    Immutable audit trail recording state transitions, closures, and quota events across a branch's lifecycle (ADR-0107 / P107).
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="branch_lifecycle_events")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="lifecycle_events")
+    event_type = models.CharField(max_length=32, choices=BranchLifecycleEventType.choices, db_index=True)
+    performed_by_username = models.CharField(max_length=128, blank=True, default="")
+    reason = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict)
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Branch Lifecycle Event"
+        verbose_name_plural = "Branch Lifecycle Events"
+        indexes = [
+            models.Index(fields=["tenant", "event_type"]),
+            models.Index(fields=["branch", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"BranchEvent {self.event_id} [{self.event_type}] for {self.branch.name}"
