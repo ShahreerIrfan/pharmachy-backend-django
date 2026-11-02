@@ -3562,3 +3562,111 @@ class FieldVisibilityAuditEvent(models.Model):
 
     def __str__(self) -> str:
         return f"VisibilityAudit {self.event_id} [{self.action}:{self.field_category}] by {self.actor_username}"
+
+
+
+class DeviceRegistrationStatus(models.TextChoices):
+    PENDING_APPROVAL = "PENDING_APPROVAL", "Pending Approval"
+    APPROVED = "APPROVED", "Approved & Trusted"
+    REJECTED = "REJECTED", "Registration Rejected"
+    REVOKED = "REVOKED", "Cryptographic Trust Revoked"
+
+
+class DeviceKeyAlgorithm(models.TextChoices):
+    ED25519 = "ED25519", "Ed25519 Elliptic Curve"
+    RSA_2048 = "RSA_2048", "RSA 2048-bit"
+    ECDSA_P256 = "ECDSA_P256", "ECDSA P-256"
+
+
+class LoginDeviceRegistration(models.Model):
+    """
+    Desktop POS Device Registration & Cryptographic Enrollment (ADR-0111 / P111).
+    Maintains workstation cryptographic public key, key fingerprint, hardware binding,
+    branch ownership, and maker-checker approval lifecycle.
+    """
+
+    registration_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="device_registrations")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="device_registrations")
+    device_id = models.CharField(max_length=128, db_index=True)
+    device_label = models.CharField(max_length=128)
+    device_type = models.CharField(max_length=64, default="DESKTOP_POS")
+    public_key_pem = models.TextField()
+    key_algorithm = models.CharField(
+        max_length=32,
+        choices=DeviceKeyAlgorithm.choices,
+        default=DeviceKeyAlgorithm.ED25519,
+    )
+    key_fingerprint = models.CharField(max_length=128, db_index=True)
+    hardware_fingerprint = models.CharField(max_length=256, blank=True, default="")
+    mac_address = models.CharField(max_length=64, blank=True, default="")
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(
+        max_length=32,
+        choices=DeviceRegistrationStatus.choices,
+        default=DeviceRegistrationStatus.PENDING_APPROVAL,
+        db_index=True,
+    )
+    requested_by_username = models.CharField(max_length=128, blank=True, default="")
+    approved_by_username = models.CharField(max_length=128, blank=True, default="")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approval_notes = models.TextField(blank=True, default="")
+    rejected_by_username = models.CharField(max_length=128, blank=True, default="")
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default="")
+    revoked_by_username = models.CharField(max_length=128, blank=True, default="")
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revocation_reason = models.TextField(blank=True, default="")
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Login Device Registration"
+        verbose_name_plural = "Login Device Registrations"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["tenant", "device_id"]),
+            models.Index(fields=["key_fingerprint"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"DeviceReg {self.registration_id} [{self.device_label}] - {self.device_id} ({self.status})"
+
+
+class DeviceRegistrationAuditEvent(models.Model):
+    """
+    Immutable audit trail for desktop device registration, cryptographic trust approvals,
+    rejections, label modifications, and key revocations (ADR-0111).
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="device_registration_audits",
+    )
+    device_registration = models.ForeignKey(
+        LoginDeviceRegistration,
+        on_delete=models.CASCADE,
+        related_name="audit_trail",
+    )
+    action = models.CharField(max_length=64, db_index=True)
+    actor_username = models.CharField(max_length=128, blank=True, default="")
+    actor_role = models.CharField(max_length=64, blank=True, default="")
+    details = models.JSONField(default=dict)
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Device Registration Audit Event"
+        verbose_name_plural = "Device Registration Audit Events"
+        indexes = [
+            models.Index(fields=["tenant", "action"]),
+            models.Index(fields=["device_registration", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"DeviceRegAudit {self.event_id} [{self.action}] on {self.device_registration_id} by {self.actor_username}"

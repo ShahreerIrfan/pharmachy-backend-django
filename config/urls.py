@@ -34,6 +34,7 @@ from apps.core.custom_role_views import (
     CustomRoleViewSet,
     PermissionCatalogViewSet,
 )
+from apps.core.device_registration_views import LoginDeviceRegistrationViewSet
 from apps.core.device_seat_views import DeviceSeatViewSet
 from apps.core.downgrade_views import SubscriptionDowngradeViewSet
 from apps.core.dunning_views import DunningNotificationViewSet
@@ -140,6 +141,7 @@ router.register("branches", BranchLifecycleViewSet, basename="branch")
 router.register("approvals", ApprovalRequestViewSet, basename="approval-request")
 router.register("shifts", StaffShiftScheduleViewSet, basename="shift-schedule")
 router.register("field-visibility", FieldVisibilityViewSet, basename="field-visibility")
+router.register("devices/registrations", LoginDeviceRegistrationViewSet, basename="device-registration")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
 router.register("products", MedicineProductViewSet, basename="product")
 router.register("batches", BatchStockViewSet, basename="batch")
