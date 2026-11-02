@@ -41,6 +41,7 @@ from apps.core.feature_flag_views import (
     PlatformFeatureFlagViewSet,
     TenantFeatureFlagEvaluationViewSet,
 )
+from apps.core.field_visibility_views import FieldVisibilityViewSet
 from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.granular_permission_views import GranularPermissionViewSet
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
@@ -138,6 +139,7 @@ router.register("branches/lifecycle", BranchLifecycleViewSet, basename="branch-l
 router.register("branches", BranchLifecycleViewSet, basename="branch")
 router.register("approvals", ApprovalRequestViewSet, basename="approval-request")
 router.register("shifts", StaffShiftScheduleViewSet, basename="shift-schedule")
+router.register("field-visibility", FieldVisibilityViewSet, basename="field-visibility")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
 router.register("products", MedicineProductViewSet, basename="product")
 router.register("batches", BatchStockViewSet, basename="batch")

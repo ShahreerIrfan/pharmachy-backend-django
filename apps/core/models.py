@@ -3467,3 +3467,98 @@ class ShiftAuditEvent(models.Model):
 
     def __str__(self) -> str:
         return f"ShiftAudit {self.event_id} [{self.action}] on {self.shift_schedule_id}"
+
+
+
+class StaffSalaryRecord(models.Model):
+    """
+    Staff Compensation & Salary Ledger (ADR-0110 / P110).
+    Maintains confidential payroll parameters: base salary, hourly rate, allowances,
+    and bank details. Gated strictly by salary_visibility permission.
+    """
+
+    salary_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="staff_salaries")
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="staff_salaries",
+        null=True,
+        blank=True,
+    )
+    staff_member = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.CASCADE,
+        related_name="salary_records",
+    )
+    base_salary_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    hourly_rate_bdt = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    allowances_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    bank_name = models.CharField(max_length=128, blank=True, default="")
+    bank_account_no = models.CharField(max_length=64, blank=True, default="")
+    effective_from = models.DateField(default=timezone.now)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by_username = models.CharField(max_length=128, blank=True, default="")
+    updated_by_username = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Staff Salary Record"
+        verbose_name_plural = "Staff Salary Records"
+        indexes = [
+            models.Index(fields=["tenant", "is_active"]),
+            models.Index(fields=["staff_member", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Salary {self.salary_id} [{self.staff_member_id}] - {self.base_salary_bdt} BDT"
+
+
+class FieldVisibilityAuditEvent(models.Model):
+    """
+    Immutable audit log for sensitive field access, unmasked exports,
+    and salary modifications (ADR-0110).
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="visibility_audit_events",
+    )
+    action = models.CharField(max_length=64, db_index=True)
+    field_category = models.CharField(max_length=64, db_index=True)
+    actor_username = models.CharField(max_length=128, blank=True, default="")
+    actor_role = models.CharField(max_length=64, blank=True, default="")
+    details = models.JSONField(default=dict)
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Field Visibility Audit Event"
+        verbose_name_plural = "Field Visibility Audit Events"
+        indexes = [
+            models.Index(fields=["tenant", "field_category"]),
+            models.Index(fields=["actor_username", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"VisibilityAudit {self.event_id} [{self.action}:{self.field_category}] by {self.actor_username}"
