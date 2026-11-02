@@ -2922,3 +2922,143 @@ class StaffMembership(models.Model):
 
     def __str__(self) -> str:
         return f"Membership {self.membership_id} - {self.staff_member.full_name} ({self.role})"
+
+
+
+class CustomRoleDefinition(models.Model):
+    """
+    Tenant-scoped custom role definition specifying granted atomic permission keys
+    and safety minimums (P103 / ADR-0103).
+    """
+
+    role_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="custom_roles")
+    role_code = models.CharField(max_length=64, db_index=True)
+    display_name = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default="")
+    base_role = models.CharField(
+        max_length=32,
+        choices=StaffRole.choices,
+        default=StaffRole.CASHIER,
+        db_index=True,
+    )
+    permission_keys = models.JSONField(default=list)
+    requires_pcb_registration = models.BooleanField(default=False)
+    is_system_protected = models.BooleanField(default=False)
+    is_archived = models.BooleanField(default=False, db_index=True)
+    cloned_from_id = models.CharField(max_length=64, blank=True, default="")
+    created_by_username = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["display_name"]
+        verbose_name = "Custom Role Definition"
+        verbose_name_plural = "Custom Role Definitions"
+        unique_together = ("tenant", "role_code")
+        indexes = [
+            models.Index(fields=["tenant", "is_archived"]),
+            models.Index(fields=["tenant", "role_code"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Role {self.role_code} ({self.display_name}) - {self.tenant_id}"
+
+
+
+class ExpenseStatus(models.TextChoices):
+    PENDING_APPROVAL = "PENDING_APPROVAL", "Pending Approval"
+    APPROVED = "APPROVED", "Approved"
+    REJECTED = "REJECTED", "Rejected"
+
+
+class BranchExpenseRecord(models.Model):
+    """
+    Branch operational expense or petty cash voucher requiring granular approval (P104 / ADR-0104).
+    Enforces expense_approval authority.
+    """
+
+    expense_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="branch_expenses")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="branch_expenses")
+    category = models.CharField(max_length=64, default="MISCELLANEOUS")
+    amount_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.01"))],
+    )
+    description = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=32,
+        choices=ExpenseStatus.choices,
+        default=ExpenseStatus.PENDING_APPROVAL,
+        db_index=True,
+    )
+    created_by_username = models.CharField(max_length=128, blank=True, default="")
+    approved_by_username = models.CharField(max_length=128, blank=True, default="")
+    rejection_reason = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Branch Expense Record"
+        verbose_name_plural = "Branch Expense Records"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["branch", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Expense {self.expense_id} - {self.category} ({self.amount_bdt} BDT) [{self.status}]"
+
+
+class StockAdjustmentType(models.TextChoices):
+    DAMAGE = "DAMAGE", "Damage / Breakage"
+    EXPIRY_REMOVAL = "EXPIRY_REMOVAL", "Expired Stock Removal"
+    COUNT_CORRECTION = "COUNT_CORRECTION", "Physical Count Correction"
+    INTERNAL_USE = "INTERNAL_USE", "Internal Clinic / Store Use"
+
+
+class StockAdjustmentRecord(models.Model):
+    """
+    Audited inventory adjustment record modifying physical stock counts (P104 / ADR-0104).
+    Enforces stock_change authority and tracks inventory value impact.
+    """
+
+    adjustment_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="stock_adjustments")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="stock_adjustments")
+    medicine = models.ForeignKey(MedicineProduct, on_delete=models.CASCADE, related_name="stock_adjustments")
+    batch = models.ForeignKey(BatchStock, on_delete=models.SET_NULL, null=True, blank=True, related_name="stock_adjustments")
+    adjustment_type = models.CharField(
+        max_length=32,
+        choices=StockAdjustmentType.choices,
+        default=StockAdjustmentType.DAMAGE,
+        db_index=True,
+    )
+    quantity_delta = models.IntegerField(help_text="Positive for additions, negative for reductions.")
+    unit_cost_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=32, default="POSTED", db_index=True)
+    adjusted_by_username = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Stock Adjustment Record"
+        verbose_name_plural = "Stock Adjustment Records"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["branch", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"StockAdj {self.adjustment_id} - {self.medicine.brand_name} ({self.quantity_delta}) [{self.adjustment_type}]"

@@ -27,6 +27,10 @@ from apps.core.cross_tenant_metrics_views import (
     PlatformCrossTenantMetricsViewSet,
     TenantPlatformBenchmarksViewSet,
 )
+from apps.core.custom_role_views import (
+    CustomRoleViewSet,
+    PermissionCatalogViewSet,
+)
 from apps.core.device_seat_views import DeviceSeatViewSet
 from apps.core.downgrade_views import SubscriptionDowngradeViewSet
 from apps.core.dunning_views import DunningNotificationViewSet
@@ -35,6 +39,7 @@ from apps.core.feature_flag_views import (
     TenantFeatureFlagEvaluationViewSet,
 )
 from apps.core.gateway_views import PaymentGatewayViewSet
+from apps.core.granular_permission_views import GranularPermissionViewSet
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
 from apps.core.manual_payment_views import ManualPaymentClaimViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -134,6 +139,8 @@ router.register("analytics/platform-benchmarks", TenantPlatformBenchmarksViewSet
 router.register("analytics", DailyBranchAnalyticsViewSet, basename="analytics")
 router.register("compliance-reminders", ComplianceReminderViewSet, basename="compliance-reminder")
 router.register("subscriptions", SubscriptionRecordViewSet, basename="subscription")
+router.register("roles/catalog", PermissionCatalogViewSet, basename="roles-catalog")
+router.register("roles/custom", CustomRoleViewSet, basename="roles-custom")
 router.register("staff/invitations", StaffInvitationViewSet, basename="staff-invitations")
 router.register("staff/memberships", StaffMembershipViewSet, basename="staff-memberships")
 router.register("staff", StaffMemberViewSet, basename="staff")
@@ -160,6 +167,7 @@ router.register("standards/time-money", TimeMoneyStandardsViewSet, basename="sta
 router.register("archival", SoftDeletionAndArchivalViewSet, basename="archival")
 router.register("async-tasks", AsyncTaskIdempotencyViewSet, basename="async-task")
 router.register("health/diagnostics", HealthDiagnosticsViewSet, basename="health-diagnostics")
+router.register("permissions/granular", GranularPermissionViewSet, basename="permissions-granular")
 router.register("permissions/matrix", EndpointPermissionMatrixViewSet, basename="permission-matrix")
 router.register("security/baseline", SecurityBaselineViewSet, basename="security-baseline")
 router.register("platform/announcements", PlatformAnnouncementViewSet, basename="platform-announcements")
