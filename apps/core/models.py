@@ -3230,3 +3230,125 @@ class BranchLifecycleEvent(models.Model):
 
     def __str__(self) -> str:
         return f"BranchEvent {self.event_id} [{self.event_type}] for {self.branch.name}"
+
+
+
+class ApprovalRequestType(models.TextChoices):
+    HIGH_DISCOUNT = "HIGH_DISCOUNT", "High Retail Discount"
+    REFUND = "REFUND", "Sale Return / Refund"
+    STOCK_WRITE_OFF = "STOCK_WRITE_OFF", "Stock Damage / Write-off"
+    SENSITIVE_EXPENSE = "SENSITIVE_EXPENSE", "Sensitive Operating Expense"
+    CLINICAL_ESCALATION = "CLINICAL_ESCALATION", "Clinical Escalation / Drug Safety"
+
+
+class ApprovalStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending Review"
+    APPROVED = "APPROVED", "Approved"
+    REJECTED = "REJECTED", "Rejected"
+    CANCELLED = "CANCELLED", "Cancelled by Maker"
+
+
+class ApprovalUrgency(models.TextChoices):
+    ROUTINE = "ROUTINE", "Routine"
+    URGENT = "URGENT", "Urgent"
+    CRITICAL = "CRITICAL", "Critical / High Priority"
+
+
+class ApprovalRequest(models.Model):
+    """
+    Maker-Checker Dual-Control Approval Request (ADR-0108 / P108).
+    Enforces that maker != checker across high discounts, refunds, stock write-offs,
+    sensitive operational expenses, and clinical safety escalations.
+    """
+
+    request_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="approval_requests")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="approval_requests")
+    approval_type = models.CharField(max_length=32, choices=ApprovalRequestType.choices, db_index=True)
+    status = models.CharField(
+        max_length=32,
+        choices=ApprovalStatus.choices,
+        default=ApprovalStatus.PENDING,
+        db_index=True,
+    )
+    urgency = models.CharField(
+        max_length=32,
+        choices=ApprovalUrgency.choices,
+        default=ApprovalUrgency.ROUTINE,
+        db_index=True,
+    )
+    maker_user = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.CASCADE,
+        related_name="initiated_approvals",
+    )
+    checker_user = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="decided_approvals",
+    )
+    amount_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    discount_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+    )
+    title = models.CharField(max_length=255)
+    reason = models.TextField()
+    decision_notes = models.TextField(blank=True, default="")
+    approval_token = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    decision_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Approval Request"
+        verbose_name_plural = "Approval Requests"
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["branch", "status"]),
+            models.Index(fields=["tenant", "approval_type"]),
+            models.Index(fields=["maker_user", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ApprovalRequest {self.request_id} [{self.approval_type}] - {self.status}"
+
+
+class ApprovalAuditEvent(models.Model):
+    """
+    Immutable audit log recording every transition (SUBMITTED, APPROVED, REJECTED, CANCELLED)
+    for regulatory DGDA and financial compliance (ADR-0108).
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="approval_audit_events")
+    approval_request = models.ForeignKey(ApprovalRequest, on_delete=models.CASCADE, related_name="audit_trail")
+    action = models.CharField(max_length=32, db_index=True)
+    actor_username = models.CharField(max_length=128, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict)
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Approval Audit Event"
+        verbose_name_plural = "Approval Audit Events"
+        indexes = [
+            models.Index(fields=["tenant", "action"]),
+            models.Index(fields=["approval_request", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ApprovalAudit {self.event_id} [{self.action}] on {self.approval_request_id}"
