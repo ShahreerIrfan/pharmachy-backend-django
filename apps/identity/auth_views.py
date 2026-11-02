@@ -13,7 +13,6 @@ import uuid
 from datetime import timedelta
 
 import pyotp
-from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
@@ -25,13 +24,12 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from apps.identity.auth_backends import EmailOrPhoneModelBackend
 from apps.identity.models import (
     MfaChallengeSession,
-    PasswordResetToken,
     PharmacyUser,
     UserMfaDevice,
     UserRole,
     UserSession,
-    normalize_bangladesh_phone,
 )
+from apps.identity.password_recovery_service import PasswordRecoveryService
 from apps.identity.serializers import (
     LoginRequestSerializer,
     LoginResponseSerializer,
@@ -43,8 +41,6 @@ from apps.identity.serializers import (
     MfaSetupResponseSerializer,
     MfaStatusResponseSerializer,
     MfaVerifyRequestSerializer,
-    PasswordResetConfirmSerializer,
-    PasswordResetRequestSerializer,
     PharmacyUserSerializer,
     SessionRevokeResponseSerializer,
     TokenRefreshRequestSerializer,
@@ -458,121 +454,83 @@ class AuthenticationViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["post"], url_path="password-reset/request")
     def password_reset_request(self, request):
         """
-        Anti-enumeration password reset request. Returns client-safe generic 200 OK.
+        Anti-enumeration password reset request with sliding-window throttling.
         """
-        serializer = PasswordResetRequestSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(
-                {
-                    "error_code": "INVALID_PAYLOAD",
-                    "message_en": "Identifier is required.",
-                    "message_bn": "ইমেইল বা ফোন নম্বর প্রদান করুন।",
-                    "details": serializer.errors,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        raw_id = serializer.validated_data["identifier"].strip()
-        user = None
-
-        # Look up by phone if digits
-        if any(c.isdigit() for c in raw_id) and "@" not in raw_id:
-            try:
-                norm = normalize_bangladesh_phone(raw_id)
-                user = PharmacyUser.objects.filter(phone_number=norm, is_archived=False).first()
-            except Exception:
-                pass
-
-        if user is None and "@" in raw_id:
-            user = PharmacyUser.objects.filter(email__iexact=raw_id.lower(), is_archived=False).first()
-
-        reset_token_str = None
-        if user and user.is_active:
-            token_val = secrets.token_urlsafe(32)
-            otp_val = f"{secrets.randbelow(900000) + 100000:06d}"
-            expires_at = timezone.now() + timedelta(minutes=15)
-
-            # Invalidate older tokens
-            PasswordResetToken.objects.filter(user=user, is_used=False).update(is_used=True)
-
-            PasswordResetToken.objects.create(
-                user=user,
-                token=token_val,
-                otp_code=otp_val,
-                expires_at=expires_at,
-            )
-            reset_token_str = token_val
-
-        # Anti-enumeration response: always returns 200 OK
-        resp_data = {
-            "status": "DISPATCHED",
-            "message_en": "If the account exists, password reset instructions have been dispatched.",
-            "message_bn": "যদি অ্যাকাউন্টটি বিদ্যমান থাকে, পাসওয়ার্ড রিসেট নির্দেশাবলী পাঠানো হয়েছে।",
-        }
-        # Include token in response for test / dev environment automation
-        if getattr(settings, "DJANGO_ENV", "") in ("development", "testing"):
-            resp_data["dev_reset_token"] = reset_token_str
-
-        return Response(resp_data, status=status.HTTP_200_OK)
+        identifier = request.data.get("identifier", "")
+        ip_addr = request.META.get("REMOTE_ADDR")
+        try:
+            res = PasswordRecoveryService.request_password_reset(identifier=identifier, ip_address=ip_addr)
+            return Response(res, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            code = exc.detail.get("error_code") if isinstance(exc.detail, dict) else ""
+            if code == "ERR_RATE_LIMIT_EXCEEDED":
+                return Response(exc.detail, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=["post"], url_path="password-reset/confirm")
     def password_reset_confirm(self, request):
         """
-        Confirms password reset using time-bound cryptographic token.
+        Confirms password reset using time-bound one-time cryptographic token.
         """
-        serializer = PasswordResetConfirmSerializer(data=request.data)
-        if not serializer.is_valid():
+        token_str = request.data.get("reset_token", "")
+        new_password = request.data.get("new_password", "")
+        ip_addr = request.META.get("REMOTE_ADDR")
+
+        if not token_str or not new_password:
             return Response(
                 {
                     "error_code": "INVALID_PAYLOAD",
                     "message_en": "Reset token and new password are required.",
                     "message_bn": "রিসেট টোকেন এবং নতুন পাসওয়ার্ড আবশ্যক।",
-                    "details": serializer.errors,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        token_str = serializer.validated_data["reset_token"]
-        new_password = serializer.validated_data["new_password"]
+        try:
+            res = PasswordRecoveryService.confirm_password_reset(token_str=token_str, new_password=new_password, ip_address=ip_addr)
+            return Response(res, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
-        reset_record = PasswordResetToken.objects.filter(token=token_str).first()
-        if not reset_record or not reset_record.is_valid():
+    @action(detail=False, methods=["get"], url_path="password/verify-token")
+    def password_verify_token(self, request):
+        """
+        Proactively verifies password reset token validity without consuming it.
+        """
+        token_str = request.query_params.get("token") or request.query_params.get("reset_token", "")
+        res = PasswordRecoveryService.verify_reset_token(token_str=token_str)
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path="password/setup")
+    def password_setup(self, request):
+        """
+        Accessible initial password setup for new / invited pharmacy staff.
+        """
+        setup_token = request.data.get("setup_token", "")
+        new_password = request.data.get("new_password", "")
+        ip_addr = request.META.get("REMOTE_ADDR")
+
+        if not setup_token or not new_password:
             return Response(
                 {
-                    "error_code": "INVALID_RESET_TOKEN",
-                    "message_en": "Password reset token is invalid or has expired.",
-                    "message_bn": "পাসওয়ার্ড রিসেট টোকেনটি অবৈধ বা মেয়াদোত্তীর্ণ।",
-                    "details": "The token was either already used or the 15-minute window expired.",
+                    "error_code": "INVALID_PAYLOAD",
+                    "message_en": "Setup token and new password are required.",
+                    "message_bn": "সেটআপ টোকেন এবং নতুন পাসওয়ার্ড আবশ্যক।",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user = reset_record.user
-        user.set_password(new_password)
-        user.password_changed_at = timezone.now()
-        user.failed_login_attempts = 0
-        user.lockout_until = None
-        user.save(
-            update_fields=[
-                "password",
-                "password_changed_at",
-                "failed_login_attempts",
-                "lockout_until",
-                "updated_at",
-            ]
-        )
-
-        reset_record.is_used = True
-        reset_record.save(update_fields=["is_used"])
-
-        return Response(
-            {
-                "status": "SUCCESS",
-                "message_en": "Password has been reset successfully. Please log in with your new credentials.",
-                "message_bn": "পাসওয়ার্ড সফলভাবে পরিবর্তিত হয়েছে। অনুগ্রহ করে নতুন পাসওয়ার্ড দিয়ে লগইন করুন।",
-            },
-            status=status.HTTP_200_OK,
-        )
+        try:
+            res = PasswordRecoveryService.setup_initial_password(setup_token=setup_token, new_password=new_password, ip_address=ip_addr)
+            return Response(res, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=["post"], url_path="mfa/setup", permission_classes=[permissions.IsAuthenticated])
     def mfa_setup(self, request):

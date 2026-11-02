@@ -12,6 +12,7 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, Spec
 from rest_framework.routers import DefaultRouter
 
 from apps.audit_logging.platform_audit_views import PlatformAuditSearchViewSet
+from apps.audit_logging.staff_audit_timeline_views import StaffAuditTimelineViewSet
 from apps.audit_logging.views import AuditLogEntryViewSet
 from apps.build_pipeline.views import BuildSmokeViewSet
 from apps.core.announcement_views import (
@@ -19,13 +20,19 @@ from apps.core.announcement_views import (
     TenantAnnouncementViewSet,
 )
 from apps.core.approval_views import ApprovalRequestViewSet
+from apps.core.barcode_identifier_views import BarcodeAlternateIdentifierViewSet
 from apps.core.billing_report_views import (
     PlatformBillingReportViewSet,
     TenantBillingReportViewSet,
 )
 from apps.core.branch_lifecycle_views import BranchLifecycleViewSet
 from apps.core.branch_membership_views import BranchStaffMembershipViewSet
+from apps.core.branch_operating_settings_views import BranchOperatingSettingsViewSet
+from apps.core.bulk_import_views import MedicineBulkImportViewSet
 from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
+from apps.core.cashier_register_views import CashierRegisterAssignmentViewSet
+from apps.core.catalogue_recall_views import CatalogueLifecycleNoticeViewSet
+from apps.core.classification_snapshot_views import MedicineClassificationSnapshotViewSet
 from apps.core.cross_tenant_metrics_views import (
     PlatformCrossTenantMetricsViewSet,
     TenantPlatformBenchmarksViewSet,
@@ -36,6 +43,7 @@ from apps.core.custom_role_views import (
 )
 from apps.core.device_registration_views import LoginDeviceRegistrationViewSet
 from apps.core.device_seat_views import DeviceSeatViewSet
+from apps.core.dosage_form_views import DosageFormViewSet
 from apps.core.downgrade_views import SubscriptionDowngradeViewSet
 from apps.core.dunning_views import DunningNotificationViewSet
 from apps.core.feature_flag_views import (
@@ -47,9 +55,16 @@ from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.granular_permission_views import GranularPermissionViewSet
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
 from apps.core.manual_payment_views import ManualPaymentClaimViewSet
+from apps.core.manufacturer_supplier_views import ManufacturerViewSet, SupplierViewSet
+from apps.core.medicine_editor_schema_views import MedicineEditorSchemaViewSet
+from apps.core.medicine_form_template_views import MedicineFormTemplateViewSet
+from apps.core.medicine_search_views import MedicineSearchAutocompleteViewSet
+from apps.core.medicine_variant_views import MedicineVariantViewSet
+from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
 from apps.core.offline_lapse_views import LapsedPlanReconciliationViewSet
 from apps.core.onboarding_views import PlatformTenantOnboardingWizardViewSet
+from apps.core.override_precedence_views import OverridePrecedenceViewSet
 from apps.core.owner_dashboard_views import OwnerDashboardViewSet
 from apps.core.plan_catalogue_views import (
     PlanCatalogueViewSet,
@@ -57,15 +72,21 @@ from apps.core.plan_catalogue_views import (
     TenantEntitlementViewSet,
 )
 from apps.core.platform_access_views import PlatformAccessPolicyViewSet
+from apps.core.product_metadata_review_views import ProductMetadataReviewViewSet
 from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
+from apps.core.regulatory_source_views import RegulatorySourceAttachmentViewSet
 from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
+from apps.core.role_migration_views import RoleMigrationGrantsViewSet
 from apps.core.shift_views import StaffShiftScheduleViewSet
 from apps.core.staff_lifecycle_views import StaffLifecycleViewSet
 from apps.core.staff_membership_views import (
     StaffInvitationViewSet,
     StaffMembershipViewSet,
 )
+from apps.core.staff_offline_auth_views import StaffOfflineAuthorizationViewSet
+from apps.core.staff_performance_views import StaffPerformanceMetricsViewSet
+from apps.core.strength_taxonomy_views import StrengthTaxonomyViewSet
 from apps.core.subscription_portal_views import SubscriptionCustomerPortalViewSet
 from apps.core.subscription_support_views import SubscriptionSupportOverrideViewSet
 from apps.core.subscription_views import SubscriptionViewSet
@@ -138,27 +159,49 @@ router.register("tenants/data-exports", TenantDataExportViewSet, basename="tenan
 router.register("tenants/deletion-requests", TenantDeletionRequestViewSet, basename="tenant-deletion-requests")
 router.register("tenants", TenantViewSet, basename="tenant")
 router.register("branches/lifecycle", BranchLifecycleViewSet, basename="branch-lifecycle")
+router.register("branches/operating-settings", BranchOperatingSettingsViewSet, basename="branch-operating-settings")
 router.register("branches", BranchLifecycleViewSet, basename="branch")
 router.register("approvals", ApprovalRequestViewSet, basename="approval-request")
 router.register("shifts", StaffShiftScheduleViewSet, basename="shift-schedule")
 router.register("field-visibility", FieldVisibilityViewSet, basename="field-visibility")
 router.register("devices/registrations", LoginDeviceRegistrationViewSet, basename="device-registration")
+router.register("registers/assignments", CashierRegisterAssignmentViewSet, basename="register-assignments")
 router.register("sessions/active", ActiveSessionViewSet, basename="active-sessions")
+router.register("staff/offline-authorizations", StaffOfflineAuthorizationViewSet, basename="staff-offline-authorizations")
+router.register("dosage-forms", DosageFormViewSet, basename="dosage-forms")
+router.register("catalog/manufacturers", ManufacturerViewSet, basename="manufacturers")
+router.register("catalog/classifications", MedicineClassificationSnapshotViewSet, basename="catalog-classifications")
+router.register("catalog/overrides", OverridePrecedenceViewSet, basename="catalog-overrides")
+router.register("catalog/search", MedicineSearchAutocompleteViewSet, basename="catalog-search")
+router.register("catalog/templates", MedicineFormTemplateViewSet, basename="catalog-templates")
+router.register("catalog/bulk-import", MedicineBulkImportViewSet, basename="catalog-bulk-import")
+router.register("catalog/reviews", ProductMetadataReviewViewSet, basename="catalog-reviews")
+router.register("catalog/regulatory-sources", RegulatorySourceAttachmentViewSet, basename="catalog-regulatory-sources")
+router.register("catalog/retail-items", NonMedicineRetailItemViewSet, basename="catalog-retail-items")
+router.register("catalog/barcodes", BarcodeAlternateIdentifierViewSet, basename="catalog-barcodes")
+router.register("catalog/recalls", CatalogueLifecycleNoticeViewSet, basename="catalog-recalls")
+router.register("suppliers", SupplierViewSet, basename="suppliers")
+router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
+router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
+router.register("medicines/variants", MedicineVariantViewSet, basename="medicine-variants")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
 router.register("products", MedicineProductViewSet, basename="product")
 router.register("batches", BatchStockViewSet, basename="batch")
 router.register("invoices", SaleInvoiceViewSet, basename="invoice")
 router.register("async-jobs", AsyncJobRecordViewSet, basename="async-job")
 router.register("analytics/platform-benchmarks", TenantPlatformBenchmarksViewSet, basename="tenant-platform-benchmarks")
+router.register("analytics/staff-performance", StaffPerformanceMetricsViewSet, basename="staff-performance-metrics")
 router.register("analytics", DailyBranchAnalyticsViewSet, basename="analytics")
 router.register("compliance-reminders", ComplianceReminderViewSet, basename="compliance-reminder")
 router.register("subscriptions", SubscriptionRecordViewSet, basename="subscription")
 router.register("roles/catalog", PermissionCatalogViewSet, basename="roles-catalog")
 router.register("roles/custom", CustomRoleViewSet, basename="roles-custom")
+router.register("roles/migrations", RoleMigrationGrantsViewSet, basename="roles-migrations")
 router.register("staff/invitations", StaffInvitationViewSet, basename="staff-invitations")
 router.register("staff/memberships", StaffMembershipViewSet, basename="staff-memberships")
 router.register("staff/branch-memberships", BranchStaffMembershipViewSet, basename="staff-branch-memberships")
 router.register("staff/lifecycle", StaffLifecycleViewSet, basename="staff-lifecycle")
+router.register("staff/audit-timeline", StaffAuditTimelineViewSet, basename="staff-audit-timeline")
 router.register("staff", StaffMemberViewSet, basename="staff")
 router.register("prescriptions", PrescriptionRecordViewSet, basename="prescription")
 router.register("payments", PaymentTransactionViewSet, basename="payment")

@@ -240,10 +240,18 @@ class MedicineProduct(models.Model):
 
     product_id = models.CharField(max_length=64, primary_key=True)
     brand_name = models.CharField(max_length=255, db_index=True)
+    brand_name_bn = models.CharField(max_length=255, blank=True, default="", db_index=True, help_text="Bengali brand name transliteration")
     generic_name = models.CharField(max_length=255, db_index=True)
+    generic_name_bn = models.CharField(max_length=255, blank=True, default="", db_index=True, help_text="Bengali generic molecule transliteration")
     dosage_form = models.CharField(max_length=64)  # Tablet, Capsule, Syrup, Suspension, Injection
     strength = models.CharField(max_length=64)  # 500mg, 20mg, 100ml
+    strength_numeric = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True, help_text="Normalized numeric strength value")
+    strength_unit = models.CharField(max_length=32, blank=True, default="mg", help_text="Canonical unit: mg, mcg, g, mL, %, IU/mL, mg/5mL")
+    strength_unit_family = models.CharField(max_length=32, blank=True, default="MASS", help_text="Taxonomy family: MASS, VOLUME, PERCENTAGE, CONCENTRATION, BIOLOGICAL")
     manufacturer = models.CharField(max_length=255, db_index=True)  # Square, Beximco, Incepta, etc.
+    route = models.CharField(max_length=64, blank=True, default="Oral", help_text="Administration route (e.g. Oral, IV, Topical)")
+    barcode = models.CharField(max_length=64, blank=True, default="", db_index=True, help_text="GTIN / EAN barcode")
+    source_metadata = models.JSONField(default=dict, blank=True, help_text="Regulatory source metadata, DAR approval date, gazette info")
     mrp_unit = models.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -308,7 +316,8 @@ class MedicineProduct(models.Model):
 
         raw = (
             f"{self.dgda_dar_number}|{self.brand_name}|{self.generic_name}|"
-            f"{self.dosage_form}|{self.strength}|{self.manufacturer}|{self.version_number}"
+            f"{self.dosage_form}|{self.strength}|{self.manufacturer}|"
+            f"{self.route}|{self.barcode}|{self.version_number}"
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -350,6 +359,102 @@ class MedicineCurationHistory(models.Model):
         verbose_name_plural = "Medicine Curation Histories"
 
 
+class ClassificationType(models.TextChoices):
+    OTC = "OTC", "Over-The-Counter"
+    PRESCRIPTION_ONLY = "PRESCRIPTION_ONLY", "Prescription-Only Medicine (POM)"
+    NARCOTIC_SCHEDULED = "NARCOTIC_SCHEDULED", "Narcotic / Controlled Substance (Schedule-G)"
+    ANTIMICROBIAL_ACCESS = "ANTIMICROBIAL_ACCESS", "Antimicrobial AWaRe - Access"
+    ANTIMICROBIAL_WATCH = "ANTIMICROBIAL_WATCH", "Antimicrobial AWaRe - Watch"
+    ANTIMICROBIAL_RESERVE = "ANTIMICROBIAL_RESERVE", "Antimicrobial AWaRe - Reserve"
+    RECALLED = "RECALLED", "DGDA Statutory Safety Recall"
+    BANNED = "BANNED", "Banned & Prohibited"
+
+
+class MedicineClassificationSnapshot(models.Model):
+    """
+    Architecture Decision: ADR-0130 (P130).
+    Versioned regulatory snapshot of a medicine's controlled classification,
+    effective date range, approving authority, gazette source, and cryptographic hash.
+    Enforces point-in-time dispensing compliance and recall hard-blocking.
+    """
+
+    snapshot_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="classification_snapshots",
+        db_index=True,
+    )
+    version_number = models.PositiveIntegerField(default=1)
+    classification_type = models.CharField(
+        max_length=32,
+        choices=ClassificationType.choices,
+        default=ClassificationType.OTC,
+        db_index=True,
+    )
+    regulatory_source = models.CharField(
+        max_length=255,
+        help_text="Official DGDA gazette, circular, or WHO AWaRe publication reference.",
+    )
+    effective_from = models.DateTimeField(db_index=True)
+    effective_to = models.DateTimeField(null=True, blank=True, db_index=True)
+    is_current = models.BooleanField(default=True, db_index=True)
+    reviewed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_classification_snapshots",
+    )
+    reviewed_at = models.DateTimeField(auto_now_add=True)
+    review_notes = models.TextField(blank=True, default="")
+    immutable_hash = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["product", "-version_number"]
+        verbose_name = "Medicine Classification Snapshot"
+        verbose_name_plural = "Medicine Classification Snapshots"
+        indexes = [
+            models.Index(fields=["product", "is_current"]),
+            models.Index(fields=["product", "version_number"]),
+            models.Index(fields=["classification_type", "is_current"]),
+            models.Index(fields=["effective_from", "effective_to"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "version_number"],
+                name="unique_product_classification_version",
+            )
+        ]
+
+    def compute_hash(self) -> str:
+        import hashlib
+
+        eff_str = self.effective_from.isoformat() if self.effective_from else ""
+        raw = f"{self.product_id}|{self.version_number}|{self.classification_type}|{self.regulatory_source}|{eff_str}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def save(self, *args, **kwargs):
+        if not self.immutable_hash:
+            self.immutable_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+    @property
+    def is_dispensing_blocked(self) -> bool:
+        return self.classification_type in (ClassificationType.RECALLED, ClassificationType.BANNED)
+
+    def __str__(self) -> str:
+        curr = " [CURRENT]" if self.is_current else ""
+        return f"{self.product_id} v{self.version_number}: {self.classification_type}{curr}"
+
+
+class ModerationStatus(models.TextChoices):
+    APPROVED = "APPROVED", "Approved"
+    PENDING_REVIEW = "PENDING_REVIEW", "Pending Review"
+    REJECTED = "REJECTED", "Rejected"
+
+
 class TenantMedicineConfig(models.Model):
     """
     Architecture Decision: ADR-0071
@@ -362,6 +467,14 @@ class TenantMedicineConfig(models.Model):
     config_id = models.CharField(max_length=64, primary_key=True)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="medicine_configs", db_index=True)
     product = models.ForeignKey(MedicineProduct, on_delete=models.CASCADE, related_name="tenant_configs", db_index=True)
+    variant = models.ForeignKey(
+        "core.MedicineVariant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="tenant_configs",
+        help_text="Optional commercial variant SKU linked to this tenant override.",
+    )
 
     local_brand_name = models.CharField(
         max_length=255,
@@ -413,6 +526,27 @@ class TenantMedicineConfig(models.Model):
         help_text="Tenant can enforce stricter prescription rules. Strictly cannot relax master is_prescription_only=True!",
     )
     notes = models.TextField(blank=True, default="", help_text="Internal pharmacy notes for dispensing or sourcing.")
+    moderation_status = models.CharField(
+        max_length=32,
+        choices=ModerationStatus.choices,
+        default=ModerationStatus.APPROVED,
+        db_index=True,
+        help_text="Platform moderation status for anti-gouging and regulatory verification.",
+    )
+    moderation_reason = models.TextField(
+        blank=True,
+        default="",
+        help_text="Moderation rationale, compliance notes, or rejection reason.",
+    )
+    moderated_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="moderated_medicine_configs",
+        help_text="Platform superadmin or compliance officer who moderated this override.",
+    )
+    moderated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -431,6 +565,7 @@ class TenantMedicineConfig(models.Model):
             models.Index(fields=["tenant", "is_visible"]),
             models.Index(fields=["tenant", "local_sku"]),
             models.Index(fields=["tenant", "product"]),
+            models.Index(fields=["tenant", "moderation_status"]),
         ]
 
     def clean(self):
@@ -468,19 +603,19 @@ class TenantMedicineConfig(models.Model):
 
     @property
     def effective_brand_name(self) -> str:
-        if self.local_brand_name and self.local_brand_name.strip():
+        if self.local_brand_name and self.local_brand_name.strip() and self.moderation_status == ModerationStatus.APPROVED:
             return self.local_brand_name.strip()
         return self.product.brand_name if self.product else ""
 
     @property
     def effective_mrp_unit(self) -> Decimal:
-        if self.custom_mrp_unit is not None:
+        if self.custom_mrp_unit is not None and self.moderation_status == ModerationStatus.APPROVED:
             return self.custom_mrp_unit
         return self.product.mrp_unit if self.product else Decimal("0.00")
 
     @property
     def effective_cost_unit(self) -> Decimal:
-        if self.custom_cost_unit is not None:
+        if self.custom_cost_unit is not None and self.moderation_status == ModerationStatus.APPROVED:
             return self.custom_cost_unit
         return self.product.cost_unit if self.product else Decimal("0.00")
 
@@ -2991,6 +3126,7 @@ class CustomRoleDefinition(models.Model):
     is_archived = models.BooleanField(default=False, db_index=True)
     cloned_from_id = models.CharField(max_length=64, blank=True, default="")
     created_by_username = models.CharField(max_length=128, blank=True, default="")
+    grant_version = models.PositiveIntegerField(default=1, help_text="Version counter for role grants and entitlements")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -3670,3 +3806,1411 @@ class DeviceRegistrationAuditEvent(models.Model):
 
     def __str__(self) -> str:
         return f"DeviceRegAudit {self.event_id} [{self.action}] on {self.device_registration_id} by {self.actor_username}"
+
+
+
+class StaffOfflineAuthorization(models.Model):
+    """
+    Cryptographically signed, time-bound offline staff authorization lease with salted
+    credential hashes and risk-limited action boundaries (ADR-0113 / P113).
+    Never stores plaintext passwords.
+    """
+
+    authorization_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="staff_offline_authorizations",
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="staff_offline_authorizations",
+    )
+    staff_member = models.ForeignKey(
+        StaffMember,
+        on_delete=models.CASCADE,
+        related_name="offline_authorizations",
+    )
+    device_id = models.CharField(max_length=64, db_index=True)
+    role_snapshot = models.CharField(max_length=64, db_index=True)
+    credential_salt = models.CharField(max_length=64, help_text="Hex-encoded 16-byte random salt")
+    credential_hash = models.CharField(max_length=128, help_text="PBKDF2-HMAC-SHA256 hash of staff PIN + salt")
+    permitted_actions = models.JSONField(default=list, help_text="Explicit list of permitted offline actions")
+    denied_actions = models.JSONField(default=list, help_text="Explicit list of denied high-risk actions")
+    risk_limits = models.JSONField(default=dict, help_text="Financial, discount, and supervisor approval caps")
+    issued_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField(db_index=True)
+    signature = models.CharField(max_length=128, help_text="HMAC-SHA256 signature of authorization payload")
+    is_revoked = models.BooleanField(default=False, db_index=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revocation_reason = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Staff Offline Authorization"
+        verbose_name_plural = "Staff Offline Authorizations"
+        indexes = [
+            models.Index(fields=["tenant", "is_revoked", "expires_at"]),
+            models.Index(fields=["staff_member", "device_id"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"OfflineAuth {self.authorization_id} for {self.staff_member.username} ({self.role_snapshot}) on {self.device_id}"
+
+    def is_valid_offline(self) -> bool:
+        return not self.is_revoked and timezone.now() < self.expires_at
+
+
+
+class StaffPerformanceMetricSnapshot(models.Model):
+    """
+    Staff Performance Metrics Snapshot (ADR-0115 / P115).
+    Tracks sales volume, refunds, cash reconciliation variance, and reporting freshness
+    with tenant, branch, and staff-level scoping.
+    """
+
+    snapshot_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="staff_performance_snapshots",
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="staff_performance_snapshots",
+    )
+    staff_member = models.ForeignKey(
+        StaffMember,
+        on_delete=models.CASCADE,
+        related_name="performance_snapshots",
+    )
+    metric_date = models.DateField(db_index=True)
+    total_sales_count = models.PositiveIntegerField(default=0)
+    total_sales_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    total_refunds_count = models.PositiveIntegerField(default=0)
+    total_refunds_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    net_revenue = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    reconciliation_variance_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    reconciliation_status = models.CharField(
+        max_length=32,
+        default="BALANCED",
+        choices=[
+            ("BALANCED", "Balanced"),
+            ("OVERAGE", "Overage"),
+            ("SHORTAGE", "Shortage"),
+        ],
+    )
+    reporting_freshness_seconds = models.PositiveIntegerField(default=0)
+    last_activity_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-metric_date", "-updated_at"]
+        verbose_name = "Staff Performance Metric Snapshot"
+        verbose_name_plural = "Staff Performance Metric Snapshots"
+        unique_together = ("tenant", "staff_member", "metric_date")
+        indexes = [
+            models.Index(fields=["tenant", "branch", "-metric_date"]),
+            models.Index(fields=["staff_member", "-metric_date"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"StaffMetrics {self.staff_member.username} on {self.metric_date} - Net: {self.net_revenue} BDT"
+
+
+
+def get_default_receipt_format():
+    return {
+        "paper_width": "80mm",
+        "header_text": "Pharmacy Care & Dispensary",
+        "footer_text": "Prescription medicines cannot be returned after 7 days.",
+        "show_tax_breakdown": True,
+        "show_pharmacist_signature": True,
+        "language": "BILINGUAL",
+    }
+
+
+def get_default_operating_hours():
+    return {
+        "is_24_7": False,
+        "opening_time": "08:00",
+        "closing_time": "23:00",
+        "weekly_holidays": [],
+    }
+
+
+def get_default_storage_zones():
+    return [
+        {"zone_code": "DISPENSARY", "name": "Main Dispensary Shelf", "temperature_celsius": "15-25 C"},
+        {"zone_code": "COLD_CHAIN", "name": "Biologicals Refrigerator", "temperature_celsius": "2-8 C"},
+    ]
+
+
+def get_default_low_stock_thresholds():
+    return {
+        "default_min_strips": 10,
+        "default_critical_strips": 3,
+        "auto_reorder_enabled": False,
+    }
+
+
+def get_default_tax_defaults():
+    return {
+        "default_vat_rate": "0.00",
+        "is_vat_inclusive": True,
+        "tax_id_number": "",
+    }
+
+
+def get_default_device_policies():
+    return {
+        "max_active_pos_terminals": 5,
+        "allow_offline_pos_sales": True,
+        "max_offline_hours": 72,
+        "require_cash_drawer_kick_on_cash_sale": True,
+    }
+
+
+class BranchOperatingSettings(models.Model):
+    """
+    Branch Operating Settings & Governance (ADR-0116 / P116).
+    Enforces receipt formats, operating hours, storage zones, low-stock thresholds,
+    tax defaults, and device policies with clear precedence hierarchy:
+    Tenant Defaults -> Branch Settings -> Local Device Policy.
+    """
+
+    settings_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="branch_operating_settings")
+    branch = models.OneToOneField(Branch, on_delete=models.CASCADE, related_name="operating_settings")
+    receipt_format = models.JSONField(default=get_default_receipt_format, blank=True)
+    operating_hours = models.JSONField(default=get_default_operating_hours, blank=True)
+    storage_zones = models.JSONField(default=get_default_storage_zones, blank=True)
+    low_stock_thresholds = models.JSONField(default=get_default_low_stock_thresholds, blank=True)
+    tax_defaults = models.JSONField(default=get_default_tax_defaults, blank=True)
+    device_policies = models.JSONField(default=get_default_device_policies, blank=True)
+    last_updated_by = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Branch Operating Settings"
+        verbose_name_plural = "Branch Operating Settings"
+
+    def __str__(self) -> str:
+        return f"Settings for Branch {self.branch.name} ({self.tenant_id})"
+
+
+
+class RegisterAssignmentStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active / Open Drawer"
+    CLOSED = "CLOSED", "Closed / Drawer Handed Over"
+    RECONCILED = "RECONCILED", "Audited & Reconciled"
+
+
+class CashierRegisterAssignment(models.Model):
+    """
+    Cashier Register & Drawer Assignment (ADR-0117 / P117).
+    Binds cashier identity and cash register terminal to explicit shift schedule.
+    Enforces zero unauthorized concurrent drawer assignment per register and per cashier.
+    """
+
+    assignment_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="register_assignments")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="register_assignments")
+    shift_schedule = models.ForeignKey(
+        StaffShiftSchedule,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="register_assignments",
+    )
+    cashier = models.ForeignKey(
+        StaffMember,
+        on_delete=models.CASCADE,
+        related_name="register_assignments",
+    )
+    register_id = models.CharField(max_length=64, db_index=True)
+    opening_float_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    closing_float_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=RegisterAssignmentStatus.choices,
+        default=RegisterAssignmentStatus.ACTIVE,
+        db_index=True,
+    )
+    notes = models.TextField(blank=True, default="")
+    assigned_at = models.DateTimeField(default=timezone.now)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-assigned_at"]
+        verbose_name = "Cashier Register Assignment"
+        verbose_name_plural = "Cashier Register Assignments"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["branch", "register_id", "status"]),
+            models.Index(fields=["cashier", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Assignment {self.assignment_id} - Reg {self.register_id} to {self.cashier.full_name} [{self.status}]"
+
+
+class RoleGrantMigrationReason(models.TextChoices):
+    PLAN_DOWNGRADE = "PLAN_DOWNGRADE", "Plan Downgrade"
+    TEMPLATE_EVOLUTION = "TEMPLATE_EVOLUTION", "Template Evolution"
+    COMPLIANCE_PRUNING = "COMPLIANCE_PRUNING", "Compliance Pruning"
+    MANUAL_RECONCILIATION = "MANUAL_RECONCILIATION", "Manual Reconciliation"
+
+
+class RoleGrantMigrationRecord(models.Model):
+    """
+    Audited, versioned snapshot tracking role grants migration, removal of invalid entitlements,
+    and preservation of forbidden grant guards (ADR-0119 / P119).
+    """
+
+    migration_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="role_migrations")
+    role = models.ForeignKey(CustomRoleDefinition, on_delete=models.CASCADE, related_name="migration_history")
+    previous_version = models.PositiveIntegerField(default=1)
+    new_version = models.PositiveIntegerField(default=2)
+    reason = models.CharField(
+        max_length=32,
+        choices=RoleGrantMigrationReason.choices,
+        default=RoleGrantMigrationReason.PLAN_DOWNGRADE,
+    )
+    previous_permissions = models.JSONField(default=list)
+    retained_permissions = models.JSONField(default=list)
+    removed_permissions = models.JSONField(default=list)
+    forbidden_grants_blocked = models.JSONField(default=list)
+    is_dry_run = models.BooleanField(default=False)
+    applied_by = models.CharField(max_length=128, blank=True, default="SYSTEM")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Role Grant Migration Record"
+        verbose_name_plural = "Role Grant Migration Records"
+        indexes = [
+            models.Index(fields=["tenant", "created_at"]),
+            models.Index(fields=["role", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Migration {self.migration_id} - Role {self.role.role_code} (v{self.previous_version}->v{self.new_version}) [{self.reason}]"
+
+
+class DosageFormDefinition(models.Model):
+    """
+    Centralized Dosage Form Metadata Registry (ADR-0122 / P122).
+    Defines dosage forms, administration routes, packaging conversion rules, and configurable field groups.
+    """
+
+    form_id = models.CharField(max_length=64, primary_key=True)
+    form_code = models.CharField(max_length=64, unique=True, db_index=True)
+    name_en = models.CharField(max_length=128)
+    name_bn = models.CharField(max_length=128)
+    category = models.CharField(max_length=64, default="SOLID", db_index=True)
+    default_route = models.CharField(max_length=64, default="Oral")
+    is_strip_applicable = models.BooleanField(default=True, help_text="Box to strip to unit conversion applicable")
+    is_volume_applicable = models.BooleanField(default=False, help_text="Volume in ml applicable")
+    is_cold_chain_applicable = models.BooleanField(default=False, help_text="Cold chain storage typically applicable")
+    display_order = models.PositiveIntegerField(default=10, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    field_groups = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["display_order", "name_en"]
+        verbose_name = "Dosage Form Definition"
+        verbose_name_plural = "Dosage Form Definitions"
+        indexes = [
+            models.Index(fields=["is_active", "display_order"]),
+            models.Index(fields=["category", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name_en} ({self.form_code}) - {self.category}"
+
+
+class MedicineEditorSchema(models.Model):
+    """
+    Architecture Decision: ADR-0124 (P124).
+    Server-driven medicine editor schema registry with conditional sections, validation rules,
+    default values, and schema versioning.
+    """
+
+    schema_id = models.CharField(max_length=64, primary_key=True)
+    schema_version = models.CharField(max_length=32, unique=True, db_index=True)
+    title_en = models.CharField(max_length=128, default="Medicine Master Editor")
+    title_bn = models.CharField(max_length=128, default="ঔষধ বিবরণী ও মাস্টার ফর্ম")
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    sections = models.JSONField(default=list, blank=True)
+    conditional_rules = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-schema_version"]
+        verbose_name = "Medicine Editor Schema"
+        verbose_name_plural = "Medicine Editor Schemas"
+        indexes = [
+            models.Index(fields=["is_active", "schema_version"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.title_en} ({self.schema_version}) - Active: {self.is_active}"
+
+
+class MedicineFormTemplate(models.Model):
+    """
+    Architecture Decision: ADR-0131 (P131).
+    Dosage-Form Form Template Registry.
+    Publishes dosage-form specific form layouts, widget specifications,
+    allowed values (units, routes, container types), and validation constraints.
+    """
+
+    template_id = models.CharField(max_length=64, primary_key=True)
+    dosage_form = models.ForeignKey(
+        "core.DosageFormDefinition",
+        on_delete=models.CASCADE,
+        related_name="form_templates",
+        help_text="Canonical dosage form definition this template applies to.",
+    )
+    template_code = models.CharField(max_length=64, db_index=True)
+    template_version = models.CharField(max_length=32, default="v1.0", db_index=True)
+    title_en = models.CharField(max_length=128)
+    title_bn = models.CharField(max_length=128)
+    description = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    is_default = models.BooleanField(default=True, db_index=True)
+    layout_rules = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Responsive layout rules, grid columns, sections, and field widget configurations.",
+    )
+    allowed_values = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Permitted strength units, routes, container types, and storage parameters.",
+    )
+    validation_rules = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Cross-field validation rules and constraints for client and server evaluation.",
+    )
+    immutable_version_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="SHA-256 hash ensuring regulatory immutability and provenance tracking.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["dosage_form", "-template_version", "template_code"]
+        verbose_name = "Medicine Form Template"
+        verbose_name_plural = "Medicine Form Templates"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dosage_form", "template_code", "template_version"],
+                name="unique_dosage_form_template_version",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["dosage_form", "is_active", "is_default"]),
+            models.Index(fields=["template_code", "is_active"]),
+        ]
+
+    def compute_version_hash(self) -> str:
+        """Computes SHA-256 hash across template specification fields."""
+        import hashlib
+        import json
+
+        payload = (
+            f"{self.dosage_form_id}|{self.template_code}|{self.template_version}|"
+            f"{json.dumps(self.layout_rules, sort_keys=True)}|{json.dumps(self.allowed_values, sort_keys=True)}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def save(self, *args, **kwargs):
+        if not self.immutable_version_hash:
+            self.immutable_version_hash = self.compute_version_hash()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.title_en} ({self.template_code} {self.template_version}) - {self.dosage_form_id}"
+
+
+class ContainerType(models.TextChoices):
+    BLISTER_PACK = "BLISTER_PACK", "Blister Pack"
+    ALU_ALU = "ALU_ALU", "Alu-Alu Strip"
+    STRIP = "STRIP", "Regular Foil Strip"
+    GLASS_BOTTLE = "GLASS_BOTTLE", "Glass Bottle"
+    PET_BOTTLE = "PET_BOTTLE", "PET Plastic Bottle"
+    VIAL = "VIAL", "Vial (Liquid/Powder)"
+    AMPOULE = "AMPOULE", "Ampoule"
+    TUBE = "TUBE", "Ointment/Cream Tube"
+    SACHET = "SACHET", "Oral Powder Sachet"
+    INHALER_CANISTER = "INHALER_CANISTER", "Pressurized Inhaler Canister"
+    DROPS_BOTTLE = "DROPS_BOTTLE", "Eye/Ear Dropper Bottle"
+    OTHER = "OTHER", "Other Packaging Container"
+
+
+class MedicineVariant(models.Model):
+    """
+    Architecture Decision: ADR-0126 (P126).
+    Commercial strength/size/route/container presentation variants modeled as distinct SKUs
+    tied to an immutable master medicine and DGDA regulated classification.
+    """
+
+    variant_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="variants",
+        help_text="Parent master clinical medicine product.",
+    )
+    sku = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        help_text="Unique Stock Keeping Unit (e.g. SKU-BEX-NAPA-500-100B).",
+    )
+    variant_name = models.CharField(
+        max_length=255,
+        help_text="Full variant title (e.g. Napa 500mg Tablet - Box of 10x10).",
+    )
+    strength = models.CharField(max_length=64, help_text="e.g. 500 mg, 665 mg, 120mg/5mL")
+    strength_numeric = models.DecimalField(max_digits=12, decimal_places=4, null=True, blank=True)
+    strength_unit = models.CharField(max_length=32, blank=True, default="mg")
+    pack_size = models.CharField(max_length=64, help_text="e.g. Box of 100, 100 mL Bottle")
+    pack_size_numeric = models.PositiveIntegerField(default=1, help_text="Total base units contained in pack")
+    route = models.CharField(max_length=64, blank=True, default="Oral")
+    container_type = models.CharField(
+        max_length=64,
+        choices=ContainerType.choices,
+        default=ContainerType.BLISTER_PACK,
+    )
+    barcode = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    mrp_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        help_text="Retail price per single tablet / mL in BDT.",
+    )
+    cost_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Cost price per single tablet / mL in BDT.",
+    )
+    mrp_pack = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        help_text="Retail price for full pack in BDT.",
+    )
+    cost_pack = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Cost price for full pack in BDT.",
+    )
+    is_prescription_required = models.BooleanField(default=False, db_index=True)
+    is_narcotic = models.BooleanField(default=False, db_index=True)
+    is_antibiotic = models.BooleanField(default=False, db_index=True)
+    is_cold_chain = models.BooleanField(default=False, db_index=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["product", "pack_size_numeric", "variant_name"]
+        verbose_name = "Medicine Variant"
+        verbose_name_plural = "Medicine Variants"
+        indexes = [
+            models.Index(fields=["product", "is_active"]),
+            models.Index(fields=["sku"]),
+            models.Index(fields=["barcode"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.variant_name} ({self.sku})"
+
+
+class Manufacturer(models.Model):
+    """
+    Architecture Decision: ADR-0127 (P127).
+    Global master reference entity for DGDA licensed pharmaceutical manufacturers.
+    Centrally curated by platform superadmin; read-only for tenant pharmacies.
+    Supports merge policy for deduplication, archival, and alias tracking.
+    """
+
+    manufacturer_id = models.CharField(max_length=64, primary_key=True)
+    name = models.CharField(max_length=255, unique=True, db_index=True)
+    name_bn = models.CharField(max_length=255, blank=True, default="")
+    code = models.CharField(max_length=64, unique=True, db_index=True)
+    dgda_license_no = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    country = models.CharField(max_length=64, default="BD")
+    website = models.URLField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    merged_into = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="merged_manufacturers",
+        help_text="Canonical manufacturer if this entry was merged as a duplicate.",
+    )
+    merge_reason = models.TextField(blank=True, default="")
+    merged_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Manufacturer"
+        verbose_name_plural = "Manufacturers"
+        indexes = [
+            models.Index(fields=["is_active", "name"]),
+            models.Index(fields=["code"]),
+            models.Index(fields=["dgda_license_no"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.code})"
+
+
+class Supplier(models.Model):
+    """
+    Architecture Decision: ADR-0127 (P127).
+    Tenant-scoped pharmaceutical supplier, distributor, or regional depot directory.
+    Supports merge, archival, deduplication, and DGDA drug license traceability.
+    """
+
+    supplier_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="suppliers",
+        help_text="Owning pharmacy tenant account.",
+    )
+    name = models.CharField(max_length=255, db_index=True)
+    name_bn = models.CharField(max_length=255, blank=True, default="")
+    code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    contact_person = models.CharField(max_length=128, blank=True, default="")
+    phone = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    email = models.EmailField(blank=True, default="")
+    address = models.TextField(blank=True, default="")
+    dl_number = models.CharField(max_length=128, blank=True, default="", help_text="Wholesale drug license number")
+    tax_id = models.CharField(max_length=64, blank=True, default="", help_text="TIN / BIN tax registration number")
+    is_active = models.BooleanField(default=True, db_index=True)
+    merged_into = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="merged_suppliers",
+        help_text="Canonical supplier if merged as duplicate.",
+    )
+    merge_reason = models.TextField(blank=True, default="")
+    merged_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["tenant", "name"]
+        verbose_name = "Supplier"
+        verbose_name_plural = "Suppliers"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "name"],
+                condition=models.Q(is_active=True, merged_into__isnull=True),
+                name="unique_active_supplier_per_tenant",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "is_active"]),
+            models.Index(fields=["tenant", "phone"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.tenant_id})"
+
+
+class ImportDuplicatePolicy(models.TextChoices):
+    SKIP = "SKIP", "Skip duplicates"
+    UPDATE_OVERWRITE = "UPDATE_OVERWRITE", "Update / Overwrite existing"
+    FAIL_ON_DUPLICATE = "FAIL_ON_DUPLICATE", "Fail entire batch on duplicate"
+
+
+class ImportSessionStatus(models.TextChoices):
+    UPLOADED = "UPLOADED", "Uploaded & Parsed"
+    MAPPED = "MAPPED", "Columns Mapped"
+    VALIDATING = "VALIDATING", "Validating"
+    VALIDATED = "VALIDATED", "Validated Pre-Flight"
+    COMMITTING = "COMMITTING", "Committing"
+    COMMITTED = "COMMITTED", "Committed Successfully"
+    ROLLED_BACK = "ROLLED_BACK", "Rolled Back"
+    FAILED = "FAILED", "Failed"
+
+
+class MedicineImportSession(models.Model):
+    """
+    Architecture Decision: ADR-0132 (P132).
+    Multi-stage bulk medicine import session governing CSV parsing, field mapping,
+    pre-flight validation, duplicate detection, and rollback-safe commit.
+    """
+
+    session_id = models.CharField(max_length=64, primary_key=True)
+    tenant_id = models.CharField(max_length=64, default="platform", db_index=True)
+    status = models.CharField(
+        max_length=32,
+        choices=ImportSessionStatus.choices,
+        default=ImportSessionStatus.UPLOADED,
+        db_index=True,
+    )
+    file_name = models.CharField(max_length=255)
+    file_format = models.CharField(max_length=16, default="CSV")
+    total_rows = models.PositiveIntegerField(default=0)
+    valid_rows = models.PositiveIntegerField(default=0)
+    invalid_rows = models.PositiveIntegerField(default=0)
+    duplicate_rows = models.PositiveIntegerField(default=0)
+    duplicate_policy = models.CharField(
+        max_length=32,
+        choices=ImportDuplicatePolicy.choices,
+        default=ImportDuplicatePolicy.SKIP,
+    )
+    raw_headers = models.JSONField(default=list, blank=True)
+    preview_rows = models.JSONField(default=list, blank=True)
+    raw_rows_data = models.JSONField(
+        default=list, blank=True, help_text="Full parsed staging rows for mapping and commit"
+    )
+    field_mapping = models.JSONField(
+        default=dict, blank=True, help_text="Mapping of raw headers to canonical catalog fields"
+    )
+    validation_errors = models.JSONField(default=list, blank=True)
+    created_record_ids = models.JSONField(
+        default=list, blank=True, help_text="Product IDs created by this import for rollback"
+    )
+    updated_record_ids = models.JSONField(
+        default=list, blank=True, help_text="Product IDs updated by this import for rollback"
+    )
+    initiated_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="medicine_import_sessions",
+    )
+    committed_at = models.DateTimeField(null=True, blank=True)
+    rolled_back_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Medicine Import Session"
+        verbose_name_plural = "Medicine Import Sessions"
+        indexes = [
+            models.Index(fields=["tenant_id", "status"]),
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ImportSession {self.session_id} [{self.status}] - {self.file_name} ({self.tenant_id})"
+
+
+class MedicineReviewStatus(models.TextChoices):
+    PENDING_REVIEW = "PENDING_REVIEW", "Pending Pharmacist Review"
+    APPROVED = "APPROVED", "Approved & Published"
+    REJECTED = "REJECTED", "Rejected"
+    CHANGES_REQUESTED = "CHANGES_REQUESTED", "Changes Requested"
+
+
+class ReviewChangeType(models.TextChoices):
+    NEW_PRODUCT_DRAFT = "NEW_PRODUCT_DRAFT", "New Product Draft Publication"
+    METADATA_UPDATE = "METADATA_UPDATE", "Clinical / Formulation Metadata Update"
+    PRICE_REVISION = "PRICE_REVISION", "MRP / Wholesale Cost Price Revision"
+    SAFETY_REASSESSMENT = "SAFETY_REASSESSMENT", "Regulatory Safety & Warning Reassessment"
+
+
+class ProductMetadataReview(models.Model):
+    """
+    Architecture Decision: ADR-0133 (P133).
+    Pharmacist review record for medicine metadata updates, draft approvals,
+    price revisions, and regulatory publication.
+    Enforces dual-control / four-eyes review principle and records diffs and audit hashes.
+    """
+
+    review_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="metadata_reviews",
+        help_text="Target medicine product under review.",
+    )
+    change_type = models.CharField(
+        max_length=32,
+        choices=ReviewChangeType.choices,
+        default=ReviewChangeType.METADATA_UPDATE,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=MedicineReviewStatus.choices,
+        default=MedicineReviewStatus.PENDING_REVIEW,
+        db_index=True,
+    )
+    proposed_diff = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Dictionary of field-by-field differences: {field: {old_value: ..., new_value: ...}}",
+    )
+    submitted_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="submitted_product_reviews",
+    )
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    reviewed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="conducted_product_reviews",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(
+        blank=True, default="", help_text="Justification, clinical rationale, or rejection reason"
+    )
+    submission_notes = models.TextField(blank=True, default="", help_text="Notes from the submitting editor")
+    review_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Cryptographic SHA-256 audit signature of review decision and diff",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-submitted_at"]
+        verbose_name = "Product Metadata Review"
+        verbose_name_plural = "Product Metadata Reviews"
+        indexes = [
+            models.Index(fields=["product", "status"]),
+            models.Index(fields=["status", "submitted_at"]),
+        ]
+
+    def compute_review_hash(self) -> str:
+        import hashlib
+        import json
+
+        payload = (
+            f"{self.product_id}|{self.change_type}|{self.status}|"
+            f"{json.dumps(self.proposed_diff, sort_keys=True)}|"
+            f"{self.submitted_by_id}|{self.reviewed_by_id}|{self.reviewed_at}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def save(self, *args, **kwargs):
+        if not self.review_hash:
+            self.review_hash = self.compute_review_hash()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"Review {self.review_id} [{self.status}] - {self.product_id} ({self.change_type})"
+
+
+class RegulatorySourceType(models.TextChoices):
+    DGDA_GAZETTE = "DGDA_GAZETTE", "DGDA Statutory Gazette Order"
+    DGDA_CIRCULAR = "DGDA_CIRCULAR", "DGDA Public Alert / Circular"
+    MANUFACTURER_MONOGRAPH = "MANUFACTURER_MONOGRAPH", "Manufacturer Product Monograph / SmPC"
+    PHARMACOPOEIA = "PHARMACOPOEIA", "Official Pharmacopoeia (BP / USP / IP)"
+    WHO_AWARE = "WHO_AWARE", "WHO AWaRe Antibiotic Classification"
+    CLINICAL_GUIDELINE = "CLINICAL_GUIDELINE", "National Clinical Practice Guideline"
+
+
+class RegulatoryRuleTarget(models.TextChoices):
+    CLASSIFICATION = "CLASSIFICATION", "Controlled Dispensing Classification"
+    STORAGE_CONDITION = "STORAGE_CONDITION", "Storage & Temperature Control"
+    CLASSIFICATION_AND_STORAGE = "CLASSIFICATION_AND_STORAGE", "Unified Classification & Storage Rules"
+
+
+class RegulatorySourceAttachment(models.Model):
+    """
+    Architecture Decision: ADR-0134 (P134).
+    Attaches legal and manufacturer regulatory sources to classification and storage rules
+    with explicit citations, temperature parameters, review dates, and immutable audit hashes.
+    """
+
+    attachment_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="regulatory_source_attachments",
+        db_index=True,
+    )
+    source_type = models.CharField(
+        max_length=64,
+        choices=RegulatorySourceType.choices,
+        default=RegulatorySourceType.DGDA_GAZETTE,
+        db_index=True,
+    )
+    rule_target = models.CharField(
+        max_length=64,
+        choices=RegulatoryRuleTarget.choices,
+        default=RegulatoryRuleTarget.CLASSIFICATION_AND_STORAGE,
+        db_index=True,
+    )
+    document_reference_number = models.CharField(
+        max_length=128,
+        db_index=True,
+        help_text="Official statutory gazette citation or manufacturer monograph code",
+    )
+    issuing_authority = models.CharField(
+        max_length=255,
+        db_index=True,
+        help_text="e.g. DGDA, Square Pharmaceuticals, British Pharmacopoeia Commission",
+    )
+    publication_date = models.DateField(null=True, blank=True)
+    effective_date = models.DateField(db_index=True)
+    review_cycle_months = models.PositiveIntegerField(
+        default=12,
+        help_text="Periodic compliance re-review interval in months (e.g. 12, 24, 36)",
+    )
+    next_review_due_date = models.DateField(
+        db_index=True,
+        help_text="Formal review deadline for compliance audit",
+    )
+    source_url = models.URLField(max_length=512, blank=True, default="")
+    storage_rule_specs = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Structured storage conditions: requires_cold_chain, min_temp, max_temp, protect_from_light",
+    )
+    classification_specs = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Controlled dispensing rules: classification_type, is_antibiotic, is_narcotic",
+    )
+    version_number = models.PositiveIntegerField(default=1)
+    is_active = models.BooleanField(default=True, db_index=True)
+    immutable_source_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Cryptographic SHA-256 fingerprint guaranteeing regulatory source immutability",
+    )
+    reviewed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_regulatory_attachments",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["product", "-version_number"]
+        verbose_name = "Regulatory Source Attachment"
+        verbose_name_plural = "Regulatory Source Attachments"
+        indexes = [
+            models.Index(fields=["product", "is_active"]),
+            models.Index(fields=["document_reference_number"]),
+            models.Index(fields=["issuing_authority"]),
+            models.Index(fields=["next_review_due_date"]),
+            models.Index(fields=["effective_date"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "document_reference_number", "version_number"],
+                name="unique_product_source_doc_version",
+            )
+        ]
+
+    def compute_source_hash(self) -> str:
+        import hashlib
+
+        eff_str = self.effective_date.isoformat() if self.effective_date else ""
+        raw = (
+            f"{self.product_id}|{self.document_reference_number}|{self.version_number}|"
+            f"{self.source_type}|{self.rule_target}|{eff_str}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def save(self, *args, **kwargs):
+        if not self.immutable_source_hash:
+            self.immutable_source_hash = self.compute_source_hash()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.product_id} -> {self.document_reference_number} (v{self.version_number})"
+
+
+class NonMedicineCategory(models.TextChoices):
+    SURGICAL_WOUND_CARE = "SURGICAL_WOUND_CARE", "Surgical Supplies & Wound Care"
+    DIAGNOSTIC_DEVICES = "DIAGNOSTIC_DEVICES", "Diagnostic Devices & Monitoring"
+    PERSONAL_HYGIENE = "PERSONAL_HYGIENE", "Personal Hygiene & Sanitization"
+    BABY_MOTHER_CARE = "BABY_MOTHER_CARE", "Baby & Maternal Care"
+    NUTRITION_SUPPLEMENT = "NUTRITION_SUPPLEMENT", "Nutritional Drinks & Dietary Supplements"
+    HEALTH_ACCESSORIES = "HEALTH_ACCESSORIES", "Health & Mobility Accessories"
+
+
+class NonMedicineRetailItem(models.Model):
+    """
+    Architecture Decision: ADR-0135 (P135).
+    Authorized Non-Medicine Retail Healthcare & Consumer Goods.
+    Preserves strict domain boundary: is_medicine is fixed to False,
+    exempt from prescription verification, DGDA DAR, narcotic, and antibiotic controls.
+    """
+
+    item_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="non_medicine_items",
+        db_index=True,
+    )
+    tenant_id_str = models.CharField(
+        max_length=64,
+        default="platform",
+        db_index=True,
+        help_text="'platform' for global catalog; tenant_id for store-specific retail item",
+    )
+    name = models.CharField(max_length=255, db_index=True)
+    name_bn = models.CharField(max_length=255, blank=True, default="", help_text="Bengali item name")
+    category = models.CharField(
+        max_length=64,
+        choices=NonMedicineCategory.choices,
+        default=NonMedicineCategory.SURGICAL_WOUND_CARE,
+        db_index=True,
+    )
+    brand_name = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    manufacturer_or_distributor = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    barcode = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    sku = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    mrp = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        help_text="Maximum Retail Price in BDT",
+    )
+    cost_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+        help_text="Standard purchasing cost in BDT",
+    )
+    vat_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Applicable retail VAT percentage",
+    )
+    unit_of_measure = models.CharField(max_length=32, blank=True, default="PIECE")
+    requires_cold_chain = models.BooleanField(
+        default=False,
+        help_text="Flag for temperature-sensitive reagents or diagnostic test strips",
+    )
+    storage_instructions = models.TextField(blank=True, default="")
+    is_medicine = models.BooleanField(default=False, editable=False)
+    is_prescription_only = models.BooleanField(default=False, editable=False)
+    is_antibiotic = models.BooleanField(default=False, editable=False)
+    is_narcotic = models.BooleanField(default=False, editable=False)
+    is_active = models.BooleanField(default=True, db_index=True)
+    version_number = models.PositiveIntegerField(default=1)
+    immutable_hash = models.CharField(max_length=64, blank=True, default="")
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_non_medicine_items",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Non-Medicine Retail Item"
+        verbose_name_plural = "Non-Medicine Retail Items"
+        indexes = [
+            models.Index(fields=["tenant_id_str", "category"]),
+            models.Index(fields=["barcode"]),
+            models.Index(fields=["brand_name"]),
+            models.Index(fields=["is_active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant_id_str", "barcode"],
+                condition=~models.Q(barcode=""),
+                name="unique_tenant_non_medicine_barcode",
+            )
+        ]
+
+    def compute_hash(self) -> str:
+        import hashlib
+
+        raw = (
+            f"{self.item_id}|{self.tenant_id_str}|{self.category}|{self.barcode}|"
+            f"{self.mrp}|{self.vat_percent}|{self.version_number}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if self.is_medicine:
+            raise ValidationError("NonMedicineRetailItem cannot have is_medicine = True.")
+        if self.is_prescription_only or self.is_antibiotic or self.is_narcotic:
+            raise ValidationError(
+                "ERR_NON_MEDICINE_REGULATORY_RESTRICTION: Non-medicine items cannot be marked as prescription-only, antibiotic, or narcotic."
+            )
+
+    def save(self, *args, **kwargs):
+        self.is_medicine = False
+        self.is_prescription_only = False
+        self.is_antibiotic = False
+        self.is_narcotic = False
+        if not self.immutable_hash:
+            self.immutable_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.name} [{self.category}] - BDT {self.mrp}"
+
+
+class BarcodeIdentifierType(models.TextChoices):
+    PRIMARY_EAN13_GTIN = "PRIMARY_EAN13_GTIN", "Primary Unit Barcode (EAN-13 / GTIN-13 / UPC-A)"
+    SECONDARY_BOX_GTIN14 = "SECONDARY_BOX_GTIN14", "Secondary Outer Box / Carton (ITF-14 / GTIN-14)"
+    INTERNAL_STORE_BARCODE = "INTERNAL_STORE_BARCODE", "Internal Store Custom Barcode / Shelf Sticker"
+    GS1_DATAMATRIX_2D = "GS1_DATAMATRIX_2D", "GS1 2D DataMatrix (GTIN + Batch + Expiry + Serial)"
+    NATIONAL_DAR_CODE = "NATIONAL_DAR_CODE", "National DGDA Registration DAR Barcode"
+    SUPPLIER_CATALOG_CODE = "SUPPLIER_CATALOG_CODE", "Supplier Wholesale Catalog Code"
+
+
+class BarcodePackagingLevel(models.TextChoices):
+    UNIT = "UNIT", "Base Piece / Unit Dose"
+    STRIP = "STRIP", "Blister Strip"
+    BOX = "BOX", "Commercial Trade Box"
+    SHIPPER_CARTON = "SHIPPER_CARTON", "Wholesale Shipper Case Carton"
+
+
+class BarcodeAlternateIdentifier(models.Model):
+    """
+    Architecture Decision: ADR-0136 (P136).
+    Primary, Secondary, and Alternate Barcode Identifiers across packaging tiers.
+    Supports GS1-128, ITF-14 cartons, internal POS stickers, contextual uniqueness,
+    and scan prioritization engines.
+    """
+
+    identifier_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="barcode_identifiers",
+        db_index=True,
+    )
+    tenant_id_str = models.CharField(
+        max_length=64,
+        default="platform",
+        db_index=True,
+        help_text="'platform' for global catalog; tenant_id for store-specific barcode",
+    )
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="alternate_barcodes",
+        db_index=True,
+    )
+    non_medicine_item = models.ForeignKey(
+        "core.NonMedicineRetailItem",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="alternate_barcodes",
+        db_index=True,
+    )
+    variant = models.ForeignKey(
+        "core.MedicineVariant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="alternate_barcodes",
+        db_index=True,
+    )
+    barcode_value = models.CharField(max_length=64, db_index=True)
+    identifier_type = models.CharField(
+        max_length=64,
+        choices=BarcodeIdentifierType.choices,
+        default=BarcodeIdentifierType.PRIMARY_EAN13_GTIN,
+        db_index=True,
+    )
+    packaging_level = models.CharField(
+        max_length=32,
+        choices=BarcodePackagingLevel.choices,
+        default=BarcodePackagingLevel.UNIT,
+        db_index=True,
+    )
+    priority_order = models.PositiveIntegerField(
+        default=1,
+        db_index=True,
+        help_text="Lookup resolution priority: 1 = Highest (Immediate POS resolution)",
+    )
+    pack_quantity_multiplier = models.PositiveIntegerField(
+        default=1,
+        help_text="Unit multiplier represented by this barcode (e.g. 1 for UNIT, 10 for STRIP, 100 for BOX)",
+    )
+    description = models.CharField(max_length=255, blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    version_number = models.PositiveIntegerField(default=1)
+    immutable_hash = models.CharField(max_length=64, blank=True, default="")
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_barcode_identifiers",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["priority_order", "-version_number"]
+        verbose_name = "Barcode Alternate Identifier"
+        verbose_name_plural = "Barcode Alternate Identifiers"
+        indexes = [
+            models.Index(fields=["tenant_id_str", "is_active", "priority_order"]),
+            models.Index(fields=["barcode_value", "is_active"]),
+            models.Index(fields=["product", "is_active"]),
+            models.Index(fields=["non_medicine_item", "is_active"]),
+            models.Index(fields=["variant", "is_active"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant_id_str", "barcode_value"],
+                condition=models.Q(is_active=True),
+                name="unique_active_tenant_barcode_value",
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        targets = [self.product_id, self.non_medicine_item_id, self.variant_id]
+        if not any(targets):
+            raise ValidationError("Barcode identifier must link to a medicine product, retail item, or variant.")
+        clean_barcode = str(self.barcode_value or "").strip()
+        if len(clean_barcode) < 3:
+            raise ValidationError("Barcode value must be at least 3 characters long.")
+
+    def compute_hash(self) -> str:
+        import hashlib
+
+        raw = (
+            f"{self.identifier_id}|{self.barcode_value}|{self.identifier_type}|"
+            f"{self.packaging_level}|{self.priority_order}|{self.tenant_id_str}|{self.version_number}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def save(self, *args, **kwargs):
+        self.barcode_value = str(self.barcode_value or "").strip()
+        if not self.immutable_hash:
+            self.immutable_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.barcode_value} [{self.identifier_type} - {self.packaging_level}]"
+
+
+class CatalogueLifecycleStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active Normal In-Catalog"
+    DISCONTINUED = "DISCONTINUED", "Manufacturer Discontinued"
+    RECALLED = "RECALLED", "Statutory Safety Recall (Dispensing Blocked)"
+    WITHDRAWN = "WITHDRAWN", "Permanent Market Withdrawal"
+    QUARANTINED = "QUARANTINED", "Quarantined Pending Lab Analysis"
+    LIFTED = "LIFTED", "Recall Lifted / Cleared"
+
+
+class RecallScope(models.TextChoices):
+    NATIONWIDE_ALL_BATCHES = "NATIONWIDE_ALL_BATCHES", "Nationwide All Batches"
+    SPECIFIC_BATCHES = "SPECIFIC_BATCHES", "Specific Contaminated Batches"
+    TENANT_QUARANTINE = "TENANT_QUARANTINE", "Tenant Store-Level Quarantine"
+
+
+class CatalogueLifecycleNotice(models.Model):
+    """
+    Architecture Decision: ADR-0137 (P137).
+    Statutory safety recall, market withdrawal, and discontinuation governance notice.
+    Enforces hard dispensing blocks on recalled/withdrawn inventory at POS checkout
+    while preserving permanent relational integrity with historical invoices and prescriptions.
+    """
+
+    notice_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="catalogue_lifecycle_notices",
+    )
+    tenant_id_str = models.CharField(max_length=64, default="platform", db_index=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="lifecycle_notices",
+    )
+    non_medicine_item = models.ForeignKey(
+        "core.NonMedicineRetailItem",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="lifecycle_notices",
+    )
+    target_entity_type = models.CharField(
+        max_length=32,
+        choices=[("MEDICINE", "Medicine"), ("NON_MEDICINE", "Non-Medicine Retail Item")],
+        default="MEDICINE",
+    )
+    lifecycle_status = models.CharField(
+        max_length=32,
+        choices=CatalogueLifecycleStatus.choices,
+        default=CatalogueLifecycleStatus.RECALLED,
+        db_index=True,
+    )
+    recall_scope = models.CharField(
+        max_length=32,
+        choices=RecallScope.choices,
+        default=RecallScope.NATIONWIDE_ALL_BATCHES,
+        db_index=True,
+    )
+    affected_batch_numbers = models.JSONField(default=list, blank=True)
+    regulatory_authority = models.CharField(max_length=128)
+    notice_number = models.CharField(max_length=128, db_index=True)
+    reason = models.TextField()
+    effective_date = models.DateTimeField(db_index=True)
+    action_required = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    version_number = models.PositiveIntegerField(default=1)
+    immutable_hash = models.CharField(max_length=64, blank=True, default="")
+    issued_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="issued_catalogue_notices",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-effective_date", "-version_number"]
+        verbose_name = "Catalogue Lifecycle Notice"
+        verbose_name_plural = "Catalogue Lifecycle Notices"
+        indexes = [
+            models.Index(fields=["tenant_id_str", "is_active", "lifecycle_status"]),
+            models.Index(fields=["product", "is_active"]),
+            models.Index(fields=["non_medicine_item", "is_active"]),
+            models.Index(fields=["notice_number", "is_active"]),
+            models.Index(fields=["effective_date", "is_active"]),
+        ]
+
+    @property
+    def is_dispensing_blocked(self) -> bool:
+        return self.is_active and self.lifecycle_status in (
+            CatalogueLifecycleStatus.RECALLED,
+            CatalogueLifecycleStatus.WITHDRAWN,
+            CatalogueLifecycleStatus.QUARANTINED,
+        )
+
+    def compute_hash(self) -> str:
+        import hashlib
+
+        eff_str = self.effective_date.isoformat() if self.effective_date else ""
+        batches_str = ",".join(sorted([str(b) for b in (self.affected_batch_numbers or [])]))
+        raw = (
+            f"{self.notice_id}|{self.tenant_id_str}|{self.target_entity_type}|"
+            f"{self.lifecycle_status}|{self.recall_scope}|{self.notice_number}|"
+            f"{batches_str}|{eff_str}|{self.version_number}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if not self.product_id and not self.non_medicine_item_id:
+            raise ValidationError("Notice must link to either a medicine product or retail item.")
+        if len(str(self.notice_number or "").strip()) < 3:
+            raise ValidationError("Notice number must be at least 3 characters.")
+        if len(str(self.reason or "").strip()) < 5:
+            raise ValidationError("Reason must be at least 5 characters.")
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        if not self.immutable_hash:
+            self.immutable_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"[{self.lifecycle_status}] {self.notice_number} ({self.regulatory_authority})"
+
+
+
+
+
+

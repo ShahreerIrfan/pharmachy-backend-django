@@ -510,7 +510,7 @@ class MedicineProductViewSet(viewsets.ModelViewSet):
         UnicodePhoneticSearchFilter,
         filters.OrderingFilter,
     ]
-    search_fields = ["brand_name", "generic_name", "manufacturer"]
+    search_fields = ["brand_name", "generic_name", "manufacturer", "barcode", "dgda_dar_number"]
     ordering_fields = ["brand_name", "mrp_unit", "created_at", "product_id"]
     ordering = ["brand_name", "product_id"]
     cursor_ordering = "-created_at"
@@ -530,6 +530,8 @@ class MedicineProductViewSet(viewsets.ModelViewSet):
         "is_antibiotic",
         "include_hidden",
         "tenant_id",
+        "route",
+        "barcode",
     }
 
     def _require_platform_operator(self, request):
@@ -584,6 +586,35 @@ class MedicineProductViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         self._require_platform_operator(self.request)
+        dar = serializer.validated_data.get("dgda_dar_number")
+        brand = serializer.validated_data.get("brand_name")
+        generic = serializer.validated_data.get("generic_name")
+        strength = serializer.validated_data.get("strength")
+        dosage = serializer.validated_data.get("dosage_form")
+        mfg = serializer.validated_data.get("manufacturer")
+
+        if dar and MedicineProduct.objects.filter(dgda_dar_number=dar).exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({
+                "error_code": "ERR_DUPLICATE_MEDICINE",
+                "message_en": f"Medicine with DAR '{dar}' already exists in global master.",
+                "message_bn": "এই ডিজিডিএ ডিএআর নম্বরের ওষুধটি ইতিমধ্যে ক্যাটালগে বিদ্যমান।"
+            })
+        if brand and generic and strength and dosage and mfg:
+            if MedicineProduct.objects.filter(
+                brand_name__iexact=brand,
+                generic_name__iexact=generic,
+                strength__iexact=strength,
+                dosage_form__iexact=dosage,
+                manufacturer__iexact=mfg,
+            ).exists():
+                from rest_framework.exceptions import ValidationError
+                raise ValidationError({
+                    "error_code": "ERR_DUPLICATE_MEDICINE",
+                    "message_en": f"Medicine '{brand} {strength}' from '{mfg}' already exists.",
+                    "message_bn": "একই ব্র্যান্ড ও ম্যানুফ্যাকচারারের ওষুধ ইতিমধ্যে ক্যাটালগে বিদ্যমান।"
+                })
+
         instance = serializer.save(curated_by=self.request.user)
         import uuid
 
