@@ -18,11 +18,11 @@ from apps.core.announcement_views import (
     PlatformAnnouncementViewSet,
     TenantAnnouncementViewSet,
 )
+from apps.core.approval_views import ApprovalRequestViewSet
 from apps.core.billing_report_views import (
     PlatformBillingReportViewSet,
     TenantBillingReportViewSet,
 )
-from apps.core.approval_views import ApprovalRequestViewSet
 from apps.core.branch_lifecycle_views import BranchLifecycleViewSet
 from apps.core.branch_membership_views import BranchStaffMembershipViewSet
 from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
@@ -58,6 +58,7 @@ from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
 from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
+from apps.core.shift_views import StaffShiftScheduleViewSet
 from apps.core.staff_lifecycle_views import StaffLifecycleViewSet
 from apps.core.staff_membership_views import (
     StaffInvitationViewSet,
@@ -136,6 +137,7 @@ router.register("tenants", TenantViewSet, basename="tenant")
 router.register("branches/lifecycle", BranchLifecycleViewSet, basename="branch-lifecycle")
 router.register("branches", BranchLifecycleViewSet, basename="branch")
 router.register("approvals", ApprovalRequestViewSet, basename="approval-request")
+router.register("shifts", StaffShiftScheduleViewSet, basename="shift-schedule")
 router.register("medicines", MedicineProductViewSet, basename="medicine")
 router.register("products", MedicineProductViewSet, basename="product")
 router.register("batches", BatchStockViewSet, basename="batch")

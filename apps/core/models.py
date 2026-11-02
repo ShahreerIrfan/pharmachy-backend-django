@@ -3352,3 +3352,118 @@ class ApprovalAuditEvent(models.Model):
 
     def __str__(self) -> str:
         return f"ApprovalAudit {self.event_id} [{self.action}] on {self.approval_request_id}"
+
+
+
+class ShiftType(models.TextChoices):
+    MORNING = "MORNING", "Morning Shift (08:00 - 16:00)"
+    EVENING = "EVENING", "Evening Shift (16:00 - 00:00)"
+    NIGHT = "NIGHT", "Night Emergency Shift (00:00 - 08:00)"
+    FULL_DAY = "FULL_DAY", "Full Day Shift"
+    CUSTOM = "CUSTOM", "Custom Working Hours"
+
+
+class ShiftScheduleStatus(models.TextChoices):
+    SCHEDULED = "SCHEDULED", "Scheduled"
+    CONFIRMED = "CONFIRMED", "Confirmed by Staff"
+    IN_PROGRESS = "IN_PROGRESS", "Shift In Progress"
+    COMPLETED = "COMPLETED", "Shift Completed"
+    CANCELLED = "CANCELLED", "Shift Cancelled"
+    NO_SHOW = "NO_SHOW", "No Show / Absent"
+
+
+class AttendanceStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending Clock-In"
+    ON_TIME = "ON_TIME", "Clocked In On-Time"
+    LATE = "LATE", "Clocked In Late"
+    EARLY_DEPARTURE = "EARLY_DEPARTURE", "Departed Early"
+    ABSENT = "ABSENT", "Shift Absent"
+
+
+class StaffShiftSchedule(models.Model):
+    """
+    Staff Shift Schedule & Cashier Roster (ADR-0109 / P109).
+    Maintains scheduled working hours, attendance boundaries, grace periods,
+    and branch-local display time (Asia/Dhaka). Enforces zero shift collision / overlap.
+    """
+
+    schedule_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="shift_schedules")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="shift_schedules")
+    staff_member = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.CASCADE,
+        related_name="assigned_shifts",
+    )
+    shift_name = models.CharField(max_length=128)
+    shift_type = models.CharField(
+        max_length=32,
+        choices=ShiftType.choices,
+        default=ShiftType.MORNING,
+        db_index=True,
+    )
+    start_time = models.DateTimeField(db_index=True)
+    end_time = models.DateTimeField(db_index=True)
+    timezone_name = models.CharField(max_length=64, default="Asia/Dhaka")
+    status = models.CharField(
+        max_length=32,
+        choices=ShiftScheduleStatus.choices,
+        default=ShiftScheduleStatus.SCHEDULED,
+        db_index=True,
+    )
+    grace_period_minutes = models.PositiveIntegerField(default=15)
+    clock_in_at = models.DateTimeField(null=True, blank=True)
+    clock_out_at = models.DateTimeField(null=True, blank=True)
+    attendance_status = models.CharField(
+        max_length=32,
+        choices=AttendanceStatus.choices,
+        default=AttendanceStatus.PENDING,
+        db_index=True,
+    )
+    notes = models.TextField(blank=True, default="")
+    created_by_username = models.CharField(max_length=128, blank=True, default="")
+    updated_by_username = models.CharField(max_length=128, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["start_time"]
+        verbose_name = "Staff Shift Schedule"
+        verbose_name_plural = "Staff Shift Schedules"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "start_time"]),
+            models.Index(fields=["staff_member", "start_time"]),
+            models.Index(fields=["tenant", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Shift {self.schedule_id} [{self.shift_name}] - {self.staff_member_id} ({self.status})"
+
+
+class ShiftAuditEvent(models.Model):
+    """
+    Immutable audit trail for shift scheduling, roster changes, attendance clock-ins/outs,
+    and cancellations (ADR-0109).
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="shift_audit_events")
+    shift_schedule = models.ForeignKey(StaffShiftSchedule, on_delete=models.CASCADE, related_name="audit_trail")
+    action = models.CharField(max_length=32, db_index=True)
+    actor_username = models.CharField(max_length=128, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    metadata = models.JSONField(default=dict)
+    ip_address = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Shift Audit Event"
+        verbose_name_plural = "Shift Audit Events"
+        indexes = [
+            models.Index(fields=["tenant", "action"]),
+            models.Index(fields=["shift_schedule", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ShiftAudit {self.event_id} [{self.action}] on {self.shift_schedule_id}"
