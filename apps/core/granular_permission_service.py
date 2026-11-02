@@ -20,6 +20,7 @@ import uuid
 from decimal import Decimal
 from typing import Any, Dict, Optional, Set, Tuple
 
+from django.db import models
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
@@ -27,9 +28,11 @@ from apps.core.models import (
     BatchStock,
     Branch,
     BranchExpenseRecord,
+    BranchStaffMembership,
     CustomRoleDefinition,
     ExpenseStatus,
     MedicineProduct,
+    StaffMember,
     StaffMembership,
     StockAdjustmentRecord,
     StockAdjustmentType,
@@ -68,7 +71,12 @@ class GranularActionPermissionService:
     }
 
     @classmethod
-    def resolve_effective_actions(cls, user: Any, tenant_id: Optional[str] = None) -> Dict[str, bool]:
+    def resolve_effective_actions(
+        cls,
+        user: Any,
+        tenant_id: Optional[str] = None,
+        branch_id: Optional[str] = None,
+    ) -> Dict[str, bool]:
         """Calculates granted boolean flags for all 9 granular actions based on user role or custom role."""
         if not user or not getattr(user, "is_authenticated", False):
             return {act: False for act in cls.VALID_ACTIONS}
@@ -83,9 +91,31 @@ class GranularActionPermissionService:
             user_tid = user_tid.tenant_id
         user_tid = str(user_tid) if user_tid else None
 
-        # 2. Check if user is bound to an active CustomRoleDefinition via StaffMembership
+        # 2. Check BranchStaffMembership for branch-specific role
         custom_role = None
-        if user_tid:
+        if user_tid and branch_id:
+            user_ident = getattr(user, "username", getattr(user, "email", ""))
+            staff = StaffMember.objects.filter(tenant_id=user_tid).filter(
+                username=user_ident
+            ).first()
+            if staff:
+                bsm = BranchStaffMembership.objects.filter(
+                    tenant_id=user_tid,
+                    staff_member=staff,
+                    branch_id=branch_id,
+                    is_active=True,
+                ).first()
+                if bsm:
+                    role_str = bsm.role.upper()
+                    if bsm.custom_role_code:
+                        custom_role = CustomRoleDefinition.objects.filter(
+                            tenant_id=user_tid,
+                            role_code=bsm.custom_role_code,
+                            is_archived=False,
+                        ).first()
+
+        # 3. Check if user is bound to an active CustomRoleDefinition via StaffMembership or role
+        if not custom_role and user_tid:
             membership = StaffMembership.objects.filter(
                 tenant_id=user_tid,
                 staff_member__username=getattr(user, "username", getattr(user, "email", "")),
@@ -207,20 +237,82 @@ class GranularActionPermissionService:
         if act_clean not in cls.VALID_ACTIONS:
             return False, f"Unknown action '{action_name}'."
 
-        effective = cls.resolve_effective_actions(user, tenant_id=tenant_id)
+        user_role = str(getattr(user, "role", "UNKNOWN")).upper()
+        user_tid = getattr(user, "tenant_id", None) or tenant_id
+        if hasattr(user_tid, "tenant_id"):
+            user_tid = user_tid.tenant_id
+        user_tid = str(user_tid) if user_tid else None
+        user_ident = getattr(user, "username", getattr(user, "email", ""))
+
+        # 1. Branch authorization check (Non-owner / non-superadmin must be authorized in branch)
+        if branch_id and user_role not in [
+            "SUPERADMIN",
+            "SUPER_ADMIN",
+            "PLATFORM_OPERATOR",
+            "PHARMACY_OWNER",
+            "TENANT_OWNER",
+        ]:
+            has_branch_mem = False
+            # Check explicit BranchStaffMembership
+            if BranchStaffMembership.objects.filter(
+                tenant_id=user_tid,
+                staff_member__username=user_ident,
+                branch_id=branch_id,
+                is_active=True,
+            ).exists():
+                has_branch_mem = True
+            # Check StaffMembership roving / primary
+            elif StaffMembership.objects.filter(
+                tenant_id=user_tid,
+                staff_member__username=user_ident,
+                is_active=True,
+            ).filter(
+                models.Q(primary_branch_id=branch_id)
+                | models.Q(assigned_branches__branch_id=branch_id)
+            ).exists():
+                has_branch_mem = True
+            # Check default user.branch_id
+            else:
+                user_bid = getattr(user, "branch_id", None)
+                if user_bid and str(user_bid) == str(branch_id):
+                    has_branch_mem = True
+
+            if not has_branch_mem:
+                return (
+                    False,
+                    f"Staff account has no authorized membership for branch '{branch_id}'.",
+                )
+
+        # 2. Resolve effective actions within the branch context
+        effective = cls.resolve_effective_actions(
+            user, tenant_id=tenant_id, branch_id=branch_id
+        )
         if not effective.get(act_clean, False):
-            role_str = str(getattr(user, "role", "UNKNOWN")).upper()
+            eff_role = user_role
+            if branch_id:
+                bsm = BranchStaffMembership.objects.filter(
+                    staff_member__username=user_ident,
+                    branch_id=branch_id,
+                    is_active=True,
+                ).first()
+                if bsm:
+                    eff_role = bsm.role
             return (
                 False,
-                f"Role '{role_str}' lacks granular permission for action '{act_clean}'.",
+                f"Role '{eff_role}' lacks granular permission for action '{act_clean}'.",
             )
 
-        # Branch Manager branch isolation: cannot act on another branch
-        user_role = str(getattr(user, "role", "")).upper()
+        # 3. Legacy single-branch manager isolation safeguard if no multi-branch assignment
         if user_role == "BRANCH_MANAGER" and branch_id:
-            user_bid = getattr(user, "branch_id", None)
-            if user_bid and str(user_bid) != str(branch_id):
-                return False, f"Branch Manager is restricted to branch '{user_bid}'."
+            has_bsm = BranchStaffMembership.objects.filter(
+                staff_member__username=user_ident,
+                branch_id=branch_id,
+                is_active=True,
+            ).exists()
+            if not has_bsm:
+                user_bid = getattr(user, "branch_id", None)
+                if user_bid and str(user_bid) != str(branch_id):
+                    return False, f"Branch Manager is restricted to branch '{user_bid}'."
 
         return True, None
 

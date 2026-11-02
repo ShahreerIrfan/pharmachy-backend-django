@@ -22,6 +22,7 @@ from apps.core.billing_report_views import (
     PlatformBillingReportViewSet,
     TenantBillingReportViewSet,
 )
+from apps.core.branch_membership_views import BranchStaffMembershipViewSet
 from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
 from apps.core.cross_tenant_metrics_views import (
     PlatformCrossTenantMetricsViewSet,
@@ -143,6 +144,7 @@ router.register("roles/catalog", PermissionCatalogViewSet, basename="roles-catal
 router.register("roles/custom", CustomRoleViewSet, basename="roles-custom")
 router.register("staff/invitations", StaffInvitationViewSet, basename="staff-invitations")
 router.register("staff/memberships", StaffMembershipViewSet, basename="staff-memberships")
+router.register("staff/branch-memberships", BranchStaffMembershipViewSet, basename="staff-branch-memberships")
 router.register("staff", StaffMemberViewSet, basename="staff")
 router.register("prescriptions", PrescriptionRecordViewSet, basename="prescription")
 router.register("payments", PaymentTransactionViewSet, basename="payment")

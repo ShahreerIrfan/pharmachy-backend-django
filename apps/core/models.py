@@ -3062,3 +3062,50 @@ class StockAdjustmentRecord(models.Model):
 
     def __str__(self) -> str:
         return f"StockAdj {self.adjustment_id} - {self.medicine.brand_name} ({self.quantity_delta}) [{self.adjustment_type}]"
+
+
+class BranchStaffMembership(models.Model):
+    """
+    Authoritative branch-specific membership allowing a staff account to hold
+    different roles in separate authorized branches (P105 / ADR-0105).
+    Example: Staff member Kamal is BRANCH_MANAGER at Branch A, but CASHIER at Branch B.
+    """
+
+    membership_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="branch_staff_memberships")
+    staff_member = models.ForeignKey(StaffMember, on_delete=models.CASCADE, related_name="branch_memberships")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="staff_memberships")
+    role = models.CharField(
+        max_length=64,
+        default=StaffRole.CASHIER,
+        db_index=True,
+    )
+    custom_role_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    custom_role_title = models.CharField(max_length=128, blank=True, default="")
+    is_primary = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True, db_index=True)
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    assigned_by_username = models.CharField(max_length=128, blank=True, default="")
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    revoked_by_username = models.CharField(max_length=128, blank=True, default="")
+    revocation_reason = models.TextField(blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-assigned_at"]
+        verbose_name = "Branch Staff Membership"
+        verbose_name_plural = "Branch Staff Memberships"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "staff_member", "branch"],
+                name="unique_tenant_staff_branch_membership",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "is_active"]),
+            models.Index(fields=["staff_member", "is_active"]),
+            models.Index(fields=["tenant", "staff_member", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"BranchMembership {self.membership_id} - {self.staff_member.full_name} ({self.role}) @ {self.branch.name}"

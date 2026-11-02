@@ -368,3 +368,4 @@ class GranularPermissionViewSet(viewsets.ViewSet):
             clinical_notes=clinical_notes,
         )
         return Response(result, status=status.HTTP_200_OK)
+
