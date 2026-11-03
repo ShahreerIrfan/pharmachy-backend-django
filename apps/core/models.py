@@ -7508,6 +7508,9 @@ class BaseDispensingUnit(models.TextChoices):
     DEVICE = "DEVICE", "Device"
     SACHET = "SACHET", "Sachet"
     SUPPOSITORY = "SUPPOSITORY", "Suppository"
+    TUBE = "TUBE", "Tube"
+    CANISTER = "CANISTER", "Canister / Inhaler"
+    ML = "ML", "Milliliter"
 
 
 class ConditionalPricingConfig(models.Model):
@@ -7889,6 +7892,170 @@ class LocalInventoryConfig(models.Model):
         if self.max_capacity_units is not None and self.max_capacity_units < self.min_order_quantity:
             raise ValidationError({
                 "max_capacity_units": f"max_capacity_units ({self.max_capacity_units}) cannot be less than min_order_quantity ({self.min_order_quantity})."
+            })
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class InventoryBaseUnitStrategy(models.Model):
+    """
+    Architecture Decision: ADR-0161 (P161).
+    Phase 09: Packaging, Unit Conversion, Batches & Cost Lots.
+    Inventory Base-Unit Strategy per SKU:
+    - Defines canonical stock base unit (e.g. TABLET, BOTTLE, VIAL).
+    - Specifies indivisibility rules and decimal constraints.
+    - Configures multi-tier unit conversions (Pack -> Intermediate -> Base).
+    - Protects exact Decimal precision for cost lots and valuation.
+    """
+
+    strategy_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="base_unit_strategies",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="base_unit_strategies",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="base_unit_strategies",
+        db_index=True,
+    )
+
+    base_unit = models.CharField(
+        max_length=32,
+        choices=BaseDispensingUnit.choices,
+        default=BaseDispensingUnit.PIECE,
+        db_index=True,
+    )
+    is_indivisible = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="If True, item cannot be broken into fractions during dispensing, checkout, or stock adjustments.",
+    )
+    allow_decimal_quantities = models.BooleanField(
+        default=False,
+        help_text="Whether fractional stock movements are permitted (e.g. compounding syrups, bulk liquids in ml).",
+    )
+    decimal_places_allowed = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Allowed decimal precision for quantities (0 for integer items, up to 4 for bulk liquids).",
+    )
+    minimum_dispense_quantity = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("1.0000"),
+        validators=[MinValueValidator(Decimal("0.0001"))],
+        help_text="Minimum allowed quantity step for transactions.",
+    )
+
+    pack_unit_label = models.CharField(
+        max_length=32,
+        default="BOX",
+        help_text="Outer bulk package unit label (e.g. BOX, CARTON).",
+    )
+    intermediate_unit_label = models.CharField(
+        max_length=32,
+        default="STRIP",
+        help_text="Intermediate packaging unit label (e.g. STRIP, BLISTER, PACK).",
+    )
+    pack_to_intermediate_multiplier = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Number of intermediate units per outer pack box.",
+    )
+    intermediate_to_base_multiplier = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Number of base units per intermediate unit.",
+    )
+    total_base_units_per_pack = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Derived total base units per pack (must equal pack_to_intermediate * intermediate_to_base).",
+    )
+
+    cost_per_base_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Exact purchase cost per base unit in BDT (4 decimal places).",
+    )
+    mrp_per_base_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Maximum retail selling price per base unit in BDT (4 decimal places).",
+    )
+
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Inventory Base Unit Strategy"
+        verbose_name_plural = "Inventory Base Unit Strategies"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "product"],
+                name="unique_tenant_branch_product_base_unit_strategy",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(cost_per_base_unit__gte=Decimal("0.0000")),
+                name="check_positive_base_unit_cost",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(mrp_per_base_unit__gte=models.F("cost_per_base_unit")),
+                name="check_mrp_gte_cost_base_unit",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "product"]),
+            models.Index(fields=["tenant", "base_unit"]),
+            models.Index(fields=["tenant", "is_indivisible"]),
+        ]
+
+    def __str__(self) -> str:
+        b_name = self.branch.name if self.branch else "All Branches"
+        return f"{self.product.brand_name} [{self.tenant.name} - {b_name}] Base: {self.base_unit} (Indivisible: {self.is_indivisible})"
+
+    def clean(self):
+        super().clean()
+        expected_total = self.pack_to_intermediate_multiplier * self.intermediate_to_base_multiplier
+        if self.total_base_units_per_pack != expected_total:
+            self.total_base_units_per_pack = expected_total
+
+        if self.is_indivisible:
+            if self.allow_decimal_quantities:
+                raise ValidationError({
+                    "allow_decimal_quantities": "Indivisible items cannot allow decimal quantities."
+                })
+            if self.decimal_places_allowed != 0:
+                raise ValidationError({
+                    "decimal_places_allowed": "Indivisible items must have decimal_places_allowed set to 0."
+                })
+            if self.minimum_dispense_quantity % Decimal("1") != Decimal("0"):
+                raise ValidationError({
+                    "minimum_dispense_quantity": "Minimum dispense quantity for indivisible items must be a whole integer."
+                })
+
+        if self.mrp_per_base_unit < self.cost_per_base_unit:
+            raise ValidationError({
+                "mrp_per_base_unit": f"MRP per base unit ({self.mrp_per_base_unit}) cannot be lower than cost ({self.cost_per_base_unit})."
             })
 
     def save(self, *args, **kwargs):
