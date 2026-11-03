@@ -58,6 +58,7 @@ from apps.core.topical_views import TopicalEditorViewSet
 from apps.core.sachet_views import SachetEditorViewSet
 from apps.core.suppository_views import SuppositoryEditorViewSet
 from apps.core.device_consumable_views import DeviceConsumableEditorViewSet
+from apps.core.dynamic_field_group_views import DynamicFieldGroupLayoutViewSet
 from apps.core.form_template_migration_views import FormTemplateMigrationViewSet
 from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.granular_permission_views import GranularPermissionViewSet
@@ -208,6 +209,7 @@ router.register("catalog/topical", TopicalEditorViewSet, basename="catalog-topic
 router.register("catalog/sachets", SachetEditorViewSet, basename="catalog-sachets")
 router.register("catalog/suppositories", SuppositoryEditorViewSet, basename="catalog-suppositories")
 router.register("catalog/devices", DeviceConsumableEditorViewSet, basename="catalog-devices")
+router.register("catalog/layout/groups", DynamicFieldGroupLayoutViewSet, basename="catalog-layout-groups")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

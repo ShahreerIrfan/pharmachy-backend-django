@@ -7298,6 +7298,127 @@ class DeviceConsumableConfig(models.Model):
         return f"{self.product_id} ({self.device_category}) - {self.brand_name} {self.model_number} ({t_scope})"
 
 
+class LayoutDisplayDensity(models.TextChoices):
+    COMPACT = "COMPACT", "Compact"
+    COMFORTABLE = "COMFORTABLE", "Comfortable"
+    DENSE = "DENSE", "Dense"
+
+
+class FieldGroupCode(models.TextChoices):
+    GENERAL_IDENTIFICATION = "GENERAL_IDENTIFICATION", "General Identification"
+    FORM_SPECIFIC_PARAMETERS = "FORM_SPECIFIC_PARAMETERS", "Form-Specific Clinical Parameters"
+    PACKAGING_DIMENSIONS = "PACKAGING_DIMENSIONS", "Packaging Dimensions & Unit Multipliers"
+    STORAGE_AND_COLD_CHAIN = "STORAGE_AND_COLD_CHAIN", "Storage & Temperature Controls"
+    REGULATORY_AND_DISPENSING = "REGULATORY_AND_DISPENSING", "Regulatory & Dispensing Class"
+    FINANCIAL_PRICING = "FINANCIAL_PRICING", "Pricing, MRP & Tax Configuration"
+
+
+class DynamicFieldGroupLayout(models.Model):
+    """
+    Dynamic Field Group Layout and Keyboard-Accessible Flow.
+    Architecture Decision: ADR-0152 (P152).
+    Governs conditional group rendering, tab sequence, accessible bilingual labels,
+    and responsive desktop flow.
+    """
+
+    layout_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="dynamic_field_layouts",
+        help_text="Tenant context. Null indicates system canonical default layout.",
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="dynamic_field_layouts",
+        help_text="Optional branch-level override.",
+    )
+    dosage_form_family = models.CharField(
+        max_length=64,
+        default="ALL",
+        help_text="Target formulation family or ALL for global base group",
+    )
+    group_code = models.CharField(
+        max_length=64,
+        choices=FieldGroupCode.choices,
+        help_text="Semantic identifier for the field group",
+    )
+    display_order = models.PositiveIntegerField(
+        default=1,
+        help_text="Rendering sequence order on screen",
+    )
+    title_en = models.CharField(max_length=150, help_text="Group header label in English")
+    title_bn = models.CharField(max_length=150, help_text="Group header label in Bengali")
+    is_collapsible = models.BooleanField(default=True)
+    default_collapsed = models.BooleanField(default=False)
+    keyboard_shortcut_mnemonic = models.CharField(
+        max_length=10,
+        blank=True,
+        default="",
+        help_text="Keyboard access mnemonic accelerator (e.g. 'G', 'F', 'P', 'S')",
+    )
+    display_density = models.CharField(
+        max_length=32,
+        choices=LayoutDisplayDensity.choices,
+        default=LayoutDisplayDensity.COMFORTABLE,
+    )
+    fields_config = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Array of field metadata: field_name, tab_index, label_en/bn, control_type, width",
+    )
+    visibility_condition = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Conditional expression for when this group is visible",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["display_order", "created_at"]
+        verbose_name = "Dynamic Field Group Layout"
+        verbose_name_plural = "Dynamic Field Group Layouts"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "dosage_form_family", "group_code"],
+                name="unique_layout_tenant_branch_group",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(display_order__gt=0),
+                name="check_display_order_gt_zero",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "dosage_form_family", "is_active"]),
+            models.Index(fields=["group_code", "display_order"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.title_en or len(self.title_en.strip()) < 2:
+            raise ValidationError("title_en must be at least 2 characters.")
+        if not self.title_bn or len(self.title_bn.strip()) < 2:
+            raise ValidationError("title_bn must be at least 2 characters.")
+        if self.display_order < 1:
+            raise ValidationError("display_order must be 1 or greater.")
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"[{self.display_order}] {self.group_code} ({self.dosage_form_family}) - {self.title_en} ({t_scope})"
+
+
+
 
 
 
