@@ -46,6 +46,30 @@ class DynamicFieldGroupLayoutViewSet(viewsets.ViewSet):
         )
         return Response(result, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=["post"], url_path="switch-dosage-form")
+    def switch_dosage_form(self, request):
+        """
+        Switches dosage form family while preserving common monograph attributes
+        and restoring previously entered formulation parameters from cache.
+        """
+        previous_form = request.data.get("previous_dosage_form", "")
+        new_form = request.data.get("new_dosage_form", "ALL")
+        current_values = request.data.get("current_values", {})
+        retained_cache = request.data.get("retained_form_cache", {})
+
+        try:
+            result = DynamicFieldGroupService.switch_dosage_form(
+                user=request.user,
+                previous_form=previous_form,
+                new_form=new_form,
+                current_values=current_values,
+                retained_cache=retained_cache,
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            detail = exc.detail if hasattr(exc, "detail") else {"detail": str(exc)}
+            return Response(detail, status=status.HTTP_403_FORBIDDEN)
+
     def list(self, request):
         """Resolves dynamic field groups with tenant overrides and conditional visibility."""
         dosage_form = request.query_params.get("dosage_form_family", "ALL")

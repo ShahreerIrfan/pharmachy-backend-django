@@ -36,6 +36,26 @@ class DynamicFieldGroupService:
     ALLOWED_GROUP_CODES = [c.value for c in FieldGroupCode]
     ALLOWED_DENSITIES = [c.value for c in LayoutDisplayDensity]
 
+    COMMON_MONOGRAPH_FIELDS = [
+        "brand_name",
+        "brand_name_bn",
+        "generic_name",
+        "generic_name_bn",
+        "manufacturer",
+        "dar_number",
+        "cost_unit",
+        "mrp_unit",
+        "vat_percentage",
+        "prescription_required",
+        "is_antibiotic",
+        "is_narcotic",
+        "requires_cold_chain",
+        "storage_condition",
+        "storage_temperature_celsius_min",
+        "storage_temperature_celsius_max",
+        "handling_alert",
+    ]
+
     @classmethod
     def _resolve_tenant(cls, user: PharmacyUser) -> Optional[Tenant]:
         tenant_id = getattr(user, "tenant_id", None)
@@ -445,6 +465,106 @@ class DynamicFieldGroupService:
                     "aria_label": "Anatomical administration route",
                 },
             ]
+        elif dosage_form in ["DROPS", "DROP"]:
+            return [
+                {
+                    "field_name": "volume_ml",
+                    "tab_index": 5,
+                    "label_en": "Volume (mL)",
+                    "label_bn": "বোতলের আয়তন (মিলি)",
+                    "control_type": "NUMERIC_INPUT",
+                    "is_mandatory": True,
+                    "desktop_grid_width": "HALF",
+                    "keyboard_mnemonic": "V",
+                    "aria_label": "Drops bottle volume in milliliters",
+                },
+                {
+                    "field_name": "drop_category",
+                    "tab_index": 6,
+                    "label_en": "Drop Category",
+                    "label_bn": "ড্রপের ধরণ",
+                    "control_type": "SELECT_DROPDOWN",
+                    "is_mandatory": True,
+                    "desktop_grid_width": "HALF",
+                    "keyboard_mnemonic": "D",
+                    "aria_label": "Ophthalmic or otic drop category",
+                },
+            ]
+        elif dosage_form in ["TOPICAL_CREAM", "CREAM", "OINTMENT"]:
+            return [
+                {
+                    "field_name": "tube_size_grams",
+                    "tab_index": 5,
+                    "label_en": "Tube Size (g)",
+                    "label_bn": "টিউবের ওজন (গ্রাম)",
+                    "control_type": "NUMERIC_INPUT",
+                    "is_mandatory": True,
+                    "desktop_grid_width": "HALF",
+                    "keyboard_mnemonic": "G",
+                    "aria_label": "Topical tube weight in grams",
+                },
+                {
+                    "field_name": "application_site",
+                    "tab_index": 6,
+                    "label_en": "Application Site",
+                    "label_bn": "ব্যবহারের স্থান",
+                    "control_type": "TEXT_INPUT",
+                    "is_mandatory": True,
+                    "desktop_grid_width": "HALF",
+                    "keyboard_mnemonic": "P",
+                    "aria_label": "Topical application site",
+                },
+            ]
+        elif dosage_form in ["SACHET_POWDER", "SACHET", "POWDER"]:
+            return [
+                {
+                    "field_name": "grams_per_sachet",
+                    "tab_index": 5,
+                    "label_en": "Weight per Sachet (g)",
+                    "label_bn": "প্রতি স্যাশের ওজন (গ্রাম)",
+                    "control_type": "NUMERIC_INPUT",
+                    "is_mandatory": True,
+                    "desktop_grid_width": "HALF",
+                    "keyboard_mnemonic": "W",
+                    "aria_label": "Grams of powder per single sachet",
+                },
+                {
+                    "field_name": "sachets_per_pack",
+                    "tab_index": 6,
+                    "label_en": "Sachets per Pack",
+                    "label_bn": "প্যাকে স্যাশের সংখ্যা",
+                    "control_type": "NUMERIC_INPUT",
+                    "is_mandatory": True,
+                    "desktop_grid_width": "HALF",
+                    "keyboard_mnemonic": "S",
+                    "aria_label": "Count of sachets per packaged box",
+                },
+            ]
+        elif dosage_form in ["TABLET_CAPSULE", "TABLET", "CAPSULE"]:
+            return [
+                {
+                    "field_name": "capsule_shell_type",
+                    "tab_index": 5,
+                    "label_en": "Capsule Shell Type",
+                    "label_bn": "ক্যাপসুল খোলসের ধরণ",
+                    "control_type": "SELECT_DROPDOWN",
+                    "is_mandatory": False,
+                    "desktop_grid_width": "HALF",
+                    "keyboard_mnemonic": "H",
+                    "aria_label": "Gelatin or vegetarian capsule shell",
+                },
+                {
+                    "field_name": "is_delayed_release",
+                    "tab_index": 6,
+                    "label_en": "Delayed / Extended Release",
+                    "label_bn": "বিলম্বিত নিঃসরণ ফর্মুলেশন",
+                    "control_type": "CHECKBOX_SWITCH",
+                    "is_mandatory": False,
+                    "desktop_grid_width": "HALF",
+                    "keyboard_mnemonic": "R",
+                    "aria_label": "Enteric coated or delayed release formulation",
+                },
+            ]
         # Default placeholder fields for generic formulation
         return [
             {
@@ -637,10 +757,91 @@ class DynamicFieldGroupService:
             except Exception:
                 pass
 
+        # Pricing bounds check
+        cost = form_values.get("cost_unit")
+        mrp = form_values.get("mrp_unit")
+        if cost is not None or mrp is not None:
+            try:
+                if cost is not None and Decimal(str(cost)) < 0:
+                    inline_errors.append({
+                        "group_code": FieldGroupCode.FINANCIAL_PRICING.value,
+                        "field_name": "cost_unit",
+                        "error_code": "ERR_NEGATIVE_COST",
+                        "message_en": "Unit cost price cannot be negative.",
+                        "message_bn": "ক্রয়মূল্য ঋণাত্মক হতে পারে না।",
+                        "tab_index": 40,
+                    })
+                if mrp is not None:
+                    mrp_dec = Decimal(str(mrp))
+                    if mrp_dec <= 0:
+                        inline_errors.append({
+                            "group_code": FieldGroupCode.FINANCIAL_PRICING.value,
+                            "field_name": "mrp_unit",
+                            "error_code": "ERR_INVALID_MRP",
+                            "message_en": "Maximum Retail Price must be strictly positive.",
+                            "message_bn": "সর্বোচ্চ খুচরা মূল্য অবশ্যই ধনাত্মক হতে হবে।",
+                            "tab_index": 41,
+                        })
+                    elif cost is not None and Decimal(str(cost)) > mrp_dec:
+                        inline_errors.append({
+                            "group_code": FieldGroupCode.FINANCIAL_PRICING.value,
+                            "field_name": "mrp_unit",
+                            "error_code": "ERR_MRP_BELOW_COST",
+                            "message_en": f"MRP ({mrp_dec}) cannot be less than purchase cost ({Decimal(str(cost))}).",
+                            "message_bn": f"খুচরা বিক্রয়মূল্য ({mrp_dec}) অবশ্যই ক্রয়মূল্যের ({Decimal(str(cost))}) চেয়ে কম হতে পারে না।",
+                            "tab_index": 41,
+                        })
+            except Exception:
+                pass
+
         return {
             "is_valid": len(inline_errors) == 0,
             "error_count": len(inline_errors),
             "inline_errors": inline_errors,
+        }
+
+    @classmethod
+    def switch_dosage_form(
+        cls,
+        user: PharmacyUser,
+        previous_form: str,
+        new_form: str,
+        current_values: Dict[str, Any],
+        retained_cache: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Switches dosage form family while preserving common monograph attributes
+        and restoring previously entered formulation parameters from cache.
+        """
+        cls.check_permissions(user, required_action="read")
+        tenant: Optional[Tenant] = cls._resolve_tenant(user)
+        cache: Dict[str, Dict[str, Any]] = dict(retained_cache or {})
+        curr_vals: Dict[str, Any] = dict(current_values or {})
+
+        # 1. Extract common fields
+        common_vals = {k: v for k, v in curr_vals.items() if k in cls.COMMON_MONOGRAPH_FIELDS}
+
+        # 2. Extract form-specific fields for previous_form and store in cache
+        if previous_form:
+            prev_specific = {k: v for k, v in curr_vals.items() if k not in cls.COMMON_MONOGRAPH_FIELDS}
+            cache[previous_form] = prev_specific
+
+        # 3. Assemble new form values: common fields + restored form-specific fields
+        new_vals = dict(common_vals)
+        if new_form in cache:
+            new_vals.update(cache[new_form])
+
+        # 4. Resolve layout for new dosage form
+        new_layout = cls.resolve_layout(user, dosage_form_family=new_form, form_values=new_vals)
+
+        return {
+            "previous_dosage_form": previous_form,
+            "new_dosage_form": new_form,
+            "tenant_id": getattr(tenant, "tenant_id", None),
+            "form_values": new_vals,
+            "retained_form_cache": cache,
+            "layout": new_layout,
+            "preserved_common_field_count": len(common_vals),
         }
 
     @classmethod
