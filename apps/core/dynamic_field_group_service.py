@@ -828,6 +828,7 @@ class DynamicFieldGroupService:
 
         # 3. Assemble new form values: common fields + restored form-specific fields
         new_vals = dict(common_vals)
+        new_vals["dosage_form"] = new_form
         if new_form in cache:
             new_vals.update(cache[new_form])
 
