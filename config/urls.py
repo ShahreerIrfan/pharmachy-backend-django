@@ -34,6 +34,7 @@ from apps.core.cashier_register_views import CashierRegisterAssignmentViewSet
 from apps.core.catalogue_contract_views import CatalogueContractSuiteViewSet
 from apps.core.catalogue_recall_views import CatalogueLifecycleNoticeViewSet
 from apps.core.classification_snapshot_views import MedicineClassificationSnapshotViewSet
+from apps.core.conditional_pricing_views import ConditionalPricingViewSet
 from apps.core.cross_tenant_metrics_views import (
     PlatformCrossTenantMetricsViewSet,
     TenantPlatformBenchmarksViewSet,
@@ -42,27 +43,24 @@ from apps.core.custom_role_views import (
     CustomRoleViewSet,
     PermissionCatalogViewSet,
 )
+from apps.core.device_consumable_views import DeviceConsumableEditorViewSet
 from apps.core.device_registration_views import LoginDeviceRegistrationViewSet
 from apps.core.device_seat_views import DeviceSeatViewSet
 from apps.core.dosage_form_views import DosageFormViewSet
 from apps.core.downgrade_views import SubscriptionDowngradeViewSet
+from apps.core.drops_views import DropsEditorViewSet
 from apps.core.dunning_views import DunningNotificationViewSet
+from apps.core.dynamic_field_group_views import DynamicFieldGroupLayoutViewSet
 from apps.core.feature_flag_views import (
     PlatformFeatureFlagViewSet,
     TenantFeatureFlagEvaluationViewSet,
 )
 from apps.core.field_visibility_views import FieldVisibilityViewSet
-from apps.core.drops_views import DropsEditorViewSet
-from apps.core.inhaler_views import InhalerEditorViewSet
-from apps.core.topical_views import TopicalEditorViewSet
-from apps.core.sachet_views import SachetEditorViewSet
-from apps.core.suppository_views import SuppositoryEditorViewSet
-from apps.core.device_consumable_views import DeviceConsumableEditorViewSet
-from apps.core.dynamic_field_group_views import DynamicFieldGroupLayoutViewSet
 from apps.core.form_template_migration_views import FormTemplateMigrationViewSet
 from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.granular_permission_views import GranularPermissionViewSet
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
+from apps.core.inhaler_views import InhalerEditorViewSet
 from apps.core.injection_vial_views import InjectionVialEditorViewSet
 from apps.core.insulin_views import InsulinEditorViewSet
 from apps.core.manual_payment_views import ManualPaymentClaimViewSet
@@ -90,6 +88,7 @@ from apps.core.quota_counter_views import TenantQuotaUsageViewSet
 from apps.core.regulatory_source_views import RegulatorySourceAttachmentViewSet
 from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
 from apps.core.role_migration_views import RoleMigrationGrantsViewSet
+from apps.core.sachet_views import SachetEditorViewSet
 from apps.core.shift_views import StaffShiftScheduleViewSet
 from apps.core.staff_lifecycle_views import StaffLifecycleViewSet
 from apps.core.staff_membership_views import (
@@ -110,6 +109,7 @@ from apps.core.support_ticket_views import (
     PlatformSupportTicketViewSet,
     TenantSupportTicketViewSet,
 )
+from apps.core.suppository_views import SuppositoryEditorViewSet
 from apps.core.suspension_reconstitution_views import SuspensionReconstitutionEditorViewSet
 from apps.core.syrup_liquid_views import SyrupLiquidEditorViewSet
 from apps.core.tablet_capsule_views import TabletCapsuleEditorViewSet
@@ -122,6 +122,7 @@ from apps.core.tenant_export_views import (
     TenantDataExportViewSet,
 )
 from apps.core.tenant_medicine_config_views import TenantMedicineConfigViewSet
+from apps.core.topical_views import TopicalEditorViewSet
 from apps.core.trial_policy_views import TrialPolicyViewSet
 from apps.core.views import (
     ApiResponseConventionViewSet,
@@ -210,6 +211,7 @@ router.register("catalog/sachets", SachetEditorViewSet, basename="catalog-sachet
 router.register("catalog/suppositories", SuppositoryEditorViewSet, basename="catalog-suppositories")
 router.register("catalog/devices", DeviceConsumableEditorViewSet, basename="catalog-devices")
 router.register("catalog/layout/groups", DynamicFieldGroupLayoutViewSet, basename="catalog-layout-groups")
+router.register("catalog/conditional-pricing", ConditionalPricingViewSet, basename="catalog-conditional-pricing")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

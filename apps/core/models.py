@@ -7418,6 +7418,178 @@ class DynamicFieldGroupLayout(models.Model):
         return f"[{self.display_order}] {self.group_code} ({self.dosage_form_family}) - {self.title_en} ({t_scope})"
 
 
+class BaseDispensingUnit(models.TextChoices):
+    PIECE = "PIECE", "Single Piece / Unit"
+    TABLET = "TABLET", "Tablet"
+    CAPSULE = "CAPSULE", "Capsule"
+    VIAL = "VIAL", "Vial"
+    AMPOULE = "AMPOULE", "Ampoule"
+    BOTTLE = "BOTTLE", "Bottle"
+    DEVICE = "DEVICE", "Device"
+    SACHET = "SACHET", "Sachet"
+    SUPPOSITORY = "SUPPOSITORY", "Suppository"
+
+
+class ConditionalPricingConfig(models.Model):
+    """
+    Unit-Aware Multi-Tier Conditional Pricing Configuration.
+    Architecture Decision: ADR-0153 (P153).
+    Maintains strict zero-loss Decimal conversions across packs, strips, and base single pieces.
+    """
+
+    pricing_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="conditional_pricing_configs",
+        help_text="Target medicine or retail product",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="conditional_pricing_configs",
+        help_text="Tenant context. Null indicates platform master pricing guideline.",
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="conditional_pricing_configs",
+        help_text="Optional branch-specific pricing override.",
+    )
+    base_dispensing_unit = models.CharField(
+        max_length=32,
+        choices=BaseDispensingUnit.choices,
+        default=BaseDispensingUnit.PIECE,
+    )
+    pack_to_strip_multiplier = models.PositiveIntegerField(
+        default=1,
+        help_text="Number of intermediate strips in one pack box",
+    )
+    strip_to_piece_multiplier = models.PositiveIntegerField(
+        default=1,
+        help_text="Number of individual units in one strip",
+    )
+    total_base_units_per_pack = models.PositiveIntegerField(
+        default=1,
+        help_text="Total base units per outer pack box (must equal pack_to_strip * strip_to_piece)",
+    )
+    cost_per_piece_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("1.0000"),
+        help_text="Base purchase cost per individual unit in BDT",
+    )
+    mrp_per_piece_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("1.2000"),
+        help_text="Maximum retail price per individual unit in BDT",
+    )
+    strip_cost_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("10.0000"),
+        help_text="Derived or specified purchase cost per strip in BDT",
+    )
+    strip_mrp_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("12.0000"),
+        help_text="Derived or specified maximum retail price per strip in BDT",
+    )
+    pack_cost_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("100.0000"),
+        help_text="Purchase cost for outer pack box in BDT",
+    )
+    pack_mrp_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("120.0000"),
+        help_text="Maximum retail price for outer pack box in BDT",
+    )
+    allow_strip_sale = models.BooleanField(
+        default=True,
+        help_text="Whether intermediate strips can be sold separately",
+    )
+    allow_piece_sale = models.BooleanField(
+        default=True,
+        help_text="Whether individual loose pieces can be dispensed separately",
+    )
+    vat_rate_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Standard Bangladesh VAT rate percentage applied at checkout",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Conditional Pricing Config"
+        verbose_name_plural = "Conditional Pricing Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant", "branch"],
+                name="unique_pricing_product_tenant_branch",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(cost_per_piece_bdt__gt=0),
+                name="check_pricing_cost_per_piece_gt_zero",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(mrp_per_piece_bdt__gt=0),
+                name="check_pricing_mrp_per_piece_gt_zero",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(total_base_units_per_pack__gt=0),
+                name="check_pricing_total_base_units_gt_zero",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "base_dispensing_unit", "is_active"]),
+            models.Index(fields=["product", "tenant"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.cost_per_piece_bdt <= Decimal("0"):
+            raise ValidationError("cost_per_piece_bdt must be greater than 0.")
+        if self.mrp_per_piece_bdt <= Decimal("0"):
+            raise ValidationError("mrp_per_piece_bdt must be greater than 0.")
+        if self.pack_to_strip_multiplier < 1:
+            raise ValidationError("pack_to_strip_multiplier must be at least 1.")
+        if self.strip_to_piece_multiplier < 1:
+            raise ValidationError("strip_to_piece_multiplier must be at least 1.")
+
+        expected_total = self.pack_to_strip_multiplier * self.strip_to_piece_multiplier
+        if self.total_base_units_per_pack != expected_total:
+            raise ValidationError(
+                f"Dimension mismatch: total_base_units_per_pack ({self.total_base_units_per_pack}) must equal "
+                f"pack_to_strip ({self.pack_to_strip_multiplier}) * strip_to_piece ({self.strip_to_piece_multiplier}) = {expected_total}."
+            )
+
+        if not self.allow_strip_sale and not self.allow_piece_sale:
+            if self.total_base_units_per_pack > 1:
+                raise ValidationError("Multi-unit pack must permit either strip sale or loose piece sale.")
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} Pricing - Pack: BDT {self.pack_mrp_bdt}, Strip: BDT {self.strip_mrp_bdt}, Piece: BDT {self.mrp_per_piece_bdt} ({t_scope})"
+
+
+
 
 
 
