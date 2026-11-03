@@ -46,6 +46,7 @@ from apps.core.custom_role_views import (
 from apps.core.device_consumable_views import DeviceConsumableEditorViewSet
 from apps.core.device_registration_views import LoginDeviceRegistrationViewSet
 from apps.core.device_seat_views import DeviceSeatViewSet
+from apps.core.dosage_form_qa_views import DosageFormQaViewSet
 from apps.core.dosage_form_views import DosageFormViewSet
 from apps.core.downgrade_views import SubscriptionDowngradeViewSet
 from apps.core.drops_views import DropsEditorViewSet
@@ -220,6 +221,7 @@ router.register("catalog/stock-entry", RegulatedStockEntryViewSet, basename="cat
 router.register("catalog/storage-conditions", StorageConditionalViewSet, basename="catalog-storage-conditions")
 router.register("catalog/local-inventory", LocalInventoryViewSet, basename="catalog-local-inventory")
 router.register("catalog/flexible-payloads", FlexibleMedicinePayloadViewSet, basename="catalog-flexible-payloads")
+router.register("catalog/qa-fixtures", DosageFormQaViewSet, basename="catalog-qa-fixtures")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
