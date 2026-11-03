@@ -85,6 +85,7 @@ from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.product_metadata_review_views import ProductMetadataReviewViewSet
 from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
+from apps.core.regulated_stock_entry_views import RegulatedStockEntryViewSet
 from apps.core.regulatory_source_views import RegulatorySourceAttachmentViewSet
 from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
 from apps.core.role_migration_views import RoleMigrationGrantsViewSet
@@ -212,6 +213,7 @@ router.register("catalog/suppositories", SuppositoryEditorViewSet, basename="cat
 router.register("catalog/devices", DeviceConsumableEditorViewSet, basename="catalog-devices")
 router.register("catalog/layout/groups", DynamicFieldGroupLayoutViewSet, basename="catalog-layout-groups")
 router.register("catalog/conditional-pricing", ConditionalPricingViewSet, basename="catalog-conditional-pricing")
+router.register("catalog/stock-entry", RegulatedStockEntryViewSet, basename="catalog-stock-entry")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

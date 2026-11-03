@@ -35,6 +35,15 @@ class BatchStatus(models.TextChoices):
     QUARANTINED = "QUARANTINED", "Quarantined"
 
 
+class StorageCondition(models.TextChoices):
+    ROOM_TEMPERATURE = "ROOM_TEMPERATURE_15_25C", "Room Temperature (15°C - 25°C)"
+    COOL = "COOL_8_15C", "Cool Storage (8°C - 15°C)"
+    COLD_CHAIN = "COLD_CHAIN_2_8C", "Cold Chain (2°C - 8°C)"
+    FREEZER = "FREEZER_MINUS_20C", "Freezer (-20°C)"
+    DO_NOT_FREEZE = "DO_NOT_FREEZE", "Do Not Freeze"
+    PROTECT_FROM_LIGHT = "PROTECT_FROM_LIGHT", "Protect From Direct Light"
+
+
 class InvoiceStatus(models.TextChoices):
     DRAFT = "DRAFT", "Draft"
     FINALIZED = "FINALIZED", "Finalized"
@@ -651,6 +660,16 @@ class BatchStock(models.Model):
         validators=[MinValueValidator(Decimal("0.00"))],
     )
     status = models.CharField(max_length=32, choices=BatchStatus.choices, default=BatchStatus.ACTIVE)
+    manufacturing_date = models.DateField(null=True, blank=True, db_index=True)
+    lot_reference = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    storage_condition = models.CharField(
+        max_length=64,
+        choices=StorageCondition.choices,
+        default=StorageCondition.ROOM_TEMPERATURE,
+    )
+    quarantine_lead_days = models.PositiveIntegerField(default=30)
+    is_quarantined = models.BooleanField(default=False)
+    reconstitution_shelf_life_days = models.PositiveIntegerField(null=True, blank=True)
 
     class Meta:
         ordering = ["expiry_date", "batch_number"]
@@ -663,6 +682,67 @@ class BatchStock(models.Model):
 
     def __str__(self) -> str:
         return f"Batch {self.batch_number} - {self.product.brand_name} (Qty: {self.quantity_base_units}, Exp: {self.expiry_date})"
+
+    @property
+    def is_expired(self) -> bool:
+        from django.utils import timezone
+
+        return self.expiry_date < timezone.now().date()
+
+
+class RegulatedStockEntry(models.Model):
+    """
+    Architecture Decision: ADR-0154 (P154).
+    Regulated stock intake record capturing manufacturing date,
+    expiration date, lot reference, and storage policy per DGDA rules.
+    """
+
+    entry_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="regulated_stock_entries")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="regulated_stock_entries")
+    product = models.ForeignKey(MedicineProduct, on_delete=models.CASCADE, related_name="regulated_stock_entries")
+    batch = models.ForeignKey(BatchStock, on_delete=models.SET_NULL, null=True, blank=True, related_name="regulated_entries")
+    lot_reference = models.CharField(max_length=64, db_index=True)
+    manufacturing_date = models.DateField(db_index=True)
+    expiry_date = models.DateField(db_index=True)
+    quantity_received = models.PositiveIntegerField(default=1)
+    unit_cost_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0001"))],
+    )
+    storage_condition = models.CharField(
+        max_length=64,
+        choices=StorageCondition.choices,
+        default=StorageCondition.ROOM_TEMPERATURE,
+    )
+    quarantine_lead_days = models.PositiveIntegerField(default=30)
+    is_quarantined = models.BooleanField(default=False)
+    reconstitution_shelf_life_days = models.PositiveIntegerField(null=True, blank=True)
+    supplier_reference = models.CharField(max_length=128, blank=True, default="")
+    entry_notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "expiry_date"]),
+            models.Index(fields=["product", "lot_reference"]),
+            models.Index(fields=["tenant", "is_quarantined"]),
+        ]
+        verbose_name = "Regulated Stock Entry"
+        verbose_name_plural = "Regulated Stock Entries"
+
+    def __str__(self) -> str:
+        return f"StockEntry {self.entry_id} - Lot: {self.lot_reference} ({self.product.brand_name})"
+
+    @property
+    def shelf_life_days(self) -> int:
+        if self.expiry_date and self.manufacturing_date:
+            return (self.expiry_date - self.manufacturing_date).days
+        return 0
 
     @property
     def is_expired(self) -> bool:

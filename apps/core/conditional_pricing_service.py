@@ -480,3 +480,4 @@ class ConditionalPricingService:
             "SUPPOSITORY": "সাপোজিটরি",
         }
         return translations.get(code, code)
+
