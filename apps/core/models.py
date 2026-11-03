@@ -7783,3 +7783,114 @@ class StorageConditionalConfig(models.Model):
 
 
 
+
+
+class LocalInventoryConfig(models.Model):
+    """
+    Architecture Decision: ADR-0156 (P156).
+    Tenant and branch-scoped inventory configuration: local SKU, custom selling price,
+    reorder alert threshold, physical store shelf coordinates, and branch visibility.
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="local_inventory_configs",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="local_inventory_configs",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="local_inventory_configs",
+        db_index=True,
+    )
+    local_sku = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Store or branch specific barcode / SKU.",
+    )
+    local_selling_price_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(Decimal("0.01"))],
+        help_text="Custom local retail selling price in BDT. Falls back to product mrp_unit if null.",
+    )
+    reorder_level = models.PositiveIntegerField(
+        default=10,
+        help_text="Threshold quantity below which low-stock reorder alert triggers.",
+    )
+    shelf_location = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="Physical store location coordinates (e.g. Rack-B / Shelf-2 / Bin-04).",
+    )
+    is_visible = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Visibility toggle for cashier POS search and inventory display.",
+    )
+    min_order_quantity = models.PositiveIntegerField(
+        default=1,
+        help_text="Suggested minimum order replenishment quantity.",
+    )
+    max_capacity_units = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Maximum storage capacity of the assigned shelf/bin.",
+    )
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Local Inventory Configuration"
+        verbose_name_plural = "Local Inventory Configurations"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "product"],
+                name="unique_local_inventory_config",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(local_selling_price_bdt__isnull=True)
+                | models.Q(local_selling_price_bdt__gte=Decimal("0.01")),
+                name="check_positive_local_selling_price",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "is_visible"]),
+            models.Index(fields=["tenant", "local_sku"]),
+            models.Index(fields=["tenant", "product"]),
+        ]
+
+    def __str__(self) -> str:
+        b_name = self.branch.name if self.branch else "All Branches"
+        return f"{self.product.brand_name} [{self.tenant.name} - {b_name}] Loc: {self.shelf_location or 'N/A'}"
+
+    def clean(self):
+        super().clean()
+        if self.local_selling_price_bdt is not None and self.local_selling_price_bdt < Decimal("0.01"):
+            raise ValidationError({"local_selling_price_bdt": "Local selling price must be at least 0.01 BDT."})
+        if self.max_capacity_units is not None and self.max_capacity_units < self.min_order_quantity:
+            raise ValidationError({
+                "max_capacity_units": f"max_capacity_units ({self.max_capacity_units}) cannot be less than min_order_quantity ({self.min_order_quantity})."
+            })
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)

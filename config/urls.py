@@ -63,6 +63,7 @@ from apps.core.health import legacy_health_check, liveness_probe, readiness_prob
 from apps.core.inhaler_views import InhalerEditorViewSet
 from apps.core.injection_vial_views import InjectionVialEditorViewSet
 from apps.core.insulin_views import InsulinEditorViewSet
+from apps.core.local_inventory_views import LocalInventoryViewSet
 from apps.core.manual_payment_views import ManualPaymentClaimViewSet
 from apps.core.manufacturer_supplier_views import ManufacturerViewSet, SupplierViewSet
 from apps.core.medicine_details_preview_views import MedicineDetailsPreviewViewSet
@@ -216,6 +217,7 @@ router.register("catalog/layout/groups", DynamicFieldGroupLayoutViewSet, basenam
 router.register("catalog/conditional-pricing", ConditionalPricingViewSet, basename="catalog-conditional-pricing")
 router.register("catalog/stock-entry", RegulatedStockEntryViewSet, basename="catalog-stock-entry")
 router.register("catalog/storage-conditions", StorageConditionalViewSet, basename="catalog-storage-conditions")
+router.register("catalog/local-inventory", LocalInventoryViewSet, basename="catalog-local-inventory")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
