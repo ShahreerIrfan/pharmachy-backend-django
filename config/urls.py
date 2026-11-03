@@ -56,6 +56,7 @@ from apps.core.feature_flag_views import (
     TenantFeatureFlagEvaluationViewSet,
 )
 from apps.core.field_visibility_views import FieldVisibilityViewSet
+from apps.core.flexible_medicine_payload_views import FlexibleMedicinePayloadViewSet
 from apps.core.form_template_migration_views import FormTemplateMigrationViewSet
 from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.granular_permission_views import GranularPermissionViewSet
@@ -218,6 +219,7 @@ router.register("catalog/conditional-pricing", ConditionalPricingViewSet, basena
 router.register("catalog/stock-entry", RegulatedStockEntryViewSet, basename="catalog-stock-entry")
 router.register("catalog/storage-conditions", StorageConditionalViewSet, basename="catalog-storage-conditions")
 router.register("catalog/local-inventory", LocalInventoryViewSet, basename="catalog-local-inventory")
+router.register("catalog/flexible-payloads", FlexibleMedicinePayloadViewSet, basename="catalog-flexible-payloads")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
