@@ -31,6 +31,7 @@ from apps.core.branch_operating_settings_views import BranchOperatingSettingsVie
 from apps.core.bulk_import_views import MedicineBulkImportViewSet
 from apps.core.cancellation_grace_views import SubscriptionLifecycleViewSet
 from apps.core.cashier_register_views import CashierRegisterAssignmentViewSet
+from apps.core.catalogue_contract_views import CatalogueContractSuiteViewSet
 from apps.core.catalogue_recall_views import CatalogueLifecycleNoticeViewSet
 from apps.core.classification_snapshot_views import MedicineClassificationSnapshotViewSet
 from apps.core.cross_tenant_metrics_views import (
@@ -51,11 +52,21 @@ from apps.core.feature_flag_views import (
     TenantFeatureFlagEvaluationViewSet,
 )
 from apps.core.field_visibility_views import FieldVisibilityViewSet
+from apps.core.drops_views import DropsEditorViewSet
+from apps.core.inhaler_views import InhalerEditorViewSet
+from apps.core.topical_views import TopicalEditorViewSet
+from apps.core.sachet_views import SachetEditorViewSet
+from apps.core.suppository_views import SuppositoryEditorViewSet
+from apps.core.device_consumable_views import DeviceConsumableEditorViewSet
+from apps.core.form_template_migration_views import FormTemplateMigrationViewSet
 from apps.core.gateway_views import PaymentGatewayViewSet
 from apps.core.granular_permission_views import GranularPermissionViewSet
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
+from apps.core.injection_vial_views import InjectionVialEditorViewSet
+from apps.core.insulin_views import InsulinEditorViewSet
 from apps.core.manual_payment_views import ManualPaymentClaimViewSet
 from apps.core.manufacturer_supplier_views import ManufacturerViewSet, SupplierViewSet
+from apps.core.medicine_details_preview_views import MedicineDetailsPreviewViewSet
 from apps.core.medicine_editor_schema_views import MedicineEditorSchemaViewSet
 from apps.core.medicine_form_template_views import MedicineFormTemplateViewSet
 from apps.core.medicine_search_views import MedicineSearchAutocompleteViewSet
@@ -98,6 +109,9 @@ from apps.core.support_ticket_views import (
     PlatformSupportTicketViewSet,
     TenantSupportTicketViewSet,
 )
+from apps.core.suspension_reconstitution_views import SuspensionReconstitutionEditorViewSet
+from apps.core.syrup_liquid_views import SyrupLiquidEditorViewSet
+from apps.core.tablet_capsule_views import TabletCapsuleEditorViewSet
 from apps.core.tenant_deletion_views import (
     PlatformDeletionAssessmentViewSet,
     TenantDeletionRequestViewSet,
@@ -180,6 +194,20 @@ router.register("catalog/regulatory-sources", RegulatorySourceAttachmentViewSet,
 router.register("catalog/retail-items", NonMedicineRetailItemViewSet, basename="catalog-retail-items")
 router.register("catalog/barcodes", BarcodeAlternateIdentifierViewSet, basename="catalog-barcodes")
 router.register("catalog/recalls", CatalogueLifecycleNoticeViewSet, basename="catalog-recalls")
+router.register("catalog/medicine-previews", MedicineDetailsPreviewViewSet, basename="catalog-medicine-previews")
+router.register("catalog/template-migrations", FormTemplateMigrationViewSet, basename="catalog-template-migrations")
+router.register("catalog/contracts", CatalogueContractSuiteViewSet, basename="catalog-contracts")
+router.register("catalog/tablet-capsule", TabletCapsuleEditorViewSet, basename="catalog-tablet-capsule")
+router.register("catalog/syrup-liquid", SyrupLiquidEditorViewSet, basename="catalog-syrup-liquid")
+router.register("catalog/suspension-reconstitution", SuspensionReconstitutionEditorViewSet, basename="catalog-suspension-reconstitution")
+router.register("catalog/injection-vials", InjectionVialEditorViewSet, basename="catalog-injection-vials")
+router.register("catalog/insulin", InsulinEditorViewSet, basename="catalog-insulin")
+router.register("catalog/drops", DropsEditorViewSet, basename="catalog-drops")
+router.register("catalog/inhaler", InhalerEditorViewSet, basename="catalog-inhaler")
+router.register("catalog/topical", TopicalEditorViewSet, basename="catalog-topical")
+router.register("catalog/sachets", SachetEditorViewSet, basename="catalog-sachets")
+router.register("catalog/suppositories", SuppositoryEditorViewSet, basename="catalog-suppositories")
+router.register("catalog/devices", DeviceConsumableEditorViewSet, basename="catalog-devices")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

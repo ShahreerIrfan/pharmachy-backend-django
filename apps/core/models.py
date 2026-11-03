@@ -13,8 +13,11 @@ Normalized Core Domain Models for Bangladesh Pharmacy ERP & POS SaaS:
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
+import uuid
 
+from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
@@ -4779,7 +4782,11 @@ class RegulatorySourceAttachment(models.Model):
     def compute_source_hash(self) -> str:
         import hashlib
 
-        eff_str = self.effective_date.isoformat() if self.effective_date else ""
+        eff_str = (
+            self.effective_date.isoformat()
+            if hasattr(self.effective_date, "isoformat")
+            else str(self.effective_date or "")
+        )
         raw = (
             f"{self.product_id}|{self.document_reference_number}|{self.version_number}|"
             f"{self.source_type}|{self.rule_target}|{eff_str}"
@@ -5182,7 +5189,11 @@ class CatalogueLifecycleNotice(models.Model):
     def compute_hash(self) -> str:
         import hashlib
 
-        eff_str = self.effective_date.isoformat() if self.effective_date else ""
+        eff_str = (
+            self.effective_date.isoformat()
+            if hasattr(self.effective_date, "isoformat")
+            else str(self.effective_date or "")
+        )
         batches_str = ",".join(sorted([str(b) for b in (self.affected_batch_numbers or [])]))
         raw = (
             f"{self.notice_id}|{self.tenant_id_str}|{self.target_entity_type}|"
@@ -5208,6 +5219,2095 @@ class CatalogueLifecycleNotice(models.Model):
 
     def __str__(self) -> str:
         return f"[{self.lifecycle_status}] {self.notice_number} ({self.regulatory_authority})"
+
+
+class MigrationStrategy(models.TextChoices):
+    STRICT = "STRICT", "Strict Schema Match"
+    COERCE_SAFE = "COERCE_SAFE", "Safe Type Coercion and Default Injection"
+    DRY_RUN_ONLY = "DRY_RUN_ONLY", "Dry Run Only (No DB Writes)"
+
+
+class MigrationPlanStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft Plan"
+    VALIDATED = "VALIDATED", "Dry Run Validated"
+    EXECUTING = "EXECUTING", "Migration Executing"
+    COMPLETED = "COMPLETED", "Migration Completed"
+    ROLLED_BACK = "ROLLED_BACK", "Migration Rolled Back"
+    FAILED = "FAILED", "Migration Failed"
+
+
+class FormTemplateMigrationPlan(models.Model):
+    """
+    Architecture Decision: ADR-0139 (P139).
+    Form Template Migration Plan for evolving dosage form templates safely,
+    providing declarative field transformations, non-destructive dry-run validation,
+    100% reversible rollbacks, and strictly preserving immutable historical dispensing records.
+    """
+
+    plan_id = models.CharField(max_length=64, primary_key=True)
+    plan_name = models.CharField(max_length=255)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="form_template_migration_plans",
+        help_text="Null denotes platform-wide global catalog migration; populated for tenant-scoped plans.",
+    )
+    from_template = models.ForeignKey(
+        "core.MedicineFormTemplate",
+        on_delete=models.PROTECT,
+        related_name="source_migration_plans",
+        help_text="Source dosage-form template.",
+    )
+    to_template = models.ForeignKey(
+        "core.MedicineFormTemplate",
+        on_delete=models.PROTECT,
+        related_name="target_migration_plans",
+        help_text="Target dosage-form template.",
+    )
+    strategy = models.CharField(
+        max_length=32,
+        choices=MigrationStrategy.choices,
+        default=MigrationStrategy.COERCE_SAFE,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=MigrationPlanStatus.choices,
+        default=MigrationPlanStatus.DRAFT,
+        db_index=True,
+    )
+    field_mappings = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Declarative mappings: field_renames, default_values, value_transforms, deprecated_fields.",
+    )
+    dry_run_summary = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Dry-run audit summary: affected medicine count, validation warnings, and preview diff.",
+    )
+    affected_medicine_count = models.PositiveIntegerField(default=0)
+    migrated_medicine_count = models.PositiveIntegerField(default=0)
+    historical_dispensing_audited_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Count of historical SaleInvoiceItem and PrescriptionItem records verified immutable.",
+    )
+    rollback_snapshot_payload = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Frozen before-state snapshot of updated medicine products for deterministic rollback.",
+    )
+    plan_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Cryptographic SHA-256 hash ensuring plan integrity and audit provenance.",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_form_template_plans",
+    )
+    executed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="executed_form_template_plans",
+    )
+    executed_at = models.DateTimeField(null=True, blank=True)
+    rolled_back_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Form Template Migration Plan"
+        verbose_name_plural = "Form Template Migration Plans"
+        indexes = [
+            models.Index(fields=["tenant", "status", "-created_at"]),
+            models.Index(fields=["from_template", "to_template"]),
+            models.Index(fields=["status", "is_active"]),
+        ]
+
+    def compute_plan_hash(self) -> str:
+        import hashlib
+        import json
+
+        mappings_str = json.dumps(self.field_mappings or {}, sort_keys=True)
+        tenant_str = str(self.tenant_id or "platform")
+        from_id = str(self.from_template_id or "")
+        to_id = str(self.to_template_id or "")
+        raw = f"{self.plan_id}|{tenant_str}|{from_id}|{to_id}|{self.strategy}|{mappings_str}|{self.status}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if not self.from_template_id or not self.to_template_id:
+            raise ValidationError("Both from_template and to_template must be specified.")
+        if self.from_template_id == self.to_template_id:
+            raise ValidationError("Target template cannot be identical to source template.")
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        if not self.plan_hash or "update_fields" not in kwargs:
+            self.plan_hash = self.compute_plan_hash()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"[{self.status}] {self.plan_name} ({t_scope}) - {self.from_template_id} -> {self.to_template_id}"
+
+
+# ============================================================================
+# P141: Tablet & Capsule Dosage-Form Editor Specification
+# Architecture Decision: ADR-0141 (Phase 08: Milestone M04 / M05 transition)
+# ============================================================================
+
+
+class SolidDosageFormType(models.TextChoices):
+    TABLET = "TABLET", "Standard Tablet"
+    CAPSULE = "CAPSULE", "Capsule"
+    CHEWABLE_TABLET = "CHEWABLE_TABLET", "Chewable Tablet"
+    EFFERVESCENT_TABLET = "EFFERVESCENT_TABLET", "Effervescent Tablet"
+    EXTENDED_RELEASE_TABLET = "EXTENDED_RELEASE_TABLET", "Extended Release Tablet"
+    EXTENDED_RELEASE_CAPSULE = "EXTENDED_RELEASE_CAPSULE", "Extended Release Capsule"
+    SUBLINGUAL_TABLET = "SUBLINGUAL_TABLET", "Sublingual Tablet"
+
+
+class SolidStrengthUnit(models.TextChoices):
+    MG = "mg", "Milligram (mg)"
+    MCG = "mcg", "Microgram (mcg)"
+    G = "g", "Gram (g)"
+
+
+class TabletRoute(models.TextChoices):
+    ORAL = "Oral", "Oral"
+    SUBLINGUAL = "Sublingual", "Sublingual"
+    BUCCAL = "Buccal", "Buccal"
+    CHEWABLE = "Chewable", "Chewable"
+    DISPERSIBLE = "Dispersible", "Dispersible"
+    EFFERVESCENT = "Effervescent", "Effervescent"
+
+
+class SolidStoragePolicy(models.TextChoices):
+    ROOM_TEMPERATURE_DRY = "ROOM_TEMPERATURE_DRY", "Room Temperature & Dry (<30°C)"
+    PROTECT_FROM_MOISTURE_LIGHT = "PROTECT_FROM_MOISTURE_LIGHT", "Protect From Moisture & Light (<25°C)"
+    COOL_AND_DRY = "COOL_AND_DRY", "Cool & Dry (15°C - 25°C)"
+    REFRIGERATED = "REFRIGERATED", "Refrigerated (2°C - 8°C)"
+
+
+class TabletCoatingType(models.TextChoices):
+    FILM_COATED = "FILM_COATED", "Film Coated"
+    ENTERIC_COATED = "ENTERIC_COATED", "Enteric Coated"
+    UNCOATED = "UNCOATED", "Uncoated"
+    SUGAR_COATED = "SUGAR_COATED", "Sugar Coated"
+    GELATIN_COATED = "GELATIN_COATED", "Gelatin Coated"
+
+
+class TabletCapsuleFormConfig(models.Model):
+    """
+    Structured dosage-form configuration for solid oral tablets and capsules.
+    Manages packaging conversion multipliers (box -> strip -> unit), dimension
+    consistency, loose-sale eligibility, and administration routes.
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="tablet_capsule_configs",
+    )
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="tablet_capsule_configs",
+    )
+    dosage_form = models.CharField(
+        max_length=32,
+        choices=SolidDosageFormType.choices,
+        default=SolidDosageFormType.TABLET,
+    )
+    dose_strength = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        help_text="Numeric active ingredient dose strength per unit (e.g. 500.0000 mg)",
+    )
+    strength_unit = models.CharField(
+        max_length=16,
+        choices=SolidStrengthUnit.choices,
+        default=SolidStrengthUnit.MG,
+    )
+    tablets_per_strip = models.PositiveIntegerField(
+        default=10,
+        help_text="Base tablet or capsule units sealed per primary blister/foil strip",
+    )
+    strips_per_box = models.PositiveIntegerField(
+        default=10,
+        help_text="Number of secondary blister/foil strips packed inside master commercial box",
+    )
+    box_size = models.PositiveIntegerField(
+        help_text="Total base units per master commercial box (must equal tablets_per_strip * strips_per_box)",
+    )
+    loose_sale_eligible = models.BooleanField(
+        default=True,
+        help_text="Whether individual tablets/capsules can be cut from strips and sold loose at POS",
+    )
+    route = models.CharField(
+        max_length=32,
+        choices=TabletRoute.choices,
+        default=TabletRoute.ORAL,
+    )
+    storage_policy = models.CharField(
+        max_length=32,
+        choices=SolidStoragePolicy.choices,
+        default=SolidStoragePolicy.ROOM_TEMPERATURE_DRY,
+    )
+    is_scored = models.BooleanField(
+        default=False,
+        help_text="Whether tablet has scored scoreline for splitting halves/quarters",
+    )
+    coating_type = models.CharField(
+        max_length=32,
+        choices=TabletCoatingType.choices,
+        default=TabletCoatingType.FILM_COATED,
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Tablet/Capsule Form Config"
+        verbose_name_plural = "Tablet/Capsule Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_tablet_capsule_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(tablets_per_strip__gte=1),
+                name="check_tablet_units_per_strip_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(strips_per_box__gte=1),
+                name="check_tablet_strips_per_box_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(box_size__gte=1),
+                name="check_tablet_box_size_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(dose_strength__gt=0),
+                name="check_tablet_dose_strength_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "dosage_form", "is_active"]),
+            models.Index(fields=["product", "loose_sale_eligible"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        expected_box_size = self.tablets_per_strip * self.strips_per_box
+        if not self.box_size:
+            self.box_size = expected_box_size
+        elif self.box_size != expected_box_size:
+            raise ValidationError(
+                f"Dimension consistency mismatch: box_size ({self.box_size}) must equal "
+                f"tablets_per_strip ({self.tablets_per_strip}) * strips_per_box ({self.strips_per_box}) = {expected_box_size}."
+            )
+
+        # Loose-sale business rule
+        if self.dosage_form == SolidDosageFormType.EFFERVESCENT_TABLET and self.loose_sale_eligible:
+            raise ValidationError(
+                "Loose sale is not permitted for effervescent tablets due to rapid atmospheric moisture degradation."
+            )
+        if self.storage_policy == SolidStoragePolicy.PROTECT_FROM_MOISTURE_LIGHT and self.loose_sale_eligible and self.dosage_form == SolidDosageFormType.EFFERVESCENT_TABLET:
+            raise ValidationError(
+                "Loose sale is strictly prohibited for moisture-sensitive formulations."
+            )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.dosage_form}) - {self.dose_strength}{self.strength_unit} [{self.box_size}s/{self.strips_per_box}x{self.tablets_per_strip}] ({t_scope})"
+
+
+# ============================================================================
+# P142: Syrup & Liquid Oral Dosage-Form Editor Specification
+# Architecture Decision: ADR-0142 (Phase 08: Milestone M04 / M05)
+# ============================================================================
+
+
+class LiquidDosageFormType(models.TextChoices):
+    SYRUP = "SYRUP", "Syrup"
+    SUSPENSION = "SUSPENSION", "Suspension"
+    ORAL_SOLUTION = "ORAL_SOLUTION", "Oral Solution"
+    ELIXIR = "ELIXIR", "Elixir"
+    ORAL_EMULSION = "ORAL_EMULSION", "Oral Emulsion"
+    ORAL_DROPS = "ORAL_DROPS", "Oral Drops"
+    DRY_SYRUP_RECONSTITUTED = "DRY_SYRUP_RECONSTITUTED", "Dry Syrup / Powder for Suspension"
+
+
+class LiquidConcentrationUnit(models.TextChoices):
+    MG_PER_5ML = "mg/5ml", "mg/5mL"
+    MG_PER_ML = "mg/ml", "mg/mL"
+    PERCENT_W_V = "%", "% (w/v)"
+    G_PER_100ML = "g/100ml", "g/100mL"
+    MCG_PER_5ML = "mcg/5ml", "mcg/5mL"
+    IU_PER_5ML = "iu/5ml", "IU/5mL"
+    MG_PER_10ML = "mg/10ml", "mg/10mL"
+
+
+class LiquidRoute(models.TextChoices):
+    ORAL = "Oral", "Oral"
+    ORAL_GAVAGE = "Oral Gavage", "Oral Gavage"
+    SUBLINGUAL_DROPS = "Sublingual Drops", "Sublingual Drops"
+
+
+class LiquidStoragePolicy(models.TextChoices):
+    ROOM_TEMPERATURE_BELOW_30C = "ROOM_TEMPERATURE_BELOW_30C", "Room Temperature (Below 30°C)"
+    COOL_PLACE_15_25C = "COOL_PLACE_15_25C", "Cool Place (15°C - 25°C)"
+    DO_NOT_FREEZE = "DO_NOT_FREEZE", "Do Not Freeze"
+    REFRIGERATE_AFTER_RECONSTITUTION_2_8C = "REFRIGERATE_AFTER_RECONSTITUTION_2_8C", "Refrigerate After Reconstitution (2°C - 8°C)"
+    PROTECT_FROM_DIRECT_SUNLIGHT = "PROTECT_FROM_DIRECT_SUNLIGHT", "Protect From Direct Sunlight"
+
+
+class LiquidMeasuringDevice(models.TextChoices):
+    MEASURING_CUP = "MEASURING_CUP", "Measuring Cup (5-15 mL)"
+    MEASURING_SPOON = "MEASURING_SPOON", "Measuring Spoon (5 mL)"
+    CALIBRATED_DROPPER = "CALIBRATED_DROPPER", "Calibrated Dropper (0.1 - 1.0 mL)"
+    ORAL_SYRINGE = "ORAL_SYRINGE", "Oral Dosing Syringe"
+    NONE = "NONE", "None / Standard Teaspoon"
+
+
+class LiquidSaleUnit(models.TextChoices):
+    BOTTLE = "Bottle", "Bottle"
+    PACK = "Pack", "Pack"
+    PHIAL = "Phial", "Phial"
+
+
+class SyrupLiquidFormConfig(models.Model):
+    """
+    Structured dosage-form configuration for syrups and oral liquid formulations.
+    Governs concentration dimensions, nominal bottle volume, oral routes,
+    sale units (Bottle/Pack), and reconstitution specifications.
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="syrup_liquid_configs",
+    )
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="syrup_liquid_configs",
+    )
+    dosage_form = models.CharField(
+        max_length=32,
+        choices=LiquidDosageFormType.choices,
+        default=LiquidDosageFormType.SYRUP,
+    )
+    concentration_value = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        help_text="Numeric active concentration value (e.g. 120.0000 mg)",
+    )
+    concentration_unit = models.CharField(
+        max_length=16,
+        choices=LiquidConcentrationUnit.choices,
+        default=LiquidConcentrationUnit.MG_PER_5ML,
+    )
+    bottle_volume_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        help_text="Total nominal bottle volume in milliliters (e.g. 100.00 mL)",
+    )
+    sale_unit = models.CharField(
+        max_length=16,
+        choices=LiquidSaleUnit.choices,
+        default=LiquidSaleUnit.BOTTLE,
+    )
+    route = models.CharField(
+        max_length=32,
+        choices=LiquidRoute.choices,
+        default=LiquidRoute.ORAL,
+    )
+    storage_policy = models.CharField(
+        max_length=48,
+        choices=LiquidStoragePolicy.choices,
+        default=LiquidStoragePolicy.ROOM_TEMPERATURE_BELOW_30C,
+    )
+    measuring_device = models.CharField(
+        max_length=32,
+        choices=LiquidMeasuringDevice.choices,
+        default=LiquidMeasuringDevice.MEASURING_CUP,
+    )
+    is_reconstitution_required = models.BooleanField(
+        default=False,
+        help_text="Whether powder/dry granules require reconstitution with sterile/boiled water before dispensing",
+    )
+    reconstitution_water_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Volume of water in mL required to reconstitute to target mark",
+    )
+    shelf_life_days_after_reconstitution = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Permitted shelf life in days once reconstituted (e.g. 7 or 14 days)",
+    )
+    flavor = models.CharField(max_length=64, blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Syrup/Liquid Form Config"
+        verbose_name_plural = "Syrup/Liquid Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_syrup_liquid_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(concentration_value__gt=0),
+                name="check_syrup_concentration_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(bottle_volume_ml__gt=0),
+                name="check_syrup_volume_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "dosage_form", "is_active"]),
+            models.Index(fields=["product", "sale_unit"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        # 1. Concentration unit validation
+        allowed_units = [u.value for u in LiquidConcentrationUnit]
+        if self.concentration_unit not in allowed_units:
+            raise ValidationError(
+                f"Invalid liquid concentration unit '{self.concentration_unit}'. Allowed: {allowed_units}."
+            )
+
+        # 2. Reconstitution validation
+        if self.is_reconstitution_required or self.dosage_form == LiquidDosageFormType.DRY_SYRUP_RECONSTITUTED:
+            if not self.reconstitution_water_ml or self.reconstitution_water_ml <= Decimal("0"):
+                raise ValidationError(
+                    "Reconstitution water volume in mL is mandatory for dry syrups and powders for suspension."
+                )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.dosage_form}) - {self.concentration_value}{self.concentration_unit} [{self.bottle_volume_ml}mL {self.sale_unit}] ({t_scope})"
+
+
+# ============================================================================
+# P143: Suspension Reconstitution & Beyond-Use Date (BUD) Editor Specification
+# Architecture Decision: ADR-0143 (Phase 08: Milestone M04 / M05)
+# ============================================================================
+
+class ReconstitutionDosageFormType(models.TextChoices):
+    SUSPENSION = "SUSPENSION", "Suspension"
+    DRY_SYRUP_RECONSTITUTED = "DRY_SYRUP_RECONSTITUTED", "Dry Syrup / Powder for Suspension"
+    ORAL_POWDER_SUSPENSION = "ORAL_POWDER_SUSPENSION", "Oral Powder for Suspension"
+
+
+class ReconstitutionDiluentType(models.TextChoices):
+    BOILED_COOLED_WATER = "BOILED_COOLED_WATER", "Boiled and Cooled Water"
+    STERILE_WATER_FOR_INJECTION = "STERILE_WATER_FOR_INJECTION", "Sterile Water for Injection"
+    PURIFIED_DRINKING_WATER = "PURIFIED_DRINKING_WATER", "Purified Drinking Water"
+    NORMAL_SALINE_0_9 = "NORMAL_SALINE_0_9", "Normal Saline (0.9% NaCl)"
+
+
+class ReconstitutionStoragePolicy(models.TextChoices):
+    REFRIGERATE_2_8C_AFTER_RECONSTITUTION = "REFRIGERATE_2_8C_AFTER_RECONSTITUTION", "Refrigerate (2°C - 8°C) After Reconstitution"
+    ROOM_TEMPERATURE_BELOW_25C = "ROOM_TEMPERATURE_BELOW_25C", "Room Temperature (Below 25°C)"
+    COOL_DRY_PLACE_BELOW_30C = "COOL_DRY_PLACE_BELOW_30C", "Cool, Dry Place (Below 30°C)"
+    DO_NOT_FREEZE = "DO_NOT_FREEZE", "Do Not Freeze"
+
+
+class SuspensionReconstitutionConfig(models.Model):
+    """
+    Structured dosage-form configuration for dry powder suspension reconstitution.
+    Governs diluent type, water volume, final reconstituted volume, multi-step instructions,
+    stability shelf life, beyond-use dates (BUD), and licensed pharmacist review.
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="suspension_reconstitution_configs",
+    )
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="suspension_reconstitution_configs",
+    )
+    dosage_form = models.CharField(
+        max_length=32,
+        choices=ReconstitutionDosageFormType.choices,
+        default=ReconstitutionDosageFormType.DRY_SYRUP_RECONSTITUTED,
+    )
+    reconstitution_diluent = models.CharField(
+        max_length=32,
+        choices=ReconstitutionDiluentType.choices,
+        default=ReconstitutionDiluentType.BOILED_COOLED_WATER,
+    )
+    water_volume_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        help_text="Volume of diluent water in mL required for reconstitution",
+    )
+    final_volume_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        help_text="Total final volume in mL of reconstituted suspension",
+    )
+    instructions_en = models.TextField(
+        help_text="Standard English reconstitution and dispensing instructions"
+    )
+    instructions_bn = models.TextField(
+        blank=True,
+        default="",
+        help_text="Standard Bengali reconstitution and dispensing instructions"
+    )
+    shelf_life_days = models.PositiveIntegerField(
+        default=7,
+        help_text="Permitted stability period in days after reconstitution (e.g. 7 or 14 days)",
+    )
+    opening_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Date when water was added / container was opened",
+    )
+    beyond_use_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Calculated or specified beyond-use date after reconstitution",
+    )
+    storage_policy = models.CharField(
+        max_length=48,
+        choices=ReconstitutionStoragePolicy.choices,
+        default=ReconstitutionStoragePolicy.REFRIGERATE_2_8C_AFTER_RECONSTITUTION,
+    )
+    handling_guidance_en = models.TextField(
+        blank=True,
+        default="",
+        help_text="Handling and patient counseling guidance in English",
+    )
+    handling_guidance_bn = models.TextField(
+        blank=True,
+        default="",
+        help_text="Handling and patient counseling guidance in Bengali",
+    )
+    is_pharmacist_reviewed = models.BooleanField(
+        default=False,
+        help_text="Whether this reconstitution protocol and counseling note has been verified by a licensed pharmacist",
+    )
+    reviewed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="suspension_reconstitution_reviews",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewer_notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Suspension Reconstitution Config"
+        verbose_name_plural = "Suspension Reconstitution Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_suspension_reconstitution_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(water_volume_ml__gt=0),
+                name="check_suspension_water_volume_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(final_volume_ml__gt=0),
+                name="check_suspension_final_volume_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "dosage_form", "is_active"]),
+            models.Index(fields=["product", "is_pharmacist_reviewed"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        # 1. Dimension Consistency: final_volume_ml >= water_volume_ml
+        if self.final_volume_ml and self.water_volume_ml:
+            if self.final_volume_ml < self.water_volume_ml:
+                raise ValidationError(
+                    f"Dimension consistency mismatch: final_volume_ml ({self.final_volume_ml}) "
+                    f"cannot be less than water_volume_ml ({self.water_volume_ml})."
+                )
+
+        # 2. BUD Calculation / Validation
+        if self.opening_date:
+            max_bud = self.opening_date + timedelta(days=self.shelf_life_days)
+            if self.beyond_use_date is None:
+                self.beyond_use_date = max_bud
+            else:
+                if self.beyond_use_date < self.opening_date:
+                    raise ValidationError(
+                        f"Beyond-use date ({self.beyond_use_date}) cannot be prior to opening date ({self.opening_date})."
+                    )
+                if self.beyond_use_date > max_bud:
+                    raise ValidationError(
+                        f"Beyond-use date ({self.beyond_use_date}) exceeds maximum shelf life "
+                        f"({self.shelf_life_days} days from {self.opening_date} = {max_bud})."
+                    )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        rev_status = "Reviewed" if self.is_pharmacist_reviewed else "Unreviewed"
+        return f"{self.product_id} ({self.dosage_form}) - {self.water_volume_ml}mL -> {self.final_volume_ml}mL [{self.reconstitution_diluent}] [{rev_status}] ({t_scope})"
+
+
+# ============================================================================
+# P144: Injection Vial, Ampoule, Sterile Route & Cold-Chain Editor Specification
+# Architecture Decision: ADR-0144 (Phase 08: Milestone M04 / M05)
+# ============================================================================
+
+class InjectionDosageFormType(models.TextChoices):
+    INJECTION_SOLUTION = "INJECTION_SOLUTION", "Injection Solution"
+    INJECTION_SUSPENSION = "INJECTION_SUSPENSION", "Injection Suspension"
+    INJECTION_POWDER_LYOPHILIZED = "INJECTION_POWDER_LYOPHILIZED", "Injection Powder (Lyophilized)"
+    INFUSION_IV = "INFUSION_IV", "Intravenous Infusion"
+
+
+class InjectionContainerType(models.TextChoices):
+    VIAL_SINGLE_DOSE = "VIAL_SINGLE_DOSE", "Single-Dose Vial"
+    VIAL_MULTI_DOSE = "VIAL_MULTI_DOSE", "Multi-Dose Vial"
+    AMPOULE_GLASS = "AMPOULE_GLASS", "Glass Ampoule"
+    PREFILLED_SYRINGE = "PREFILLED_SYRINGE", "Pre-filled Syringe"
+    INFUSION_BOTTLE = "INFUSION_BOTTLE", "Infusion Bottle"
+    CARTRIDGE = "CARTRIDGE", "Cartridge"
+
+
+class InjectionSterileRoute(models.TextChoices):
+    IV = "IV", "Intravenous (IV)"
+    IM = "IM", "Intramuscular (IM)"
+    SC = "SC", "Subcutaneous (SC)"
+    ID = "ID", "Intradermal (ID)"
+    INTRAVITREAL = "INTRAVITREAL", "Intravitreal"
+    EPIDURAL = "EPIDURAL", "Epidural"
+
+
+class InjectionStrengthUnit(models.TextChoices):
+    MG_PER_ML = "mg/ml", "mg/mL"
+    MCG_PER_ML = "mcg/ml", "mcg/mL"
+    G_PER_ML = "g/ml", "g/mL"
+    IU_PER_ML = "IU/ml", "IU/mL"
+    MG_PER_VIAL = "mg/vial", "mg/vial"
+    G_PER_VIAL = "g/vial", "g/vial"
+    PERCENT = "%", "% (w/v)"
+
+
+class InjectionDiluentType(models.TextChoices):
+    WATER_FOR_INJECTION = "WATER_FOR_INJECTION", "Sterile Water for Injection"
+    NORMAL_SALINE_0_9 = "NORMAL_SALINE_0_9", "Normal Saline (0.9% NaCl)"
+    LIDOCAINE_1_PERCENT = "LIDOCAINE_1_PERCENT", "Lidocaine HCl 1%"
+    DEXTROSE_5_PERCENT = "DEXTROSE_5_PERCENT", "Dextrose 5% in Water"
+    NONE = "NONE", "None"
+
+
+class InjectionVialFormConfig(models.Model):
+    """
+    Structured dosage-form configuration for injectable medications (vials, ampoules, infusions).
+    Governs active ingredient strength, fill volume, sterile route of administration,
+    single-dose vs. multi-dose presentation, diluent requirements, and cold-chain temperature thresholds.
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="injection_vial_configs",
+    )
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="injection_vial_configs",
+    )
+    dosage_form = models.CharField(
+        max_length=32,
+        choices=InjectionDosageFormType.choices,
+        default=InjectionDosageFormType.INJECTION_SOLUTION,
+    )
+    container_type = models.CharField(
+        max_length=32,
+        choices=InjectionContainerType.choices,
+        default=InjectionContainerType.VIAL_SINGLE_DOSE,
+    )
+    strength_value = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        help_text="Numeric active ingredient strength per unit volume or per container",
+    )
+    strength_unit = models.CharField(
+        max_length=16,
+        choices=InjectionStrengthUnit.choices,
+        default=InjectionStrengthUnit.MG_PER_ML,
+    )
+    fill_volume_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        help_text="Nominal extractable or label fill volume in mL (e.g. 1.00 mL, 2.00 mL, 10.00 mL)",
+    )
+    sterile_route = models.CharField(
+        max_length=32,
+        choices=InjectionSterileRoute.choices,
+        default=InjectionSterileRoute.IV,
+    )
+    is_cold_chain_required = models.BooleanField(
+        default=False,
+        help_text="Whether parenteral formulation requires uninterrupted 2°C - 8°C cold-chain storage",
+    )
+    min_storage_temp_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Minimum allowed storage temperature in Celsius (e.g. 2.00)",
+    )
+    max_storage_temp_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Maximum allowed storage temperature in Celsius (e.g. 8.00)",
+    )
+    has_preservative = models.BooleanField(
+        default=False,
+        help_text="Whether formulation contains antimicrobial preservative (multi-dose vials only)",
+    )
+    requires_diluent = models.BooleanField(
+        default=False,
+        help_text="Whether powder/lyophilized cake requires diluent reconstitution prior to administration",
+    )
+    diluent_type = models.CharField(
+        max_length=32,
+        choices=InjectionDiluentType.choices,
+        default=InjectionDiluentType.NONE,
+    )
+    diluent_volume_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Volume of diluent in mL required for reconstitution",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Injection Vial Form Config"
+        verbose_name_plural = "Injection Vial Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_injection_vial_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(strength_value__gt=0),
+                name="check_injection_strength_value_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(fill_volume_ml__gt=0),
+                name="check_injection_fill_volume_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "dosage_form", "is_active"]),
+            models.Index(fields=["product", "is_cold_chain_required"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        # 1. Cold chain consistency
+        if self.is_cold_chain_required:
+            if self.min_storage_temp_celsius is None or self.max_storage_temp_celsius is None:
+                raise ValidationError(
+                    "Cold-chain formulation requires both min_storage_temp_celsius and max_storage_temp_celsius."
+                )
+            if self.min_storage_temp_celsius >= self.max_storage_temp_celsius:
+                raise ValidationError(
+                    f"Invalid temperature range: min_storage_temp_celsius ({self.min_storage_temp_celsius}°C) "
+                    f"must be strictly less than max_storage_temp_celsius ({self.max_storage_temp_celsius}°C)."
+                )
+
+        # 2. Single-dose ampoules cannot have preservatives
+        if self.container_type == InjectionContainerType.AMPOULE_GLASS and self.has_preservative:
+            raise ValidationError(
+                "Single-dose glass ampoules cannot contain antimicrobial preservatives."
+            )
+
+        # 3. Diluent requirements
+        if self.requires_diluent or self.dosage_form == InjectionDosageFormType.INJECTION_POWDER_LYOPHILIZED:
+            if not self.diluent_volume_ml or self.diluent_volume_ml <= Decimal("0"):
+                raise ValidationError(
+                    "Lyophilized powder injections require positive diluent volume in mL."
+                )
+            if self.diluent_type == InjectionDiluentType.NONE:
+                raise ValidationError(
+                    "Lyophilized powder injections require a valid diluent type."
+                )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        cold_tag = " [COLD-CHAIN]" if self.is_cold_chain_required else ""
+        return f"{self.product_id} ({self.container_type}) - {self.strength_value}{self.strength_unit} / {self.fill_volume_ml}mL [{self.sterile_route}]{cold_tag} ({t_scope})"
+
+
+# ============================================================================
+# P145: Insulin Formulation, Container Dimensions & Excursion Governance
+# Architecture Decision: ADR-0145 (Phase 08: Milestone M04 / M05)
+# ============================================================================
+
+class InsulinActionCategory(models.TextChoices):
+    RAPID_ACTING = "RAPID_ACTING", "Rapid-Acting (Aspart / Lispro / Glulisine)"
+    SHORT_ACTING_REGULAR = "SHORT_ACTING_REGULAR", "Short-Acting Regular (Crystalline Human)"
+    INTERMEDIATE_NPH = "INTERMEDIATE_NPH", "Intermediate-Acting NPH (Isophane)"
+    LONG_ACTING_ANALOG = "LONG_ACTING_ANALOG", "Long-Acting Analog (Glargine / Detemir / Degludec)"
+    PREMIXED_BIPHASIC = "PREMIXED_BIPHASIC", "Premixed Biphasic (70/30, 50/50)"
+
+
+class InsulinDeliveryDevice(models.TextChoices):
+    PEN_DISPOSABLE = "PEN_DISPOSABLE", "Pre-filled Disposable Pen (3 mL)"
+    CARTRIDGE_REFILL = "CARTRIDGE_REFILL", "Pen Cartridge Refill (3 mL)"
+    VIAL_MULTI_DOSE = "VIAL_MULTI_DOSE", "Multi-Dose Vial (10 mL)"
+    PUMP_RESERVOIR = "PUMP_RESERVOIR", "Insulin Pump Cartridge / Reservoir"
+
+
+class InsulinExcursionAction(models.TextChoices):
+    QUARANTINE_FOR_PHARMACIST_ASSESSMENT = "QUARANTINE_FOR_PHARMACIST_ASSESSMENT", "Quarantine for Pharmacist Assessment"
+    DISPOSE_IF_FROZEN = "DISPOSE_IF_FROZEN", "Immediate Disposal If Frozen (<0°C)"
+    ACCELERATE_EXPIRY_TO_IN_USE = "ACCELERATE_EXPIRY_TO_IN_USE", "Accelerate Expiry to In-Use Limit (28 Days)"
+    RETURN_TO_SUPPLIER = "RETURN_TO_SUPPLIER", "Formal Return to Cold-Chain Supplier"
+
+
+class InsulinFormConfig(models.Model):
+    """
+    Structured dosage-form configuration for insulin preparations.
+    Governs concentration (IU/mL), container volume (mL), total device units (IU),
+    unopened cold-chain storage (2°C - 8°C), in-use room-temperature stability (14 - 56 days),
+    and cold-chain temperature excursion protocols.
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="insulin_configs",
+    )
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="insulin_configs",
+    )
+    action_category = models.CharField(
+        max_length=32,
+        choices=InsulinActionCategory.choices,
+        default=InsulinActionCategory.INTERMEDIATE_NPH,
+    )
+    delivery_device = models.CharField(
+        max_length=32,
+        choices=InsulinDeliveryDevice.choices,
+        default=InsulinDeliveryDevice.PEN_DISPOSABLE,
+    )
+    concentration_iu_per_ml = models.PositiveIntegerField(
+        default=100,
+        help_text="Standardized insulin concentration in IU/mL (e.g. 100, 200, 300, 500)",
+    )
+    volume_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("3.00"),
+        help_text="Container fill volume in mL (e.g. 3.00 mL for pen/cartridge, 10.00 mL for vial)",
+    )
+    total_units = models.PositiveIntegerField(
+        help_text="Total base insulin units in container (must equal concentration * volume)",
+    )
+    in_use_shelf_life_days = models.PositiveIntegerField(
+        default=28,
+        help_text="Permitted room-temperature (<30°C) stability period once pen/vial is in use (14-56 days)",
+    )
+    unopened_min_temp_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("2.00"),
+        help_text="Minimum storage temperature for unopened insulin (2°C)",
+    )
+    unopened_max_temp_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("8.00"),
+        help_text="Maximum storage temperature for unopened insulin (8°C)",
+    )
+    in_use_max_temp_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("30.00"),
+        help_text="Maximum permitted ambient temperature for in-use insulin (30°C)",
+    )
+    excursion_action = models.CharField(
+        max_length=48,
+        choices=InsulinExcursionAction.choices,
+        default=InsulinExcursionAction.QUARANTINE_FOR_PHARMACIST_ASSESSMENT,
+    )
+    patient_counseling_en = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient injection and cold-chain handling advice in English",
+    )
+    patient_counseling_bn = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient injection and cold-chain handling advice in Bengali",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Insulin Form Config"
+        verbose_name_plural = "Insulin Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_insulin_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(concentration_iu_per_ml__in=[100, 200, 300, 500]),
+                name="check_insulin_standard_concentration",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(volume_ml__gt=0),
+                name="check_insulin_volume_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(total_units__gt=0),
+                name="check_insulin_total_units_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(in_use_shelf_life_days__gte=14) & models.Q(in_use_shelf_life_days__lte=56),
+                name="check_insulin_in_use_shelf_life_range",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "action_category", "is_active"]),
+            models.Index(fields=["product", "delivery_device"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        # 1. Total units dimension consistency
+        expected_units = int(round(Decimal(str(self.concentration_iu_per_ml)) * self.volume_ml))
+        if not self.total_units:
+            self.total_units = expected_units
+        elif self.total_units != expected_units:
+            raise ValidationError(
+                f"Dimension consistency mismatch: total_units ({self.total_units}) must equal "
+                f"concentration ({self.concentration_iu_per_ml} IU/mL) * volume ({self.volume_ml} mL) = {expected_units} IU."
+            )
+
+        # 2. In-use shelf life bounds (14 - 56 days)
+        if self.in_use_shelf_life_days < 14 or self.in_use_shelf_life_days > 56:
+            raise ValidationError(
+                f"in_use_shelf_life_days ({self.in_use_shelf_life_days}) must be between 14 and 56 days."
+            )
+
+        # 3. Cold chain temperature consistency
+        if self.unopened_min_temp_celsius >= self.unopened_max_temp_celsius:
+            raise ValidationError(
+                f"unopened_min_temp_celsius ({self.unopened_min_temp_celsius}°C) must be less than "
+                f"unopened_max_temp_celsius ({self.unopened_max_temp_celsius}°C)."
+            )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.delivery_device}) - {self.concentration_iu_per_ml}IU/mL [{self.volume_ml}mL = {self.total_units}IU] ({t_scope})"
+
+
+# ============================================================================
+# P147: Ophthalmic, Otic & Nasal Drops Formulation & Opened-Container Controls
+# Architecture Decision: ADR-0147 (Phase 08: Milestone M04 / M05)
+# ============================================================================
+
+class DropsRoute(models.TextChoices):
+    OPHTHALMIC = "OPHTHALMIC", "Ophthalmic (Eye)"
+    OTIC = "OTIC", "Otic (Ear)"
+    NASAL = "NASAL", "Nasal (Nose)"
+
+
+class DropsContainerType(models.TextChoices):
+    DROPPER_BOTTLE = "DROPPER_BOTTLE", "Multi-Dose Dropper Bottle"
+    SINGLE_DOSE_MINIM = "SINGLE_DOSE_MINIM", "Single-Dose Unit (Minim)"
+    SPRAY_PUMP = "SPRAY_PUMP", "Nasal Spray Pump"
+
+
+class DropsStorageTemp(models.TextChoices):
+    ROOM_15_25 = "ROOM_15_25", "Room Temperature (15°C - 25°C)"
+    REFRIGERATED_2_8 = "REFRIGERATED_2_8", "Refrigerated (2°C - 8°C)"
+    COOL_BELOW_30 = "COOL_BELOW_30", "Store Below 30°C"
+
+
+class DropsFormConfig(models.Model):
+    """
+    Structured dosage-form configuration for Ophthalmic, Otic and Nasal drops.
+    Enforces route safety, fill volume, concentration, preservative declaration,
+    and post-opening beyond-use date (BUD) shelf life.
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        "core.MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="drops_configs",
+    )
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="drops_configs",
+    )
+    route = models.CharField(
+        max_length=32,
+        choices=DropsRoute.choices,
+        default=DropsRoute.OPHTHALMIC,
+    )
+    container_type = models.CharField(
+        max_length=32,
+        choices=DropsContainerType.choices,
+        default=DropsContainerType.DROPPER_BOTTLE,
+    )
+    volume_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("5.00"),
+        help_text="Container fill volume in mL (e.g. 5.00, 10.00, 15.00 mL)",
+    )
+    concentration_value = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=Decimal("0.5000"),
+        help_text="Numerical concentration value (e.g. 0.5 for 0.5%)",
+    )
+    concentration_unit = models.CharField(
+        max_length=32,
+        default="PERCENT_W_V",
+        help_text="Concentration unit (PERCENT_W_V, MG_PER_ML, IU_PER_ML)",
+    )
+    is_preservative_free = models.BooleanField(
+        default=False,
+        help_text="Flag indicating preservative-free formulation (e.g. BAK-free)",
+    )
+    preservative_name = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text="Name of antimicrobial preservative (e.g. Benzalkonium Chloride)",
+    )
+    opened_shelf_life_days = models.PositiveIntegerField(
+        default=28,
+        help_text="Maximum permissible beyond-use days after opening (standard 28 days)",
+    )
+    storage_temp = models.CharField(
+        max_length=32,
+        choices=DropsStorageTemp.choices,
+        default=DropsStorageTemp.ROOM_15_25,
+    )
+    patient_instructions_en = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient administration instructions in English",
+    )
+    patient_instructions_bn = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient administration instructions in Bengali",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Drops Form Config"
+        verbose_name_plural = "Drops Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_drops_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(volume_ml__gt=0),
+                name="check_drops_volume_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(concentration_value__gt=0),
+                name="check_drops_concentration_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(opened_shelf_life_days__gte=1) & models.Q(opened_shelf_life_days__lte=60),
+                name="check_drops_opened_shelf_life_range",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "route", "is_active"]),
+            models.Index(fields=["product", "container_type"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        # 1. Volume must be positive
+        if self.volume_ml <= Decimal("0"):
+            raise ValidationError("Container volume_ml must be greater than 0.")
+
+        # 2. Concentration must be positive
+        if self.concentration_value <= Decimal("0"):
+            raise ValidationError("concentration_value must be greater than 0.")
+
+        # 3. Single-dose minim must have 1-day opened shelf life
+        if self.container_type == DropsContainerType.SINGLE_DOSE_MINIM and self.opened_shelf_life_days > 1:
+            raise ValidationError(
+                "Single-dose minim (SINGLE_DOSE_MINIM) must have opened_shelf_life_days = 1 (discard within 24 hours)."
+            )
+
+        # 4. Multidose shelf life bounds (1 - 60 days)
+        if self.opened_shelf_life_days < 1 or self.opened_shelf_life_days > 60:
+            raise ValidationError("opened_shelf_life_days must be between 1 and 60 days.")
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.route}) - {self.volume_ml}mL [{self.container_type}] BUD: {self.opened_shelf_life_days}d ({t_scope})"
+
+
+# -----------------------------------------------------------------------------
+# P146 - Inhaler Editor & Actuation Packaging Model
+# Architecture Decision: ADR-0146
+# -----------------------------------------------------------------------------
+
+class InhalerDeviceType(models.TextChoices):
+    MDI_PRESSURIZED = "MDI_PRESSURIZED", "Pressurized Metered-Dose Inhaler (pMDI)"
+    DPI_DRY_POWDER = "DPI_DRY_POWDER", "Dry Powder Inhaler (DPI)"
+    SMI_SOFT_MIST = "SMI_SOFT_MIST", "Soft Mist Inhaler (SMI)"
+    BREATH_ACTUATED_MDI = "BREATH_ACTUATED_MDI", "Breath-Actuated Inhaler (BAI)"
+    NEBULIZER_AMPOULE = "NEBULIZER_AMPOULE", "Nebulizer Suspension/Solution Ampoule"
+
+
+class InhalerRoute(models.TextChoices):
+    ORAL_INHALATION = "ORAL_INHALATION", "Oral Inhalation"
+    NASAL_INHALATION = "NASAL_INHALATION", "Nasal Inhalation"
+
+
+class InhalerStorageCondition(models.TextChoices):
+    ROOM_15_25 = "ROOM_15_25", "Store between 15°C and 25°C. Do not freeze."
+    COLD_2_8 = "COLD_2_8", "Refrigerate 2°C to 8°C before dispensing"
+    PROTECT_FROM_HEAT = "PROTECT_FROM_HEAT", "Store below 30°C. Protect from direct heat & sunlight"
+
+
+class InhalerFormConfig(models.Model):
+    """
+    Formulation and packaging metadata for inhalers (MDI, DPI, SMI).
+    Architecture Decision: ADR-0146
+    Requirement Trace: P146 (Inhaler Editor)
+    """
+
+    config_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="inhaler_configs",
+        help_text="Associated medicine product in master catalog",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="inhaler_configs",
+        help_text="Tenant context. Null indicates platform master monograph",
+    )
+    device_type = models.CharField(
+        max_length=32,
+        choices=InhalerDeviceType.choices,
+        default=InhalerDeviceType.MDI_PRESSURIZED,
+        help_text="Delivery device mechanism",
+    )
+    administration_route = models.CharField(
+        max_length=32,
+        choices=InhalerRoute.choices,
+        default=InhalerRoute.ORAL_INHALATION,
+        help_text="Anatomical route of administration",
+    )
+    dose_per_actuation = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=Decimal("100.0000"),
+        help_text="Amount of drug delivered per single actuation/puff",
+    )
+    dose_unit = models.CharField(
+        max_length=32,
+        default="MCG",
+        help_text="Measurement unit for dose per actuation (MCG, MG)",
+    )
+    total_actuations = models.PositiveIntegerField(
+        default=200,
+        help_text="Total certified number of metered actuations/puffs per device",
+    )
+    total_active_content = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        help_text="Total active medicine content in device (must equal dose_per_actuation * total_actuations if supplied)",
+    )
+    has_dose_counter = models.BooleanField(
+        default=True,
+        help_text="Whether inhaler device is fitted with an integrated dose counter",
+    )
+    has_spacer_included = models.BooleanField(
+        default=False,
+        help_text="Whether inhaler includes a holding chamber / spacer device",
+    )
+    storage_condition = models.CharField(
+        max_length=32,
+        choices=InhalerStorageCondition.choices,
+        default=InhalerStorageCondition.ROOM_15_25,
+    )
+    priming_required = models.BooleanField(
+        default=True,
+        help_text="Whether device requires shaking and test spray priming",
+    )
+    priming_puffs = models.PositiveIntegerField(
+        default=2,
+        help_text="Number of priming test sprays required when new or unused",
+    )
+    canister_pressure_warning = models.BooleanField(
+        default=True,
+        help_text="Pressurized container: Do not puncture or incinerate even when empty",
+    )
+    patient_instructions_en = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient inhalation and cleaning instructions in English",
+    )
+    patient_instructions_bn = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient inhalation and cleaning instructions in Bengali",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Inhaler Form Config"
+        verbose_name_plural = "Inhaler Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_inhaler_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(dose_per_actuation__gt=0),
+                name="check_inhaler_dose_per_actuation_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(total_actuations__gt=0) & models.Q(total_actuations__lte=1000),
+                name="check_inhaler_total_actuations_range",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "administration_route", "is_active"]),
+            models.Index(fields=["product", "device_type"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.dose_per_actuation <= Decimal("0"):
+            raise ValidationError("dose_per_actuation must be greater than 0.")
+
+        if self.total_actuations < 10 or self.total_actuations > 1000:
+            raise ValidationError("total_actuations must be between 10 and 1000 actuations.")
+
+        if self.total_active_content is not None:
+            expected = (self.dose_per_actuation * Decimal(str(self.total_actuations))).quantize(Decimal("0.0001"))
+            actual = self.total_active_content.quantize(Decimal("0.0001"))
+            if expected != actual:
+                raise ValidationError(
+                    f"Dimension mismatch: total_active_content ({actual}) must equal dose_per_actuation * total_actuations ({expected})."
+                )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.device_type}) - {self.dose_per_actuation}{self.dose_unit} x {self.total_actuations} puffs ({t_scope})"
+
+
+# -----------------------------------------------------------------------------
+# P148 - Cream, Ointment, Gel, and Lotion Topical Form Model
+# Architecture Decision: ADR-0148
+# -----------------------------------------------------------------------------
+
+class TopicalFormulationType(models.TextChoices):
+    CREAM = "CREAM", "Topical Cream (Emulsion)"
+    OINTMENT = "OINTMENT", "Topical Ointment (Hydrocarbon/Petrolatum)"
+    GEL = "GEL", "Topical Gel (Hydrogel)"
+    LOTION = "LOTION", "Topical Lotion (Fluid Suspension)"
+    PASTE = "PASTE", "Topical Paste (High Solid Powder)"
+
+
+class TopicalRoute(models.TextChoices):
+    TOPICAL_CUTANEOUS = "TOPICAL_CUTANEOUS", "Topical Cutaneous (Skin)"
+    TOPICAL_OPHTHALMIC = "TOPICAL_OPHTHALMIC", "Topical Ophthalmic (Eye Ointment)"
+    TOPICAL_RECTAL = "TOPICAL_RECTAL", "Topical Rectal"
+    TOPICAL_VAGINAL = "TOPICAL_VAGINAL", "Topical Vaginal"
+
+
+class TopicalContainerType(models.TextChoices):
+    TUBE_ALUMINUM = "TUBE_ALUMINUM", "Collapsible Aluminum Tube"
+    TUBE_PLASTIC = "TUBE_PLASTIC", "Laminated Plastic Tube"
+    JAR_POT = "JAR_POT", "Dermatological Jar / Pot"
+    BOTTLE_PUMP = "BOTTLE_PUMP", "Dispenser Pump Bottle"
+    SACHET = "SACHET", "Single-Use Sachet"
+
+
+class TopicalStorageCondition(models.TextChoices):
+    ROOM_15_25 = "ROOM_15_25", "Store between 15°C and 25°C. Do not freeze."
+    COOL_BELOW_30 = "COOL_BELOW_30", "Store below 30°C. Protect from direct heat."
+    COLD_2_8 = "COLD_2_8", "Refrigerate between 2°C and 8°C"
+
+
+class TopicalFormConfig(models.Model):
+    """
+    Formulation and packaging metadata for Creams, Ointments, Gels, and Lotions.
+    Architecture Decision: ADR-0148
+    Requirement Trace: P148 (Cream/Ointment Editor)
+    """
+
+    config_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="topical_configs",
+        help_text="Associated medicine product in master catalog",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="topical_configs",
+        help_text="Tenant context. Null indicates platform master monograph",
+    )
+    formulation_type = models.CharField(
+        max_length=32,
+        choices=TopicalFormulationType.choices,
+        default=TopicalFormulationType.CREAM,
+        help_text="Semisolid base categorization",
+    )
+    administration_route = models.CharField(
+        max_length=32,
+        choices=TopicalRoute.choices,
+        default=TopicalRoute.TOPICAL_CUTANEOUS,
+        help_text="Topical anatomical route",
+    )
+    container_type = models.CharField(
+        max_length=32,
+        choices=TopicalContainerType.choices,
+        default=TopicalContainerType.TUBE_ALUMINUM,
+        help_text="Primary packaging container type",
+    )
+    net_weight_grams = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("15.00"),
+        help_text="Container fill weight in grams (or mL for lotions)",
+    )
+    concentration_value = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=Decimal("1.0000"),
+        help_text="Numerical concentration value (e.g. 1.0 for 1% or 10 mg/g)",
+    )
+    concentration_unit = models.CharField(
+        max_length=32,
+        default="PERCENT_W_W",
+        help_text="Concentration unit (PERCENT_W_W, MG_PER_G, PERCENT_W_V, IU_PER_G)",
+    )
+    is_sterile = models.BooleanField(
+        default=False,
+        help_text="Sterility guarantee (mandatory for ophthalmic eye ointments)",
+    )
+    applicator_included = models.BooleanField(
+        default=False,
+        help_text="Whether package includes a cannula or dispensing applicator",
+    )
+    opened_shelf_life_days = models.PositiveIntegerField(
+        default=28,
+        help_text="In-use beyond-use date (BUD) shelf life in days after puncture",
+    )
+    storage_condition = models.CharField(
+        max_length=32,
+        choices=TopicalStorageCondition.choices,
+        default=TopicalStorageCondition.ROOM_15_25,
+    )
+    patient_instructions_en = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient topical application counseling in English",
+    )
+    patient_instructions_bn = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient topical application counseling in Bengali",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Topical Form Config"
+        verbose_name_plural = "Topical Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_topical_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(net_weight_grams__gt=0),
+                name="check_topical_net_weight_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(concentration_value__gt=0),
+                name="check_topical_concentration_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(opened_shelf_life_days__gte=7) & models.Q(opened_shelf_life_days__lte=180),
+                name="check_topical_opened_shelf_life_range",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "formulation_type", "is_active"]),
+            models.Index(fields=["product", "administration_route"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.net_weight_grams <= Decimal("0"):
+            raise ValidationError("net_weight_grams must be greater than 0.")
+
+        if self.concentration_value <= Decimal("0"):
+            raise ValidationError("concentration_value must be greater than 0.")
+
+        if self.administration_route == TopicalRoute.TOPICAL_OPHTHALMIC and not self.is_sterile:
+            raise ValidationError(
+                "Ophthalmic eye ointments (TOPICAL_OPHTHALMIC) must be certified sterile (is_sterile = True)."
+            )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.formulation_type}) - {self.net_weight_grams}g [{self.container_type}] ({t_scope})"
+
+
+# -----------------------------------------------------------------------------
+# P149 - Sachet, Powder, and Reconstitution Granule Model
+# Architecture Decision: ADR-0149
+# -----------------------------------------------------------------------------
+
+class PowderCategory(models.TextChoices):
+    ORAL_REHYDRATION_SALTS = "ORAL_REHYDRATION_SALTS", "Oral Rehydration Salts (ORS)"
+    EFFERVESCENT_POWDER = "EFFERVESCENT_POWDER", "Effervescent Powder / Granules"
+    BULK_LAXATIVE_HUSK = "BULK_LAXATIVE_HUSK", "Bulk Laxative (Ispaghula/Psyllium Husk)"
+    SUSPENSION_GRANULES = "SUSPENSION_GRANULES", "Antibiotic / Granules for Reconstitution"
+    TOPICAL_DUSTING_POWDER = "TOPICAL_DUSTING_POWDER", "Topical Cutaneous Dusting Powder"
+
+
+class SachetRoute(models.TextChoices):
+    ORAL = "ORAL", "Oral (Ingestion after mixing/suspension)"
+    TOPICAL = "TOPICAL", "Topical (External skin application)"
+
+
+class PowderDiluentType(models.TextChoices):
+    POTABLE_WATER = "POTABLE_WATER", "Fresh Potable Drinking Water"
+    BOILED_COOLED_WATER = "BOILED_COOLED_WATER", "Boiled and Cooled Clean Water"
+    JUICE_OR_WATER = "JUICE_OR_WATER", "Fruit Juice, Milk or Water"
+    NOT_APPLICABLE = "NOT_APPLICABLE", "Not Applicable (External or Dry Ingestion)"
+
+
+class PowderStorageCondition(models.TextChoices):
+    ROOM_15_25 = "ROOM_15_25", "Store between 15°C and 25°C in a dry place"
+    COOL_DRY_BELOW_30 = "COOL_DRY_BELOW_30", "Store below 30°C. Protect from moisture and direct sunlight"
+    PROTECT_FROM_MOISTURE = "PROTECT_FROM_MOISTURE", "Store in airtight pack. Highly hygroscopic"
+
+
+class SachetFormConfig(models.Model):
+    """
+    Formulation, packaging, and dilution metadata for Sachets and Dry Powders.
+    Architecture Decision: ADR-0149
+    Requirement Trace: P149 (Sachet/Powder Editor)
+    """
+
+    config_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="sachet_configs",
+        help_text="Associated medicine product in master catalog",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="sachet_configs",
+        help_text="Tenant context. Null indicates platform master monograph",
+    )
+    powder_category = models.CharField(
+        max_length=32,
+        choices=PowderCategory.choices,
+        default=PowderCategory.ORAL_REHYDRATION_SALTS,
+        help_text="Clinical and pharmaceutical powder classification",
+    )
+    administration_route = models.CharField(
+        max_length=32,
+        choices=SachetRoute.choices,
+        default=SachetRoute.ORAL,
+        help_text="Route of administration",
+    )
+    grams_per_sachet = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        default=Decimal("10.25"),
+        help_text="Net dry powder weight in grams per individual sachet",
+    )
+    sachets_per_pack = models.PositiveIntegerField(
+        default=25,
+        help_text="Number of individual sachets in the outer packaging box/pack",
+    )
+    total_pack_weight_grams = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Total pack weight in grams. Must equal grams_per_sachet * sachets_per_pack if supplied",
+    )
+    loose_sachet_sale_eligible = models.BooleanField(
+        default=True,
+        help_text="Whether individual sachets may be dispensed loose at the retail counter",
+    )
+    requires_dissolution = models.BooleanField(
+        default=True,
+        help_text="Whether powder must be reconstituted / dissolved in fluid before ingestion",
+    )
+    diluent_type = models.CharField(
+        max_length=32,
+        choices=PowderDiluentType.choices,
+        default=PowderDiluentType.POTABLE_WATER,
+        help_text="Recommended fluid for dissolution",
+    )
+    diluent_volume_ml = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        default=Decimal("500.00"),
+        help_text="Required volume of diluent in mL (e.g. 500 mL for standard ORS)",
+    )
+    reconstituted_stability_hours = models.PositiveIntegerField(
+        default=24,
+        help_text="Hours after mixing before remaining solution must be discarded (e.g. 24h for ORS)",
+    )
+    storage_condition = models.CharField(
+        max_length=32,
+        choices=PowderStorageCondition.choices,
+        default=PowderStorageCondition.COOL_DRY_BELOW_30,
+    )
+    patient_instructions_en = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient reconstitution and intake counseling in English",
+    )
+    patient_instructions_bn = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient reconstitution and intake counseling in Bengali",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Sachet Form Config"
+        verbose_name_plural = "Sachet Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_sachet_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(grams_per_sachet__gt=0),
+                name="check_sachet_grams_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(sachets_per_pack__gt=0) & models.Q(sachets_per_pack__lte=500),
+                name="check_sachets_per_pack_range",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "powder_category", "is_active"]),
+            models.Index(fields=["product", "administration_route"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.grams_per_sachet <= Decimal("0"):
+            raise ValidationError("grams_per_sachet must be greater than 0.")
+
+        if self.sachets_per_pack < 1 or self.sachets_per_pack > 500:
+            raise ValidationError("sachets_per_pack must be between 1 and 500.")
+
+        if self.requires_dissolution and (self.diluent_volume_ml is None or self.diluent_volume_ml <= Decimal("0")):
+            raise ValidationError("diluent_volume_ml must be greater than 0 when requires_dissolution is True.")
+
+        if self.total_pack_weight_grams is not None:
+            expected = (self.grams_per_sachet * Decimal(str(self.sachets_per_pack))).quantize(Decimal("0.01"))
+            actual = self.total_pack_weight_grams.quantize(Decimal("0.01"))
+            if expected != actual:
+                raise ValidationError(
+                    f"Dimension mismatch: total_pack_weight_grams ({actual}) must equal grams_per_sachet * sachets_per_pack ({expected})."
+                )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.powder_category}) - {self.grams_per_sachet}g x {self.sachets_per_pack} sachets ({t_scope})"
+
+
+# -----------------------------------------------------------------------------
+# P150 - Suppository and Pessary Model
+# Architecture Decision: ADR-0150
+# -----------------------------------------------------------------------------
+
+class SuppositoryBaseType(models.TextChoices):
+    FATTY_BASE_COCOA_BUTTER = "FATTY_BASE_COCOA_BUTTER", "Fatty Base (Cocoa Butter / Hard Fat, Melts at 30-35°C)"
+    WATER_SOLUBLE_PEG = "WATER_SOLUBLE_PEG", "Water Soluble (Polyethylene Glycol / Macrogol)"
+    GLYCERINATED_GELATIN = "GLYCERINATED_GELATIN", "Glycerinated Gelatin Base"
+
+
+class SuppositoryRoute(models.TextChoices):
+    RECTAL = "RECTAL", "Rectal (Suppository)"
+    VAGINAL = "VAGINAL", "Vaginal (Pessary)"
+    URETHRAL = "URETHRAL", "Urethral (Bougie)"
+
+
+class SuppositoryStorageCondition(models.TextChoices):
+    REFRIGERATED_2_8 = "REFRIGERATED_2_8", "Refrigerated (2°C - 8°C). Protect from melting"
+    COOL_BELOW_25 = "COOL_BELOW_25", "Store in a cool place below 25°C"
+    COOL_BELOW_30 = "COOL_BELOW_30", "Store below 30°C in a dry place"
+
+
+class SuppositoryFormConfig(models.Model):
+    """
+    Formulation, packaging, and temperature governance metadata for Suppositories & Pessaries.
+    Architecture Decision: ADR-0150
+    Requirement Trace: P150 (Suppository Editor)
+    """
+
+    config_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="suppository_configs",
+        help_text="Associated medicine product in master catalog",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="suppository_configs",
+        help_text="Tenant context. Null indicates platform master monograph",
+    )
+    suppository_base_type = models.CharField(
+        max_length=32,
+        choices=SuppositoryBaseType.choices,
+        default=SuppositoryBaseType.FATTY_BASE_COCOA_BUTTER,
+        help_text="Pharmaceutical suppository base vehicle",
+    )
+    administration_route = models.CharField(
+        max_length=32,
+        choices=SuppositoryRoute.choices,
+        default=SuppositoryRoute.RECTAL,
+        help_text="Anatomical insertion route",
+    )
+    strength_value = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=Decimal("250.0000"),
+        help_text="Active ingredient strength per single suppository piece",
+    )
+    strength_unit = models.CharField(
+        max_length=32,
+        default="MG",
+        help_text="Measurement unit for strength (MG, G, IU, MCG)",
+    )
+    pieces_per_strip = models.PositiveIntegerField(
+        default=5,
+        help_text="Number of suppository pieces in each blister/strip",
+    )
+    strips_per_pack = models.PositiveIntegerField(
+        default=2,
+        help_text="Number of blister strips in the outer box",
+    )
+    total_pieces_per_pack = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Total individual pieces per pack (must equal pieces_per_strip * strips_per_pack if supplied)",
+    )
+    loose_piece_sale_eligible = models.BooleanField(
+        default=True,
+        help_text="Whether individual suppository pieces may be dispensed loose at retail counter",
+    )
+    requires_refrigeration = models.BooleanField(
+        default=False,
+        help_text="Whether suppository requires cold-chain storage to prevent melting",
+    )
+    storage_condition = models.CharField(
+        max_length=32,
+        choices=SuppositoryStorageCondition.choices,
+        default=SuppositoryStorageCondition.COOL_BELOW_25,
+    )
+    patient_instructions_en = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient administration instructions in English",
+    )
+    patient_instructions_bn = models.TextField(
+        blank=True,
+        default="",
+        help_text="Patient administration instructions in Bengali",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Suppository Form Config"
+        verbose_name_plural = "Suppository Form Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_suppository_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(strength_value__gt=0),
+                name="check_suppository_strength_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(pieces_per_strip__gt=0) & models.Q(pieces_per_strip__lte=50),
+                name="check_pieces_per_strip_range",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(strips_per_pack__gt=0) & models.Q(strips_per_pack__lte=100),
+                name="check_strips_per_pack_range",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "administration_route", "is_active"]),
+            models.Index(fields=["product", "suppository_base_type"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.strength_value <= Decimal("0"):
+            raise ValidationError("strength_value must be greater than 0.")
+
+        if self.pieces_per_strip < 1 or self.pieces_per_strip > 50:
+            raise ValidationError("pieces_per_strip must be between 1 and 50.")
+
+        if self.strips_per_pack < 1 or self.strips_per_pack > 100:
+            raise ValidationError("strips_per_pack must be between 1 and 100.")
+
+        if self.total_pieces_per_pack is not None:
+            expected = self.pieces_per_strip * self.strips_per_pack
+            if self.total_pieces_per_pack != expected:
+                raise ValidationError(
+                    f"Dimension mismatch: total_pieces_per_pack ({self.total_pieces_per_pack}) must equal pieces_per_strip * strips_per_pack ({expected})."
+                )
+
+        if self.requires_refrigeration and self.storage_condition not in [
+            SuppositoryStorageCondition.REFRIGERATED_2_8,
+            SuppositoryStorageCondition.COOL_BELOW_25,
+        ]:
+            raise ValidationError("requires_refrigeration is True but storage_condition is not refrigerated or cool.")
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.administration_route}) - {self.strength_value}{self.strength_unit} [{self.pieces_per_strip}x{self.strips_per_pack}] ({t_scope})"
+
+
+class DeviceCategory(models.TextChoices):
+    NEEDLE_OR_SYRINGE = "NEEDLE_OR_SYRINGE", "Needle or Syringe"
+    DIAGNOSTIC_TEST_STRIP = "DIAGNOSTIC_TEST_STRIP", "Diagnostic Test Strip"
+    MONITORING_DEVICE = "MONITORING_DEVICE", "Monitoring Device (BP, Glucometer, Oximeter)"
+    SURGICAL_CONSUMABLE = "SURGICAL_CONSUMABLE", "Surgical Consumable (Cannula, Gauze, Suture)"
+    RESPIRATORY_DEVICE = "RESPIRATORY_DEVICE", "Respiratory Device (Nebulizer Mask, Spacer)"
+    GENERAL_CONSUMABLE = "GENERAL_CONSUMABLE", "General Medical Consumable"
+
+
+class NeedleGaugeChoice(models.TextChoices):
+    G18 = "18G", "18G"
+    G20 = "20G", "20G"
+    G21 = "21G", "21G"
+    G22 = "22G", "22G"
+    G23 = "23G", "23G"
+    G25 = "25G", "25G"
+    G26 = "26G", "26G"
+    G27 = "27G", "27G"
+    G29 = "29G", "29G"
+    G30 = "30G", "30G"
+    G31 = "31G", "31G"
+    G32 = "32G", "32G"
+    NA = "NA", "Not Applicable"
+
+
+class RegulatoryDeviceClass(models.TextChoices):
+    CLASS_A_LOW_RISK = "CLASS_A_LOW_RISK", "Class A (Low Risk)"
+    CLASS_B_LOW_MODERATE = "CLASS_B_LOW_MODERATE", "Class B (Low-Moderate Risk)"
+    CLASS_C_MODERATE_HIGH = "CLASS_C_MODERATE_HIGH", "Class C (Moderate-High Risk)"
+    CLASS_D_HIGH_RISK = "CLASS_D_HIGH_RISK", "Class D (High Risk)"
+    NON_REGULATED = "NON_REGULATED", "Non-Regulated Retail Consumable"
+
+
+class DeviceConsumableConfig(models.Model):
+    """
+    Medical devices, needles, test strips, and surgical consumables configuration.
+    Architecture Decision: ADR-0151
+    Provides device-specific physical and compatibility attributes without pharmaceutical drug restrictions.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="device_consumable_configs",
+        help_text="Product reference for this device/consumable",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="device_consumable_configs",
+        help_text="Tenant boundary. Null indicates global master configuration.",
+    )
+    device_category = models.CharField(
+        max_length=64,
+        choices=DeviceCategory.choices,
+        default=DeviceCategory.GENERAL_CONSUMABLE,
+    )
+    brand_name = models.CharField(max_length=150)
+    model_number = models.CharField(max_length=100, blank=True, default="")
+    needle_gauge = models.CharField(
+        max_length=10,
+        choices=NeedleGaugeChoice.choices,
+        default=NeedleGaugeChoice.NA,
+        help_text="Needle thickness gauge if applicable",
+    )
+    needle_length_mm = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Needle length in millimeters",
+    )
+    meter_compatibility = models.CharField(
+        max_length=150,
+        blank=True,
+        default="",
+        help_text="Target device or glucometer compatibility",
+    )
+    strip_count_per_pack = models.PositiveIntegerField(
+        default=0,
+        help_text="Count of strips per pack if diagnostic strip",
+    )
+    sample_volume_microliter = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Required blood sample volume in microliters",
+    )
+    test_time_seconds = models.PositiveIntegerField(
+        default=0,
+        help_text="Test reaction time in seconds",
+    )
+    is_sterile = models.BooleanField(
+        default=False,
+        help_text="Whether item comes in sterile packaging barrier",
+    )
+    is_single_use = models.BooleanField(
+        default=True,
+        help_text="Whether device is single-use disposable or reusable",
+    )
+    regulatory_device_class = models.CharField(
+        max_length=32,
+        choices=RegulatoryDeviceClass.choices,
+        default=RegulatoryDeviceClass.CLASS_A_LOW_RISK,
+    )
+    storage_temperature_celsius_min = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("2.00"),
+    )
+    storage_temperature_celsius_max = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("30.00"),
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Device Consumable Config"
+        verbose_name_plural = "Device Consumable Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["product", "tenant"],
+                name="unique_device_consumable_product_tenant",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(storage_temperature_celsius_min__lte=models.F("storage_temperature_celsius_max")),
+                name="check_device_storage_temp_order",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "device_category", "is_active"]),
+            models.Index(fields=["product", "needle_gauge"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.brand_name or len(self.brand_name.strip()) < 2:
+            raise ValidationError("brand_name must be at least 2 characters.")
+
+        if self.storage_temperature_celsius_min > self.storage_temperature_celsius_max:
+            raise ValidationError("storage_temperature_celsius_min cannot exceed storage_temperature_celsius_max.")
+
+        if self.device_category == DeviceCategory.NEEDLE_OR_SYRINGE:
+            if self.needle_gauge == NeedleGaugeChoice.NA:
+                raise ValidationError("Needles and syringes must specify a valid needle_gauge.")
+            if self.needle_length_mm <= Decimal("0.00"):
+                raise ValidationError("Needle length in mm must be greater than 0.")
+
+        if self.device_category == DeviceCategory.DIAGNOSTIC_TEST_STRIP:
+            if not self.meter_compatibility or not self.meter_compatibility.strip():
+                raise ValidationError("Diagnostic test strips must specify compatible meter model.")
+            if self.strip_count_per_pack < 1:
+                raise ValidationError("Diagnostic test strips must have strip_count_per_pack >= 1.")
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        t_scope = f"Tenant: {self.tenant_id}" if self.tenant_id else "Global"
+        return f"{self.product_id} ({self.device_category}) - {self.brand_name} {self.model_number} ({t_scope})"
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
