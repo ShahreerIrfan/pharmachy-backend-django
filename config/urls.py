@@ -80,6 +80,7 @@ from apps.core.offline_lapse_views import LapsedPlanReconciliationViewSet
 from apps.core.onboarding_views import PlatformTenantOnboardingWizardViewSet
 from apps.core.override_precedence_views import OverridePrecedenceViewSet
 from apps.core.owner_dashboard_views import OwnerDashboardViewSet
+from apps.core.packaging_hierarchy_views import PackagingHierarchyViewSet
 from apps.core.plan_catalogue_views import (
     PlanCatalogueViewSet,
     TenantEffectiveEntitlementViewSet,
@@ -224,6 +225,7 @@ router.register("catalog/local-inventory", LocalInventoryViewSet, basename="cata
 router.register("catalog/flexible-payloads", FlexibleMedicinePayloadViewSet, basename="catalog-flexible-payloads")
 router.register("catalog/qa-fixtures", DosageFormQaViewSet, basename="catalog-qa-fixtures")
 router.register("inventory/base-unit-strategies", InventoryBaseUnitStrategyViewSet, basename="inventory-base-unit-strategies")
+router.register("inventory/packaging-hierarchy", PackagingHierarchyViewSet, basename="inventory-packaging-hierarchy")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

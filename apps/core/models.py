@@ -8061,3 +8061,128 @@ class InventoryBaseUnitStrategy(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class PackagingHierarchyNode(models.Model):
+    """
+    Architecture Decision: ADR-0162 (P162).
+    Phase 09: Packaging, Unit Conversion, Batches & Cost Lots.
+    N-Tier Packaging Hierarchy Node with Effective-Dated Factors.
+    Models packaging chains such as:
+    - CARTON -> BOX -> STRIP -> TABLET
+    - CARTON -> BOTTLE
+    - SHIPPER -> PACK -> DEVICE
+    """
+
+    node_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="packaging_hierarchy_nodes",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="packaging_hierarchy_nodes",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="packaging_hierarchy_nodes",
+        db_index=True,
+    )
+
+    parent_unit = models.CharField(
+        max_length=32,
+        db_index=True,
+        help_text="Parent unit packaging tier (e.g. CARTON, BOX, TRAY, PACK).",
+    )
+    child_unit = models.CharField(
+        max_length=32,
+        db_index=True,
+        help_text="Child unit packaging tier (e.g. BOX, STRIP, TABLET, BOTTLE, PIECE).",
+    )
+    conversion_factor = models.PositiveIntegerField(
+        validators=[MinValueValidator(1)],
+        help_text="Number of child units contained in one parent unit.",
+    )
+
+    tier_level = models.PositiveSmallIntegerField(
+        default=1,
+        help_text="Hierarchy depth level (1=immediate parent of base, 2=outer box, 3=shipper).",
+    )
+    is_base_level = models.BooleanField(
+        default=False,
+        help_text="True if child_unit is the atomic inventory base dispensing unit.",
+    )
+    tier_gtin_barcode = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="GTIN-14 or alternate barcode specifically identifying this packaging tier.",
+    )
+
+    effective_from = models.DateField(
+        db_index=True,
+        help_text="Start date when this packaging factor becomes effective.",
+    )
+    effective_to = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="End date for this packaging factor (null means open-ended/active).",
+    )
+
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-tier_level", "-effective_from"]
+        verbose_name = "Packaging Hierarchy Node"
+        verbose_name_plural = "Packaging Hierarchy Nodes"
+        indexes = [
+            models.Index(fields=["tenant", "product", "is_active"]),
+            models.Index(fields=["tenant", "product", "effective_from", "effective_to"]),
+            models.Index(fields=["parent_unit", "child_unit"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(conversion_factor__gte=1),
+                name="check_positive_packaging_factor",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(effective_to__isnull=True)
+                | models.Q(effective_to__gte=models.F("effective_from")),
+                name="check_valid_effective_date_range",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        b_name = self.branch.name if self.branch else "All Branches"
+        end_str = self.effective_to.isoformat() if self.effective_to else "Open"
+        return f"{self.product.brand_name} [{self.tenant.name} - {b_name}]: 1 {self.parent_unit} = {self.conversion_factor} {self.child_unit} ({self.effective_from} to {end_str})"
+
+    def clean(self):
+        super().clean()
+        if self.parent_unit and self.child_unit and self.parent_unit.strip().upper() == self.child_unit.strip().upper():
+            raise ValidationError({
+                "parent_unit": "Parent unit and child unit cannot be identical in packaging hierarchy."
+            })
+        if self.conversion_factor < 1:
+            raise ValidationError({
+                "conversion_factor": "Conversion factor must be an integer greater than or equal to 1."
+            })
+        if self.effective_to and self.effective_from and self.effective_to < self.effective_from:
+            raise ValidationError({
+                "effective_to": "effective_to date cannot be earlier than effective_from date."
+            })
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
