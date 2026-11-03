@@ -98,6 +98,7 @@ from apps.core.staff_membership_views import (
 )
 from apps.core.staff_offline_auth_views import StaffOfflineAuthorizationViewSet
 from apps.core.staff_performance_views import StaffPerformanceMetricsViewSet
+from apps.core.storage_conditional_views import StorageConditionalViewSet
 from apps.core.strength_taxonomy_views import StrengthTaxonomyViewSet
 from apps.core.subscription_portal_views import SubscriptionCustomerPortalViewSet
 from apps.core.subscription_support_views import SubscriptionSupportOverrideViewSet
@@ -214,6 +215,7 @@ router.register("catalog/devices", DeviceConsumableEditorViewSet, basename="cata
 router.register("catalog/layout/groups", DynamicFieldGroupLayoutViewSet, basename="catalog-layout-groups")
 router.register("catalog/conditional-pricing", ConditionalPricingViewSet, basename="catalog-conditional-pricing")
 router.register("catalog/stock-entry", RegulatedStockEntryViewSet, basename="catalog-stock-entry")
+router.register("catalog/storage-conditions", StorageConditionalViewSet, basename="catalog-storage-conditions")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

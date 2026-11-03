@@ -134,3 +134,4 @@ class RegulatedStockEntryViewSet(viewsets.ViewSet):
         except PermissionDenied as exc:
             detail = exc.detail if hasattr(exc, "detail") else {"detail": str(exc)}
             return Response(detail, status=status.HTTP_403_FORBIDDEN)
+

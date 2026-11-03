@@ -7669,6 +7669,102 @@ class ConditionalPricingConfig(models.Model):
         return f"{self.product_id} Pricing - Pack: BDT {self.pack_mrp_bdt}, Strip: BDT {self.strip_mrp_bdt}, Piece: BDT {self.mrp_per_piece_bdt} ({t_scope})"
 
 
+class StoragePlacementZone(models.TextChoices):
+    SHELF_MIDDLE = "SHELF_MIDDLE", "Middle Shelf (Uniform Temperature)"
+    SHELF_TOP = "SHELF_TOP", "Top Shelf"
+    SHELF_BOTTOM = "SHELF_BOTTOM", "Bottom Shelf (Above Crisper)"
+    CHILLER_TRAY = "CHILLER_TRAY", "Chiller Tray (2°C - 4°C)"
+    DOOR_NOT_PERMITTED = "DOOR_NOT_PERMITTED", "Door Placement Prohibited"
+
+
+class ExcursionHandlingAction(models.TextChoices):
+    QUARANTINE_IMMEDIATELY = "QUARANTINE_IMMEDIATELY", "Quarantine Immediately for Assessment"
+    RETURN_TO_SUPPLIER = "RETURN_TO_SUPPLIER", "Return to Cold-Chain Supplier"
+    DISPOSE_BIOHAZARD = "DISPOSE_BIOHAZARD", "Biohazard Safe Disposal"
+    NOTIFY_SUPERVISOR = "NOTIFY_SUPERVISOR", "Notify Chief Pharmacist"
+
+
+class StorageConditionalConfig(models.Model):
+    """
+    Architecture Decision: ADR-0155 (P155).
+    Formulation and product-specific cold-chain storage parameters, safe ranges,
+    refrigerator placement, excursion tolerance, and handling alerts.
+    """
+
+    config_id = models.CharField(max_length=64, primary_key=True)
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="storage_configs",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="storage_configs",
+    )
+    is_cold_chain_required = models.BooleanField(default=False)
+    min_temperature_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("2.00"),
+    )
+    max_temperature_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("8.00"),
+    )
+    refrigerator_placement = models.CharField(
+        max_length=48,
+        choices=StoragePlacementZone.choices,
+        default=StoragePlacementZone.SHELF_MIDDLE,
+    )
+    max_excursion_hours = models.PositiveIntegerField(
+        default=24,
+        validators=[MaxValueValidator(72)],
+    )
+    excursion_handling_action = models.CharField(
+        max_length=48,
+        choices=ExcursionHandlingAction.choices,
+        default=ExcursionHandlingAction.QUARANTINE_IMMEDIATELY,
+    )
+    requires_ice_pack_transport = models.BooleanField(default=True)
+    protect_from_freezing = models.BooleanField(default=True)
+    handling_alert_notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        unique_together = ("product", "tenant")
+        indexes = [
+            models.Index(fields=["tenant", "is_cold_chain_required"]),
+            models.Index(fields=["product", "is_cold_chain_required"]),
+        ]
+        verbose_name = "Storage Conditional Config"
+        verbose_name_plural = "Storage Conditional Configs"
+
+    def __str__(self) -> str:
+        status = "COLD-CHAIN" if self.is_cold_chain_required else "AMBIENT"
+        return f"StorageConfig {self.config_id} - {self.product.brand_name} ({status})"
+
+    def clean(self):
+        super().clean()
+        if self.is_cold_chain_required:
+            if self.min_temperature_celsius >= self.max_temperature_celsius:
+                raise ValidationError(
+                    f"min_temperature_celsius ({self.min_temperature_celsius}°C) must be less than "
+                    f"max_temperature_celsius ({self.max_temperature_celsius}°C)."
+                )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+
 
 
 
