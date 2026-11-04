@@ -8303,3 +8303,138 @@ class UnitConversionPolicy(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class LooseTabletSalesConfig(models.Model):
+    """
+    Loose Tablet Sales & Partial Strip Dispensing Policy.
+    Architecture Decision: ADR-0164 (P164).
+    Requirement Trace: FR-078, FR-082, FR-085.
+
+    Governs whether individual tablets or partial strips can be broken and sold,
+    defines strip size to base pieces conversion, pricing tiers, and clinical
+    prohibition reasons (e.g. moisture-sensitive hygroscopic, enteric-coated).
+    """
+
+    config_id = models.CharField(
+        max_length=64,
+        primary_key=True,
+        default=uuid.uuid4,
+        help_text="Unique configuration ID prefixed with ltsc-",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="loose_tablet_sales_configs",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="loose_tablet_sales_configs",
+        help_text="Optional branch-level override; if null, applies across tenant.",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="loose_tablet_sales_configs",
+        db_index=True,
+    )
+
+    allow_loose_sales = models.BooleanField(
+        default=True,
+        help_text="Whether dispensing loose individual tablets or partial strips is allowed for this product.",
+    )
+    min_loose_dispense_units = models.PositiveIntegerField(
+        default=1,
+        help_text="Minimum base pieces for loose dispensing.",
+    )
+    max_loose_dispense_units = models.PositiveIntegerField(
+        default=100,
+        help_text="Maximum base pieces for loose dispensing per line item.",
+    )
+    strip_size_pieces = models.PositiveIntegerField(
+        default=10,
+        validators=[MinValueValidator(1)],
+        help_text="Number of individual base units contained in one full strip.",
+    )
+    strip_mrp = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="MRP per full strip in BDT.",
+    )
+    loose_unit_mrp = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="MRP per individual loose tablet in BDT.",
+    )
+    apply_loose_unit_surcharge = models.BooleanField(
+        default=False,
+        help_text="Whether a surcharge is applied for breaking strips into loose tablets.",
+    )
+    loose_surcharge_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Percentage surcharge on loose pieces.",
+    )
+    prohibition_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Clinical, moisture-sensitivity or regulatory justification when allow_loose_sales is false.",
+    )
+
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Loose Tablet Sales Config"
+        verbose_name_plural = "Loose Tablet Sales Configs"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "product"],
+                name="unique_tenant_branch_product_loose_sales_config",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "product", "is_active"]),
+            models.Index(fields=["tenant", "allow_loose_sales"]),
+        ]
+
+    def __str__(self) -> str:
+        b_name = self.branch.name if self.branch else "All Branches"
+        status = "ALLOWED" if self.allow_loose_sales else "PROHIBITED"
+        return f"{self.product.brand_name} [{self.tenant.name} - {b_name}]: Loose Sales: {status}"
+
+    def clean(self):
+        super().clean()
+        if not self.config_id:
+            self.config_id = f"ltsc-{uuid.uuid4().hex[:12]}"
+        elif not str(self.config_id).startswith("ltsc-"):
+            self.config_id = f"ltsc-{self.config_id}"
+
+        if not self.allow_loose_sales and not self.prohibition_reason:
+            self.prohibition_reason = "Loose tablet sales prohibited for this medication (moisture/integrity guardrail)."
+
+        if self.strip_size_pieces < 1:
+            raise ValidationError({"strip_size_pieces": "Strip size must be at least 1 base unit."})
+
+        if self.min_loose_dispense_units > self.max_loose_dispense_units:
+            raise ValidationError({
+                "min_loose_dispense_units": "Minimum loose units cannot exceed maximum loose units."
+            })
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)

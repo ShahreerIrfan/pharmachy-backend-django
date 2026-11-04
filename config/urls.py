@@ -67,6 +67,7 @@ from apps.core.injection_vial_views import InjectionVialEditorViewSet
 from apps.core.insulin_views import InsulinEditorViewSet
 from apps.core.inventory_base_unit_views import InventoryBaseUnitStrategyViewSet
 from apps.core.local_inventory_views import LocalInventoryViewSet
+from apps.core.loose_tablet_sales_views import LooseTabletSalesViewSet
 from apps.core.manual_payment_views import ManualPaymentClaimViewSet
 from apps.core.manufacturer_supplier_views import ManufacturerViewSet, SupplierViewSet
 from apps.core.medicine_details_preview_views import MedicineDetailsPreviewViewSet
@@ -228,6 +229,7 @@ router.register("catalog/qa-fixtures", DosageFormQaViewSet, basename="catalog-qa
 router.register("inventory/base-unit-strategies", InventoryBaseUnitStrategyViewSet, basename="inventory-base-unit-strategies")
 router.register("inventory/packaging-hierarchy", PackagingHierarchyViewSet, basename="inventory-packaging-hierarchy")
 router.register("inventory/unit-conversion", MultiLevelUnitConversionViewSet, basename="inventory-unit-conversion")
+router.register("inventory/loose-tablet-sales", LooseTabletSalesViewSet, basename="inventory-loose-tablet-sales")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
