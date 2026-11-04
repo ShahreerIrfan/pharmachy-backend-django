@@ -8711,3 +8711,251 @@ class PurchaseCostLot(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class GoodsReceiptStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    RECEIVED = "RECEIVED", "Received"
+    VERIFIED = "VERIFIED", "Verified"
+    POSTED = "POSTED", "Posted to Inventory"
+    CANCELLED = "CANCELLED", "Cancelled"
+    REVERSED = "REVERSED", "Reversed"
+
+
+class GoodsReceiptNote(models.Model):
+    """
+    Architecture Decision: ADR-0168 (P168).
+    Goods Received Note (GRN) capturing supplier shipments, purchase order numbers,
+    and challan/invoice metadata.
+    """
+
+    grn_id = models.CharField(max_length=64, primary_key=True)
+    grn_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="goods_receipt_notes",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="goods_receipt_notes",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        "core.Supplier",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="goods_receipt_notes",
+    )
+    supplier_name = models.CharField(max_length=255, blank=True, default="")
+    purchase_order_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    supplier_invoice_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    receipt_date = models.DateField(db_index=True)
+    status = models.CharField(
+        max_length=32,
+        choices=GoodsReceiptStatus.choices,
+        default=GoodsReceiptStatus.DRAFT,
+        db_index=True,
+    )
+    total_received_base_units = models.PositiveIntegerField(default=0)
+    total_invoice_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    received_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="received_grns",
+    )
+    verified_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="verified_grns",
+    )
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-receipt_date", "-created_at"]
+        verbose_name = "Goods Receipt Note"
+        verbose_name_plural = "Goods Receipt Notes"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["tenant", "grn_number"]),
+            models.Index(fields=["tenant", "purchase_order_number"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.grn_number} [{self.status}] - {self.supplier_name} ({self.receipt_date})"
+
+    def clean(self):
+        super().clean()
+        if not self.grn_id:
+            self.grn_id = f"grn-{uuid.uuid4().hex[:12]}"
+        elif not str(self.grn_id).startswith("grn-"):
+            self.grn_id = f"grn-{self.grn_id}"
+        if not self.grn_number:
+            self.grn_number = f"GRN-{uuid.uuid4().hex[:8].upper()}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class GoodsReceiptLine(models.Model):
+    """
+    Architecture Decision: ADR-0168 (P168).
+    Line item within a Goods Received Note representing a received medicine product.
+    """
+
+    line_id = models.CharField(max_length=64, primary_key=True)
+    grn = models.ForeignKey(
+        GoodsReceiptNote,
+        on_delete=models.CASCADE,
+        related_name="lines",
+        db_index=True,
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="goods_receipt_lines",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="goods_receipt_lines",
+        db_index=True,
+    )
+    ordered_quantity_base_units = models.PositiveIntegerField(default=0)
+    received_quantity_base_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        default=Decimal("0.0000"),
+    )
+    is_fully_allocated = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        verbose_name = "Goods Receipt Line"
+        verbose_name_plural = "Goods Receipt Lines"
+        indexes = [
+            models.Index(fields=["grn", "product"]),
+            models.Index(fields=["tenant", "is_fully_allocated"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Line {self.line_id} ({self.product.brand_name}): {self.received_quantity_base_units} units @ {self.unit_cost} BDT"
+
+    def clean(self):
+        super().clean()
+        if not self.line_id:
+            self.line_id = f"grnl-{uuid.uuid4().hex[:12]}"
+        elif not str(self.line_id).startswith("grnl-"):
+            self.line_id = f"grnl-{self.line_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class GoodsReceiptBatchLink(models.Model):
+    """
+    Architecture Decision: ADR-0168 (P168).
+    Binds a GRN receipt line to a verified manufacturer batch and purchase cost lot
+    with strict idempotency to prevent duplicate stock increments.
+    """
+
+    link_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="receipt_batch_links",
+        db_index=True,
+    )
+    grn = models.ForeignKey(
+        GoodsReceiptNote,
+        on_delete=models.CASCADE,
+        related_name="batch_links",
+        db_index=True,
+    )
+    line = models.ForeignKey(
+        GoodsReceiptLine,
+        on_delete=models.CASCADE,
+        related_name="batch_allocations",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.CASCADE,
+        related_name="grn_receipt_links",
+        db_index=True,
+    )
+    cost_lot = models.ForeignKey(
+        PurchaseCostLot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="grn_links",
+        db_index=True,
+    )
+    quantity_base_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    is_posted = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True if this allocation has already incremented inventory stock.",
+    )
+    posted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        verbose_name = "Goods Receipt Batch Link"
+        verbose_name_plural = "Goods Receipt Batch Links"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["line", "batch"],
+                name="unique_grn_line_batch_link",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["grn", "is_posted"]),
+            models.Index(fields=["line", "batch"]),
+            models.Index(fields=["batch", "is_posted"]),
+        ]
+
+    def __str__(self) -> str:
+        posted = "POSTED" if self.is_posted else "PENDING"
+        return f"Link {self.link_id} -> Batch {self.batch.batch_number}: {self.quantity_base_units} units [{posted}]"
+
+    def clean(self):
+        super().clean()
+        if not self.link_id:
+            self.link_id = f"grnbl-{uuid.uuid4().hex[:12]}"
+        elif not str(self.link_id).startswith("grnbl-"):
+            self.link_id = f"grnbl-{self.link_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)

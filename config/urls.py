@@ -78,6 +78,7 @@ from apps.core.medicine_variant_views import MedicineVariantViewSet
 from apps.core.multi_level_unit_conversion_views import MultiLevelUnitConversionViewSet
 from apps.core.batch_entity_views import BatchEntityViewSet
 from apps.core.purchase_cost_lot_views import PurchaseCostLotViewSet
+from apps.core.batch_receipt_linking_views import BatchReceiptLinkingViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -236,6 +237,7 @@ router.register("inventory/loose-tablet-sales", LooseTabletSalesViewSet, basenam
 router.register("inventory/non-divisible-packs", NonDivisiblePackViewSet, basename="inventory-non-divisible-packs")
 router.register("inventory/batch-entities", BatchEntityViewSet, basename="inventory-batch-entities")
 router.register("inventory/purchase-cost-lots", PurchaseCostLotViewSet, basename="inventory-purchase-cost-lots")
+router.register("inventory/goods-receipts", BatchReceiptLinkingViewSet, basename="inventory-goods-receipts")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
