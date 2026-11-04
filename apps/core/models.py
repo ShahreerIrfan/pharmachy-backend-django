@@ -9296,3 +9296,103 @@ class BranchStockAvailability(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class BatchExpiryPolicy(models.Model):
+    """
+    Architecture Decision: ADR-0172 (P172).
+    Configurable batch expiry alert windows and sale cutoff guard.
+    Enforces multi-tier alerts (warning, critical, quarantine, cutoff)
+    and blocks sales of expired or cutoff-breached medicines.
+    """
+
+    policy_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="batch_expiry_policies",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="batch_expiry_policies",
+        db_index=True,
+        help_text="Null designates tenant-wide fallback policy.",
+    )
+    warning_lead_days = models.PositiveIntegerField(
+        default=90,
+        validators=[MinValueValidator(1)],
+        help_text="Early warning tier (Yellow alert) threshold in days.",
+    )
+    critical_lead_days = models.PositiveIntegerField(
+        default=30,
+        validators=[MinValueValidator(1)],
+        help_text="Critical near-expiry tier (Amber alert) threshold in days.",
+    )
+    quarantine_lead_days = models.PositiveIntegerField(
+        default=15,
+        validators=[MinValueValidator(0)],
+        help_text="Urgent disposition tier (Red alert) threshold in days.",
+    )
+    sale_cutoff_lead_days = models.PositiveIntegerField(
+        default=7,
+        validators=[MinValueValidator(0)],
+        help_text="Mandatory checkout sale cutoff lead threshold in days.",
+    )
+    auto_quarantine_on_cutoff = models.BooleanField(
+        default=True,
+        help_text="Automatically update batch to is_quarantined=True when cutoff breached.",
+    )
+    allow_manager_override_near_expiry = models.BooleanField(
+        default=False,
+        help_text="Allow authorized manager override for near-expiry (never past actual expiry).",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Batch Expiry Policy"
+        verbose_name_plural = "Batch Expiry Policies"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch"],
+                name="unique_tenant_branch_expiry_policy",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "is_active"]),
+            models.Index(fields=["tenant", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        branch_label = self.branch.name if self.branch else "Tenant-Wide"
+        return f"ExpiryPolicy {self.policy_id} [{branch_label}]: Warning={self.warning_lead_days}d, Critical={self.critical_lead_days}d, Cutoff={self.sale_cutoff_lead_days}d"
+
+    def clean(self):
+        super().clean()
+        if not self.policy_id:
+            self.policy_id = f"expol-{uuid.uuid4().hex[:12]}"
+        elif not str(self.policy_id).startswith("expol-"):
+            self.policy_id = f"expol-{self.policy_id}"
+
+        if self.critical_lead_days > self.warning_lead_days:
+            raise ValidationError(
+                {"critical_lead_days": "Critical lead days cannot exceed warning lead days."}
+            )
+        if self.quarantine_lead_days > self.critical_lead_days:
+            raise ValidationError(
+                {"quarantine_lead_days": "Quarantine lead days cannot exceed critical lead days."}
+            )
+        if self.sale_cutoff_lead_days > self.quarantine_lead_days:
+            raise ValidationError(
+                {"sale_cutoff_lead_days": "Sale cutoff lead days cannot exceed quarantine lead days."}
+            )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
