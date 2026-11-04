@@ -24,6 +24,7 @@ class BatchStatus(str, Enum):
     QUARANTINED = "QUARANTINED"
     RECALLED = "RECALLED"
     DEPLETED = "DEPLETED"
+    ARCHIVED = "ARCHIVED"
 
 
 class PrescriptionStatus(str, Enum):
@@ -99,6 +100,10 @@ class LifecycleEngine:
         (BatchStatus.QUARANTINED, BatchStatus.ACTIVE): {"PHARMACIST"},  # Requires clinical sign-off
         (BatchStatus.QUARANTINED, BatchStatus.RECALLED): {"PHARMACIST", "BRANCH_MANAGER"},
         (BatchStatus.EXPIRED, BatchStatus.DEPLETED): {"INVENTORY_STAFF", "PHARMACIST"},
+        (BatchStatus.ACTIVE, BatchStatus.RECALLED): {"SYSTEM", "PHARMACIST", "BRANCH_MANAGER"},
+        (BatchStatus.ACTIVE, BatchStatus.ARCHIVED): {"BRANCH_MANAGER", "OWNER_ADMIN"},
+        (BatchStatus.DEPLETED, BatchStatus.ARCHIVED): {"BRANCH_MANAGER", "OWNER_ADMIN"},
+        (BatchStatus.EXPIRED, BatchStatus.ARCHIVED): {"BRANCH_MANAGER", "OWNER_ADMIN"},
     }
 
     # Prescription transitions: (Current, Target) -> Permitted Roles

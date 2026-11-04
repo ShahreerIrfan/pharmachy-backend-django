@@ -76,6 +76,7 @@ from apps.core.medicine_form_template_views import MedicineFormTemplateViewSet
 from apps.core.medicine_search_views import MedicineSearchAutocompleteViewSet
 from apps.core.medicine_variant_views import MedicineVariantViewSet
 from apps.core.multi_level_unit_conversion_views import MultiLevelUnitConversionViewSet
+from apps.core.batch_entity_views import BatchEntityViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -232,6 +233,7 @@ router.register("inventory/packaging-hierarchy", PackagingHierarchyViewSet, base
 router.register("inventory/unit-conversion", MultiLevelUnitConversionViewSet, basename="inventory-unit-conversion")
 router.register("inventory/loose-tablet-sales", LooseTabletSalesViewSet, basename="inventory-loose-tablet-sales")
 router.register("inventory/non-divisible-packs", NonDivisiblePackViewSet, basename="inventory-non-divisible-packs")
+router.register("inventory/batch-entities", BatchEntityViewSet, basename="inventory-batch-entities")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

@@ -33,6 +33,9 @@ class BatchStatus(models.TextChoices):
     ACTIVE = "ACTIVE", "Active"
     EXPIRED = "EXPIRED", "Expired"
     QUARANTINED = "QUARANTINED", "Quarantined"
+    RECALLED = "RECALLED", "Recalled"
+    DEPLETED = "DEPLETED", "Depleted"
+    ARCHIVED = "ARCHIVED", "Archived"
 
 
 class StorageCondition(models.TextChoices):
@@ -670,12 +673,26 @@ class BatchStock(models.Model):
     quarantine_lead_days = models.PositiveIntegerField(default=30)
     is_quarantined = models.BooleanField(default=False)
     reconstitution_shelf_life_days = models.PositiveIntegerField(null=True, blank=True)
+    recall_notice = models.ForeignKey(
+        "CatalogueLifecycleNotice",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="linked_batches",
+    )
+    recall_reason = models.CharField(max_length=255, blank=True, default="")
+    manufacturer_name = models.CharField(max_length=128, blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
 
     class Meta:
         ordering = ["expiry_date", "batch_number"]
         unique_together = ("tenant", "branch", "product", "batch_number")
         indexes = [
             models.Index(fields=["tenant", "branch", "expiry_date"]),
+            models.Index(fields=["tenant", "batch_number"]),
+            models.Index(fields=["status", "is_active"]),
         ]
         verbose_name = "Batch Stock Lot"
         verbose_name_plural = "Batch Stock Lots"
@@ -688,6 +705,18 @@ class BatchStock(models.Model):
         from django.utils import timezone
 
         return self.expiry_date < timezone.now().date()
+
+    @property
+    def is_recalled(self) -> bool:
+        return self.status == BatchStatus.RECALLED or self.recall_notice_id is not None
+
+    @property
+    def is_dispensable(self) -> bool:
+        if self.status != BatchStatus.ACTIVE or not self.is_active:
+            return False
+        if self.is_expired or self.is_quarantined or self.recall_notice_id is not None:
+            return False
+        return self.quantity_base_units > 0
 
 
 class RegulatedStockEntry(models.Model):
