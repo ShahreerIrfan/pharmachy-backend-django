@@ -655,6 +655,10 @@ class BatchStock(models.Model):
     product = models.ForeignKey(MedicineProduct, on_delete=models.CASCADE, related_name="batches")
     batch_number = models.CharField(max_length=64)
     quantity_base_units = models.PositiveIntegerField(default=0)
+    reserved_quantity_base_units = models.PositiveIntegerField(
+        default=0,
+        help_text="Quantity currently reserved for active checkouts or pending carts",
+    )
     expiry_date = models.DateField(db_index=True)
     purchase_date = models.DateField()
     cost_per_unit = models.DecimalField(
@@ -701,10 +705,14 @@ class BatchStock(models.Model):
         return f"Batch {self.batch_number} - {self.product.brand_name} (Qty: {self.quantity_base_units}, Exp: {self.expiry_date})"
 
     @property
+    def available_quantity_base_units(self) -> int:
+        return max(0, self.quantity_base_units - self.reserved_quantity_base_units)
+
+    @property
     def is_expired(self) -> bool:
         from django.utils import timezone
 
-        return self.expiry_date < timezone.now().date()
+        return self.expiry_date <= timezone.now().date()
 
     @property
     def is_recalled(self) -> bool:
@@ -716,7 +724,7 @@ class BatchStock(models.Model):
             return False
         if self.is_expired or self.is_quarantined or self.recall_notice_id is not None:
             return False
-        return self.quantity_base_units > 0
+        return self.available_quantity_base_units > 0
 
 
 class RegulatedStockEntry(models.Model):
@@ -8959,3 +8967,93 @@ class GoodsReceiptBatchLink(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+class StockReservationStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active Reserved"
+    COMMITTED = "COMMITTED", "Committed / Sold"
+    RELEASED = "RELEASED", "Released / Cancelled"
+    EXPIRED = "EXPIRED", "Expired / Timed Out"
+
+
+class StockReservation(models.Model):
+    """
+    Architecture Decision: ADR-0169 (P169).
+    Pessimistic concurrency reservation for FEFO allocated batch stock.
+    Prevents race conditions, double reservations, and checkout stockouts.
+    """
+
+    reservation_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="stock_reservations",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="stock_reservations",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="stock_reservations",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.CASCADE,
+        related_name="reservations",
+        db_index=True,
+    )
+    quantity_base_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    status = models.CharField(
+        max_length=32,
+        choices=StockReservationStatus.choices,
+        default=StockReservationStatus.ACTIVE,
+        db_index=True,
+    )
+    reference_type = models.CharField(
+        max_length=64,
+        blank=True,
+        default="POS_CART",
+        help_text="Context: POS_CART, PRESCRIPTION, DISPENSING, TRANSFER",
+    )
+    reference_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    expires_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_reservations",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Stock Reservation"
+        verbose_name_plural = "Stock Reservations"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["batch", "status"]),
+            models.Index(fields=["reference_type", "reference_id"]),
+            models.Index(fields=["expires_at", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Reservation {self.reservation_id} -> {self.batch.batch_number}: {self.quantity_base_units} units [{self.status}]"
+
+    def clean(self):
+        super().clean()
+        if not self.reservation_id:
+            self.reservation_id = f"resv-{uuid.uuid4().hex[:12]}"
+        elif not str(self.reservation_id).startswith("resv-"):
+            self.reservation_id = f"resv-{self.reservation_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
