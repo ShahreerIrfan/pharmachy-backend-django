@@ -9057,3 +9057,117 @@ class StockReservation(models.Model):
         self.clean()
         super().save(*args, **kwargs)
 
+class SaleLotAllocationStatus(models.TextChoices):
+    COMMITTED = "COMMITTED", "Committed / Sold"
+    PARTIALLY_RETURNED = "PARTIALLY_RETURNED", "Partially Returned"
+    FULLY_RETURNED = "FULLY_RETURNED", "Fully Returned"
+    REVERSED = "REVERSED", "Reversed / Voided"
+
+
+class SaleLotAllocation(models.Model):
+    """
+    Architecture Decision: ADR-0170 (P170).
+    Sale Item Lot Allocation Record binding cashier invoice lines to exact manufacturer
+    batches and purchase cost lots for DGDA recall traceability, return restock,
+    and unblended GAAP-compliant gross margin derivations.
+    """
+
+    allocation_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="sale_lot_allocations",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="sale_lot_allocations",
+        db_index=True,
+    )
+    invoice = models.ForeignKey(
+        SaleInvoice,
+        on_delete=models.CASCADE,
+        related_name="lot_allocations",
+        db_index=True,
+    )
+    invoice_item = models.ForeignKey(
+        SaleInvoiceItem,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="lot_allocations",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.PROTECT,
+        related_name="sale_lot_allocations",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.PROTECT,
+        related_name="sale_lot_allocations",
+        db_index=True,
+    )
+    cost_lot = models.ForeignKey(
+        PurchaseCostLot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sale_allocations",
+        db_index=True,
+    )
+    quantity_base_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    returned_quantity_base_units = models.PositiveIntegerField(default=0)
+    unit_selling_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    total_selling_price = models.DecimalField(max_digits=14, decimal_places=4)
+    total_cost = models.DecimalField(max_digits=14, decimal_places=4)
+    gross_profit = models.DecimalField(max_digits=14, decimal_places=4)
+    profit_margin_pct = models.DecimalField(max_digits=7, decimal_places=2, default=Decimal("0.00"))
+    status = models.CharField(
+        max_length=32,
+        choices=SaleLotAllocationStatus.choices,
+        default=SaleLotAllocationStatus.COMMITTED,
+        db_index=True,
+    )
+    is_returned = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Sale Lot Allocation"
+        verbose_name_plural = "Sale Lot Allocations"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "created_at"]),
+            models.Index(fields=["batch", "created_at"]),
+            models.Index(fields=["cost_lot", "created_at"]),
+            models.Index(fields=["invoice", "status"]),
+            models.Index(fields=["tenant", "is_returned"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"SaleAllocation {self.allocation_id} -> Inv {self.invoice.invoice_number} Batch {self.batch.batch_number}: {self.quantity_base_units} units [Profit: {self.gross_profit}]"
+
+    def clean(self):
+        super().clean()
+        if not self.allocation_id:
+            self.allocation_id = f"sall-{uuid.uuid4().hex[:12]}"
+        elif not str(self.allocation_id).startswith("sall-"):
+            self.allocation_id = f"sall-{self.allocation_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+

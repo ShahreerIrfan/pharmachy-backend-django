@@ -80,6 +80,7 @@ from apps.core.batch_entity_views import BatchEntityViewSet
 from apps.core.purchase_cost_lot_views import PurchaseCostLotViewSet
 from apps.core.batch_receipt_linking_views import BatchReceiptLinkingViewSet
 from apps.core.fefo_allocation_views import FefoAllocationViewSet
+from apps.core.sale_lot_allocation_views import SaleLotAllocationViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -240,6 +241,7 @@ router.register("inventory/batch-entities", BatchEntityViewSet, basename="invent
 router.register("inventory/purchase-cost-lots", PurchaseCostLotViewSet, basename="inventory-purchase-cost-lots")
 router.register("inventory/goods-receipts", BatchReceiptLinkingViewSet, basename="inventory-goods-receipts")
 router.register("inventory/fefo", FefoAllocationViewSet, basename="inventory-fefo")
+router.register("inventory/sale-lot-allocations", SaleLotAllocationViewSet, basename="inventory-sale-lot-allocations")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
