@@ -8597,3 +8597,117 @@ class NonDivisiblePackPolicy(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class PurchaseCostLotStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active"
+    DEPLETED = "DEPLETED", "Depleted"
+    ADJUSTED = "ADJUSTED", "Adjusted"
+    REVERSED = "REVERSED", "Reversed"
+
+
+class PurchaseCostLot(models.Model):
+    """
+    Architecture Decision: ADR-0167 (P167).
+    Separate purchase cost lot entity from batch identity so identical batches
+    received at different prices retain distinct COGS and acquisition history.
+    """
+
+    lot_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="purchase_cost_lots",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="purchase_cost_lots",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="purchase_cost_lots",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.CASCADE,
+        related_name="cost_lots",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        "core.Supplier",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="purchase_cost_lots",
+    )
+    supplier_name = models.CharField(max_length=255, blank=True, default="")
+    purchase_order_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    grn_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    invoice_reference = models.CharField(max_length=64, blank=True, default="")
+    purchase_date = models.DateField(db_index=True)
+    unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Exact acquisition cost per base unit in BDT (4 decimal places).",
+    )
+    initial_quantity = models.PositiveIntegerField(
+        validators=[MinValueValidator(1)],
+        help_text="Initial received quantity in exact integer base units.",
+    )
+    remaining_quantity = models.PositiveIntegerField(
+        default=0,
+        help_text="Remaining unconsumed quantity in exact integer base units.",
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=PurchaseCostLotStatus.choices,
+        default=PurchaseCostLotStatus.ACTIVE,
+        db_index=True,
+    )
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["purchase_date", "created_at"]
+        verbose_name = "Purchase Cost Lot"
+        verbose_name_plural = "Purchase Cost Lots"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(remaining_quantity__lte=models.F("initial_quantity")),
+                name="check_cost_lot_remaining_lte_initial",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(unit_cost__gte=Decimal("0.0000")),
+                name="check_cost_lot_positive_unit_cost",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "batch"]),
+            models.Index(fields=["batch", "status", "purchase_date"]),
+            models.Index(fields=["tenant", "purchase_order_number"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Lot {self.lot_id} [Batch {self.batch.batch_number}]: {self.remaining_quantity}/{self.initial_quantity} @ {self.unit_cost} BDT"
+
+    def clean(self):
+        super().clean()
+        if not self.lot_id:
+            self.lot_id = f"pcl-{uuid.uuid4().hex[:12]}"
+        elif not str(self.lot_id).startswith("pcl-"):
+            self.lot_id = f"pcl-{self.lot_id}"
+
+        if self.remaining_quantity > self.initial_quantity:
+            raise ValidationError({"remaining_quantity": "Remaining quantity cannot exceed initial quantity."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
