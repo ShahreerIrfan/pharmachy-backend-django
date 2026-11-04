@@ -9171,3 +9171,128 @@ class SaleLotAllocation(models.Model):
         self.clean()
         super().save(*args, **kwargs)
 
+
+
+class BranchStockAvailability(models.Model):
+    """
+    Architecture Decision: ADR-0171 (P171).
+    Authoritative Branch-Level Multi-Tier Stock Availability Projection Matrix.
+    Distinguishes on-hand, reserved, quarantined, pending, physically available,
+    and server-confirmed available quantities with stock conservation invariants.
+    """
+
+    availability_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="stock_availabilities",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="stock_availabilities",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="branch_availabilities",
+        db_index=True,
+    )
+    quantity_on_hand = models.PositiveIntegerField(
+        default=0,
+        help_text="Total physical base units in all branch batches regardless of status.",
+    )
+    quantity_reserved = models.PositiveIntegerField(
+        default=0,
+        help_text="Base units locked in active reservations or unfinalized POS carts.",
+    )
+    quantity_quarantined = models.PositiveIntegerField(
+        default=0,
+        help_text="Base units in quarantined, recalled, or expired batches.",
+    )
+    quantity_pending_inward = models.PositiveIntegerField(
+        default=0,
+        help_text="Base units on unposted/draft goods receipts in transit or pending verification.",
+    )
+    quantity_physically_available = models.PositiveIntegerField(
+        default=0,
+        help_text="Stock physically on shelf minus quarantined: max(0, on_hand - quarantined).",
+    )
+    quantity_server_confirmed_available = models.PositiveIntegerField(
+        default=0,
+        help_text="Guaranteed central stock immediately sellable: max(0, physically_available - reserved).",
+    )
+    reorder_level_base_units = models.PositiveIntegerField(
+        default=0,
+        help_text="Reorder threshold for branch warning triggers.",
+    )
+    is_out_of_stock = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True when quantity_server_confirmed_available == 0.",
+    )
+    is_below_reorder_level = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True when server_confirmed_available <= reorder_level_base_units > 0.",
+    )
+    version = models.PositiveIntegerField(
+        default=1,
+        help_text="Optimistic concurrency tracking version counter.",
+    )
+    last_recalculated_at = models.DateTimeField(
+        auto_now=True,
+        help_text="Timestamp of last authoritative calculation sync.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["product__brand_name", "-updated_at"]
+        verbose_name = "Branch Stock Availability"
+        verbose_name_plural = "Branch Stock Availabilities"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "product"],
+                name="unique_branch_product_stock_availability",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "product"]),
+            models.Index(fields=["branch", "is_out_of_stock"]),
+            models.Index(fields=["branch", "is_below_reorder_level"]),
+            models.Index(fields=["tenant", "updated_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"BranchAvailability {self.branch.name} - {self.product.brand_name}: "
+            f"OnHand={self.quantity_on_hand}, Avail={self.quantity_server_confirmed_available}, "
+            f"Resv={self.quantity_reserved}, Quarantined={self.quantity_quarantined}"
+        )
+
+    def clean(self):
+        super().clean()
+        if not self.availability_id:
+            self.availability_id = f"bav-{uuid.uuid4().hex[:12]}"
+        elif not str(self.availability_id).startswith("bav-"):
+            self.availability_id = f"bav-{self.availability_id}"
+
+        # Enforce stock conservation invariant
+        self.quantity_physically_available = max(
+            0, self.quantity_on_hand - self.quantity_quarantined
+        )
+        self.quantity_server_confirmed_available = max(
+            0, self.quantity_physically_available - self.quantity_reserved
+        )
+        self.is_out_of_stock = bool(self.quantity_server_confirmed_available == 0)
+        self.is_below_reorder_level = bool(
+            self.reorder_level_base_units > 0
+            and self.quantity_server_confirmed_available <= self.reorder_level_base_units
+        )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
