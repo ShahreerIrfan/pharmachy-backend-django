@@ -8186,3 +8186,120 @@ class PackagingHierarchyNode(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class UnitConversionPolicy(models.Model):
+    """
+    Architecture Decision: ADR-0163 (P163).
+    Phase 09: Packaging, Unit Conversion, Batches & Cost Lots.
+    Multi-Level Unit Conversion & Inappropriate Dosing-Unit Guardrails.
+    - Specifies whether a pharmaceutical tablet or solid item is splittable.
+    - Limits permitted fractional splits (e.g. 0.5 for half-tablets).
+    - Lists prohibited dosing units for the product dosage form (e.g. ML, PUFF for tablets).
+    - Stores clinical dosing conversion ratio (e.g. 1 Tablet = 500mg) for reference.
+    """
+
+    policy_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="unit_conversion_policies",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="unit_conversion_policies",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="unit_conversion_policies",
+        db_index=True,
+    )
+
+    is_splittable = models.BooleanField(
+        default=False,
+        help_text="Whether this solid tablet is scored with an approved breakline for fractional dispensing.",
+    )
+    allowed_split_fractions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of permitted fractional steps (e.g. [0.5, 1.0]). If not splittable, defaults to [1.0].",
+    )
+
+    clinical_dosing_unit = models.CharField(
+        max_length=32,
+        blank=True,
+        default="MG",
+        help_text="Canonical active ingredient dosing unit (e.g. MG, MCG, G, ML, PUFF).",
+    )
+    dosing_conversion_ratio = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("1.0000"),
+        validators=[MinValueValidator(Decimal("0.0001"))],
+        help_text="Clinical dosing strength per base unit (e.g. 500.0000 for 500mg per tablet).",
+    )
+    prohibited_dosing_units = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of incompatible dosing/packaging units that must be blocked for this product.",
+    )
+
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Unit Conversion Policy"
+        verbose_name_plural = "Unit Conversion Policies"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "product"],
+                name="unique_tenant_branch_product_unit_conversion_policy",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "product", "is_active"]),
+            models.Index(fields=["tenant", "is_splittable"]),
+        ]
+
+    def __str__(self) -> str:
+        b_name = self.branch.name if self.branch else "All Branches"
+        return f"{self.product.brand_name} [{self.tenant.name} - {b_name}]: Splittable: {self.is_splittable} (Allowed: {self.allowed_split_fractions})"
+
+    def clean(self):
+        super().clean()
+        if not self.allowed_split_fractions:
+            self.allowed_split_fractions = [0.5, 1.0] if self.is_splittable else [1.0]
+        else:
+            valid_fractions = []
+            for f in self.allowed_split_fractions:
+                try:
+                    num = float(f)
+                    if num <= 0 or num > 1.0:
+                        raise ValueError()
+                    valid_fractions.append(round(num, 4))
+                except Exception:
+                    raise ValidationError({
+                        "allowed_split_fractions": f"Invalid split fraction '{f}'. Must be positive number between 0 and 1.0."
+                    })
+            if 1.0 not in valid_fractions:
+                valid_fractions.append(1.0)
+            valid_fractions.sort()
+            self.allowed_split_fractions = valid_fractions
+
+        if not self.is_splittable and self.allowed_split_fractions != [1.0]:
+            raise ValidationError({
+                "allowed_split_fractions": "Non-splittable tablets cannot have fractional steps other than [1.0]."
+            })
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
