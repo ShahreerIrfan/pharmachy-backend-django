@@ -8438,3 +8438,133 @@ class LooseTabletSalesConfig(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class NonDivisibleContainerType(models.TextChoices):
+    SEALED_BOX = "SEALED_BOX", "Sealed Manufacturer Box / Carton"
+    INSULIN_PEN = "INSULIN_PEN", "Pre-filled Insulin Pen / Cartridge"
+    INHALER_CANISTER = "INHALER_CANISTER", "Metered Dose Inhaler / Canister"
+    EYE_DROPS_BOTTLE = "EYE_DROPS_BOTTLE", "Sterile Ophthalmic Droptainer"
+    TOPICAL_TUBE = "TOPICAL_TUBE", "Sealed Topical Ointment/Cream Tube"
+    DIAGNOSTIC_KIT = "DIAGNOSTIC_KIT", "Unit Diagnostic Test Kit / Strips Pack"
+    STERILE_VIAL_BOX = "STERILE_VIAL_BOX", "Sealed Multi-Vial/Ampoule Box"
+    OTHER = "OTHER", "Other Non-Divisible Regulated Container"
+
+
+class NonDivisiblePackPolicy(models.Model):
+    """
+    Non-Divisible Regulated Pack & Sterile Container Splitting Policy.
+    Architecture Decision: ADR-0165 (P165).
+    Requirement Trace: FR-078, FR-082, FR-086.
+
+    Enforces packaging integrity for non-divisible delivery devices (insulin pens,
+    inhalers, eye drop bottles, diagnostic kits, sealed sterile boxes), preventing
+    unauthorized fractional dispensing or carton splitting without clinical protocols.
+    """
+
+    policy_id = models.CharField(
+        max_length=64,
+        primary_key=True,
+        default=uuid.uuid4,
+        help_text="Unique policy ID prefixed with ndpp-",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="non_divisible_pack_policies",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="non_divisible_pack_policies",
+        help_text="Optional branch-level override; if null, applies across tenant.",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="non_divisible_pack_policies",
+        db_index=True,
+    )
+
+    container_type = models.CharField(
+        max_length=32,
+        choices=NonDivisibleContainerType.choices,
+        default=NonDivisibleContainerType.SEALED_BOX,
+        db_index=True,
+        help_text="Type of non-divisible regulated container.",
+    )
+    is_splitting_allowed = models.BooleanField(
+        default=False,
+        help_text="Whether breaking the sealed regulated container is permitted under approved rules.",
+    )
+    require_pharmacist_approval = models.BooleanField(
+        default=True,
+        help_text="If splitting is permitted, whether a licensed Pharmacist/Manager must sign off.",
+    )
+    approved_break_factor = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Number of approved sub-units inside container if splitting is authorized (e.g. 5 ampoules).",
+    )
+    sub_unit_label = models.CharField(
+        max_length=32,
+        default="PIECE",
+        help_text="Label of the sub-unit (e.g. AMPOULE, PEN, CARTRIDGE, BOTTLE, TUBE).",
+    )
+    prohibition_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        default="Sealed sterile container integrity cannot be broken without approved prescription protocol.",
+        help_text="Clinical justification why breaking container is prohibited.",
+    )
+    exemption_protocols = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of approved clinical exemption protocol codes (e.g. ['HOSPITAL_INPATIENT', 'DGDA_COMPASSIONATE_CARE']).",
+    )
+
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Non-Divisible Pack Policy"
+        verbose_name_plural = "Non-Divisible Pack Policies"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "product"],
+                name="unique_tenant_branch_product_non_divisible_pack_policy",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "product", "is_active"]),
+            models.Index(fields=["tenant", "container_type"]),
+            models.Index(fields=["tenant", "is_splitting_allowed"]),
+        ]
+
+    def __str__(self) -> str:
+        b_name = self.branch.name if self.branch else "All Branches"
+        status = "SPLITTABLE (RESTRICTED)" if self.is_splitting_allowed else "NON-DIVISIBLE (SEALED)"
+        return f"{self.product.brand_name} [{self.tenant.name} - {b_name}]: {self.container_type} - {status}"
+
+    def clean(self):
+        super().clean()
+        if not self.policy_id:
+            self.policy_id = f"ndpp-{uuid.uuid4().hex[:12]}"
+        elif not str(self.policy_id).startswith("ndpp-"):
+            self.policy_id = f"ndpp-{self.policy_id}"
+
+        if not self.is_splitting_allowed and not self.prohibition_reason:
+            self.prohibition_reason = "Sealed sterile container integrity cannot be broken without approved prescription protocol."
+
+        if self.approved_break_factor < 1:
+            raise ValidationError({"approved_break_factor": "Approved break factor must be at least 1."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
