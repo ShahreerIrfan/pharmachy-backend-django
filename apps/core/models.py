@@ -10054,3 +10054,112 @@ class StockValuationSnapshot(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class PackagingConcurrencyAuditRecord(models.Model):
+    """
+    Architecture Decision: ADR-0180 (P180).
+    Audited stress-test execution record capturing multi-threaded packaging conversions,
+    concurrent checkouts, split lot allocations, and mathematical stock conservation proof.
+    """
+
+    test_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="concurrency_stress_audits",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="concurrency_stress_audits",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.PROTECT,
+        related_name="concurrency_stress_audits",
+        db_index=True,
+    )
+    concurrency_level = models.PositiveIntegerField(
+        default=10,
+        help_text="Number of simulated simultaneous threads/cashier terminals.",
+    )
+    total_requests = models.PositiveIntegerField(
+        default=10,
+        help_text="Total allocation and checkout operations attempted.",
+    )
+    successful_transactions = models.PositiveIntegerField(
+        default=0,
+        help_text="Count of checkouts successfully committed without collision.",
+    )
+    rejected_oversells = models.PositiveIntegerField(
+        default=0,
+        help_text="Count of transactions cleanly rejected due to stock depletion (zero overselling).",
+    )
+    initial_stock_base_units = models.PositiveIntegerField(
+        default=0,
+        help_text="Physical inventory on-hand immediately prior to stress execution.",
+    )
+    final_stock_base_units = models.PositiveIntegerField(
+        default=0,
+        help_text="Physical inventory remaining on-hand immediately following stress execution.",
+    )
+    total_allocated_base_units = models.PositiveIntegerField(
+        default=0,
+        help_text="Cumulative base units successfully allocated to checkouts.",
+    )
+    stock_conserved = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Asserts initial_stock == final_stock + total_allocated (Zero stock drift).",
+    )
+    fefo_order_verified = models.BooleanField(
+        default=True,
+        help_text="Asserts candidate lots were consumed in strict earliest-expiry order.",
+    )
+    integer_units_verified = models.BooleanField(
+        default=True,
+        help_text="Asserts all package conversions maintained indivisible whole integer base units.",
+    )
+    execution_time_ms = models.PositiveIntegerField(
+        default=0,
+        help_text="Total execution duration of concurrent stress test in milliseconds.",
+    )
+    notes = models.TextField(blank=True, default="")
+    tested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="concurrency_stress_audits",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Packaging Concurrency Audit Record"
+        verbose_name_plural = "Packaging Concurrency Audit Records"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "-created_at"]),
+            models.Index(fields=["product", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ConcurrencyAudit {self.test_id}: {self.product.brand_name} (Threads: {self.concurrency_level}, Conserved: {self.stock_conserved})"
+
+    def clean(self):
+        super().clean()
+        if not self.test_id:
+            self.test_id = f"cstress-{uuid.uuid4().hex[:12]}"
+        elif not str(self.test_id).startswith("cstress-"):
+            self.test_id = f"cstress-{self.test_id}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the audit record."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
