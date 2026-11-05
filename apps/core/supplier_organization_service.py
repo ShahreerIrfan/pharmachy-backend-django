@@ -22,7 +22,10 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
 from apps.core.models import (
     Branch,
+    PreferredCommunicationMethod,
     Supplier,
+    SupplierContactPerson,
+    SupplierContactPersonRole,
     SupplierLedgerEntry,
     SupplierPostingType,
     SupplierRegion,
@@ -599,4 +602,286 @@ class SupplierOrganizationService:
         )
 
         return cls.serialize_supplier(supplier)
+
+    # =========================================================================
+    # SUPPLIER CONTACT PERSONS (P182)
+    # =========================================================================
+
+    @classmethod
+    def serialize_contact_person(cls, c: SupplierContactPerson) -> Dict[str, Any]:
+        """Serializes a SupplierContactPerson conforming to standard JSON contract schema."""
+        return {
+            "contact_id": c.contact_id,
+            "tenant_id": str(c.tenant_id),
+            "supplier_id": str(c.supplier_id),
+            "supplier_name": c.supplier.name if c.supplier else "",
+            "name": c.name,
+            "name_bn": c.name_bn or "",
+            "designation": c.designation or "",
+            "role": c.role,
+            "role_display": c.get_role_display(),
+            "phone": c.phone,
+            "alternate_phone": c.alternate_phone or "",
+            "email": c.email or "",
+            "preferred_communication_method": c.preferred_communication_method,
+            "preferred_communication_method_display": c.get_preferred_communication_method_display(),
+            "is_primary": c.is_primary,
+            "is_active": c.is_active,
+            "notes": c.notes or "",
+            "created_at": c.created_at.isoformat() if c.created_at else None,
+            "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        }
+
+    @classmethod
+    def list_supplier_contacts(
+        cls,
+        tenant_id: str,
+        supplier_id: str,
+        role: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        cls._assert_tenant_active(tenant_id)
+        supplier = Supplier.objects.filter(supplier_id=supplier_id).first()
+        if not supplier:
+            raise NotFound({"error_code": "ERR_SUPPLIER_NOT_FOUND", "detail": f"Supplier '{supplier_id}' not found."})
+        if str(supplier.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant supplier contact access forbidden."})
+
+        qs = SupplierContactPerson.objects.filter(tenant_id=tenant_id, supplier=supplier)
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active)
+        if role:
+            qs = qs.filter(role=role.upper())
+
+        return [cls.serialize_contact_person(c) for c in qs.order_by("-is_primary", "name")]
+
+    @classmethod
+    def get_supplier_contact(
+        cls,
+        tenant_id: str,
+        supplier_id: str,
+        contact_id: str,
+    ) -> Dict[str, Any]:
+        cls._assert_tenant_active(tenant_id)
+        contact = SupplierContactPerson.objects.filter(contact_id=contact_id).first()
+        if not contact or str(contact.supplier_id) != str(supplier_id):
+            raise NotFound({"error_code": "ERR_CONTACT_NOT_FOUND", "detail": f"Contact '{contact_id}' not found for supplier."})
+        if str(contact.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant contact access forbidden."})
+        return cls.serialize_contact_person(contact)
+
+    @classmethod
+    def create_supplier_contact(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        supplier_id: str,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        cls._assert_procurement_role(actor_user)
+        tenant = cls._assert_tenant_active(tenant_id)
+
+        supplier = Supplier.objects.filter(supplier_id=supplier_id).first()
+        if not supplier:
+            raise NotFound({"error_code": "ERR_SUPPLIER_NOT_FOUND", "detail": f"Supplier '{supplier_id}' not found."})
+        if str(supplier.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant supplier contact creation forbidden."})
+
+        name = data.get("name", "").strip()
+        if len(name) < 2:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_MISSING_CONTACT_NAME",
+                    "detail": "Contact person name is required (minimum 2 characters).",
+                }
+            )
+
+        phone = data.get("phone", "").strip()
+        if not phone:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_MISSING_CONTACT_PHONE",
+                    "detail": "Contact person phone number is required.",
+                }
+            )
+
+        role = data.get("role", SupplierContactPersonRole.SALES_REPRESENTATIVE).upper()
+        if role not in SupplierContactPersonRole.values:
+            role = SupplierContactPersonRole.OTHER
+
+        pref_comm = data.get("preferred_communication_method", PreferredCommunicationMethod.PHONE).upper()
+        if pref_comm not in PreferredCommunicationMethod.values:
+            pref_comm = PreferredCommunicationMethod.PHONE
+
+        is_primary = bool(data.get("is_primary", False))
+
+        with transaction.atomic():
+            if is_primary:
+                # Atomic primary reassignment: unset is_primary on existing contacts for this supplier
+                SupplierContactPerson.objects.filter(
+                    tenant=tenant,
+                    supplier=supplier,
+                    is_primary=True,
+                ).update(is_primary=False)
+
+            contact_id = data.get("contact_id") or f"sup-cnt-{uuid.uuid4().hex[:12]}"
+            if not contact_id.startswith("sup-cnt-"):
+                contact_id = f"sup-cnt-{contact_id}"
+
+            contact = SupplierContactPerson.objects.create(
+                contact_id=contact_id,
+                tenant=tenant,
+                supplier=supplier,
+                name=name,
+                name_bn=data.get("name_bn", "").strip(),
+                designation=data.get("designation", "").strip(),
+                role=role,
+                phone=phone,
+                alternate_phone=data.get("alternate_phone", "").strip(),
+                email=data.get("email", "").strip(),
+                preferred_communication_method=pref_comm,
+                is_primary=is_primary,
+                is_active=bool(data.get("is_active", True)),
+                notes=data.get("notes", "").strip(),
+            )
+
+            AuditLogEntry.objects.create(
+                request_id=f"req-{uuid.uuid4().hex[:8]}",
+                tenant_id=str(tenant.tenant_id),
+                user_id=getattr(actor_user, "user_id", str(actor_user)),
+                actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+                actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+                action="SUPPLIER_CONTACT_CREATED",
+                resource_type="SupplierContactPerson",
+                resource_id=contact.contact_id,
+                ip_address="127.0.0.1",
+                status=AuditActionStatus.SUCCESS,
+                metadata_json={
+                    "supplier_id": supplier.supplier_id,
+                    "contact_id": contact.contact_id,
+                    "name": contact.name,
+                    "role": contact.role,
+                    "is_primary": contact.is_primary,
+                },
+            )
+
+        return cls.serialize_contact_person(contact)
+
+    @classmethod
+    def update_supplier_contact(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        supplier_id: str,
+        contact_id: str,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        cls._assert_procurement_role(actor_user)
+        tenant = cls._assert_tenant_active(tenant_id)
+
+        contact = SupplierContactPerson.objects.filter(contact_id=contact_id).first()
+        if not contact or str(contact.supplier_id) != str(supplier_id):
+            raise NotFound({"error_code": "ERR_CONTACT_NOT_FOUND", "detail": f"Contact '{contact_id}' not found for supplier."})
+        if str(contact.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant contact update forbidden."})
+
+        if "name" in data:
+            new_name = str(data["name"]).strip()
+            if len(new_name) < 2:
+                raise ValidationError({"error_code": "ERR_MISSING_CONTACT_NAME", "detail": "Name must be at least 2 characters."})
+            contact.name = new_name
+
+        if "name_bn" in data:
+            contact.name_bn = str(data["name_bn"]).strip()
+        if "designation" in data:
+            contact.designation = str(data["designation"]).strip()
+        if "role" in data:
+            r = str(data["role"]).upper()
+            if r in SupplierContactPersonRole.values:
+                contact.role = r
+        if "phone" in data:
+            p = str(data["phone"]).strip()
+            if not p:
+                raise ValidationError({"error_code": "ERR_MISSING_CONTACT_PHONE", "detail": "Phone cannot be empty."})
+            contact.phone = p
+        if "alternate_phone" in data:
+            contact.alternate_phone = str(data["alternate_phone"]).strip()
+        if "email" in data:
+            contact.email = str(data["email"]).strip()
+        if "preferred_communication_method" in data:
+            m = str(data["preferred_communication_method"]).upper()
+            if m in PreferredCommunicationMethod.values:
+                contact.preferred_communication_method = m
+        if "notes" in data:
+            contact.notes = str(data["notes"]).strip()
+        if "is_active" in data:
+            contact.is_active = bool(data["is_active"])
+
+        with transaction.atomic():
+            if data.get("is_primary") is True and not contact.is_primary:
+                # Reassign primary contact for this supplier
+                SupplierContactPerson.objects.filter(
+                    tenant=tenant,
+                    supplier=contact.supplier,
+                    is_primary=True,
+                ).exclude(contact_id=contact.contact_id).update(is_primary=False)
+                contact.is_primary = True
+            elif "is_primary" in data:
+                contact.is_primary = bool(data["is_primary"])
+
+            contact.save()
+
+            AuditLogEntry.objects.create(
+                request_id=f"req-{uuid.uuid4().hex[:8]}",
+                tenant_id=str(tenant.tenant_id),
+                user_id=getattr(actor_user, "user_id", str(actor_user)),
+                actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+                actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+                action="SUPPLIER_CONTACT_UPDATED",
+                resource_type="SupplierContactPerson",
+                resource_id=contact.contact_id,
+                ip_address="127.0.0.1",
+                status=AuditActionStatus.SUCCESS,
+                metadata_json={"contact_id": contact.contact_id, "updated_fields": list(data.keys())},
+            )
+
+        return cls.serialize_contact_person(contact)
+
+    @classmethod
+    def archive_supplier_contact(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        supplier_id: str,
+        contact_id: str,
+    ) -> Dict[str, Any]:
+        """Soft-deletes / archives a supplier contact person."""
+        cls._assert_procurement_role(actor_user)
+        tenant = cls._assert_tenant_active(tenant_id)
+
+        contact = SupplierContactPerson.objects.filter(contact_id=contact_id).first()
+        if not contact or str(contact.supplier_id) != str(supplier_id):
+            raise NotFound({"error_code": "ERR_CONTACT_NOT_FOUND", "detail": f"Contact '{contact_id}' not found for supplier."})
+        if str(contact.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant contact archival forbidden."})
+
+        contact.is_active = False
+        contact.is_primary = False
+        contact.save(update_fields=["is_active", "is_primary", "updated_at"])
+
+        AuditLogEntry.objects.create(
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            tenant_id=str(tenant.tenant_id),
+            user_id=getattr(actor_user, "user_id", str(actor_user)),
+            actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+            actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+            action="SUPPLIER_CONTACT_ARCHIVED",
+            resource_type="SupplierContactPerson",
+            resource_id=contact.contact_id,
+            ip_address="127.0.0.1",
+            status=AuditActionStatus.SUCCESS,
+            metadata_json={"contact_id": contact.contact_id, "action": "ARCHIVED"},
+        )
+
+        return cls.serialize_contact_person(contact)
 

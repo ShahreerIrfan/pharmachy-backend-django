@@ -211,3 +211,108 @@ class SupplierOrganizationViewSet(viewsets.ViewSet):
         except NotFound as exc:
             return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
 
+    # =========================================================================
+    # SUPPLIER CONTACT PERSONS (P182)
+    # =========================================================================
+
+    @action(detail=True, methods=["get", "post"], url_path="contacts")
+    def contacts(self, request, pk=None) -> Response:
+        """
+        GET /api/v2/procurement/suppliers/{pk}/contacts/
+        POST /api/v2/procurement/suppliers/{pk}/contacts/
+        """
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+
+        if request.method.upper() == "GET":
+            role = request.query_params.get("role")
+            is_active_param = request.query_params.get("is_active")
+            is_active = None
+            if is_active_param is not None:
+                is_active = is_active_param.lower() in ("true", "1")
+
+            try:
+                results = SupplierOrganizationService.list_supplier_contacts(
+                    tenant_id=tenant_id,
+                    supplier_id=pk,
+                    role=role,
+                    is_active=is_active,
+                )
+                return Response({"count": len(results), "results": results}, status=status.HTTP_200_OK)
+            except PermissionDenied as exc:
+                return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+            except NotFound as exc:
+                return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+        # POST create contact
+        try:
+            created = SupplierOrganizationService.create_supplier_contact(
+                tenant_id=tenant_id,
+                actor_user=request.user,
+                supplier_id=pk,
+                data=request.data,
+            )
+            return Response(created, status=status.HTTP_201_CREATED)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+        except NotFound as exc:
+            return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=["get", "patch", "delete"], url_path=r"contacts/(?P<contact_id>[^/.]+)")
+    def contact_detail(self, request, pk=None, contact_id=None) -> Response:
+        """
+        GET /api/v2/procurement/suppliers/{pk}/contacts/{contact_id}/
+        PATCH /api/v2/procurement/suppliers/{pk}/contacts/{contact_id}/
+        DELETE /api/v2/procurement/suppliers/{pk}/contacts/{contact_id}/
+        """
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+
+        if request.method.upper() == "GET":
+            try:
+                contact = SupplierOrganizationService.get_supplier_contact(
+                    tenant_id=tenant_id,
+                    supplier_id=pk,
+                    contact_id=contact_id,
+                )
+                return Response(contact, status=status.HTTP_200_OK)
+            except PermissionDenied as exc:
+                return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+            except NotFound as exc:
+                return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+        elif request.method.upper() == "PATCH":
+            try:
+                updated = SupplierOrganizationService.update_supplier_contact(
+                    tenant_id=tenant_id,
+                    actor_user=request.user,
+                    supplier_id=pk,
+                    contact_id=contact_id,
+                    data=request.data,
+                )
+                return Response(updated, status=status.HTTP_200_OK)
+            except PermissionDenied as exc:
+                return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+            except ValidationError as exc:
+                return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+            except NotFound as exc:
+                return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+        elif request.method.upper() == "DELETE":
+            try:
+                archived = SupplierOrganizationService.archive_supplier_contact(
+                    tenant_id=tenant_id,
+                    actor_user=request.user,
+                    supplier_id=pk,
+                    contact_id=contact_id,
+                )
+                return Response(archived, status=status.HTTP_200_OK)
+            except PermissionDenied as exc:
+                return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+            except NotFound as exc:
+                return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
+

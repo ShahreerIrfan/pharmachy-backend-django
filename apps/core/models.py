@@ -4846,6 +4846,100 @@ class SupplierLedgerEntry(models.Model):
 SupplierOrganization = Supplier
 
 
+class SupplierContactPersonRole(models.TextChoices):
+    DEPOT_MANAGER = "DEPOT_MANAGER", "Depot Manager / In-Charge"
+    SALES_REPRESENTATIVE = "SALES_REPRESENTATIVE", "Sales Representative / MIO"
+    ORDER_BOOKER = "ORDER_BOOKER", "Order Booker / Commercial Officer"
+    ACCOUNTS_EXECUTIVE = "ACCOUNTS_EXECUTIVE", "Accounts / Billing Executive"
+    DISPATCH_LOGISTICS = "DISPATCH_LOGISTICS", "Dispatch / Delivery Logistics"
+    ESCALATION_MANAGER = "ESCALATION_MANAGER", "Escalation / Emergency Contact"
+    OTHER = "OTHER", "Other Representative"
+
+
+class PreferredCommunicationMethod(models.TextChoices):
+    PHONE = "PHONE", "Phone Call"
+    WHATSAPP = "WHATSAPP", "WhatsApp"
+    EMAIL = "EMAIL", "Email"
+    SMS = "SMS", "SMS"
+
+
+class SupplierContactPerson(models.Model):
+    """
+    Architecture Decision: ADR-0182 (P182).
+    Tenant-scoped supplier contact person capturing multiple functional roles
+    (depot manager, sales representative, order booker, billing, logistics),
+    preferred communication channels, and primary contact designation.
+    """
+
+    contact_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="supplier_contacts",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="contacts",
+        db_index=True,
+    )
+    name = models.CharField(max_length=128, db_index=True)
+    name_bn = models.CharField(max_length=128, blank=True, default="")
+    designation = models.CharField(max_length=128, blank=True, default="")
+    role = models.CharField(
+        max_length=32,
+        choices=SupplierContactPersonRole.choices,
+        default=SupplierContactPersonRole.SALES_REPRESENTATIVE,
+        db_index=True,
+    )
+    phone = models.CharField(max_length=32, db_index=True)
+    alternate_phone = models.CharField(max_length=32, blank=True, default="")
+    email = models.EmailField(blank=True, default="")
+    preferred_communication_method = models.CharField(
+        max_length=16,
+        choices=PreferredCommunicationMethod.choices,
+        default=PreferredCommunicationMethod.PHONE,
+        db_index=True,
+    )
+    is_primary = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Designated default representative for purchase orders and billing alerts.",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    notes = models.TextField(blank=True, default="", help_text="Availability hours or territory details")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["supplier", "-is_primary", "name"]
+        verbose_name = "Supplier Contact Person"
+        verbose_name_plural = "Supplier Contact Persons"
+        indexes = [
+            models.Index(fields=["tenant", "supplier", "is_primary"]),
+            models.Index(fields=["tenant", "supplier", "role"]),
+            models.Index(fields=["tenant", "phone"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.get_role_display()}) - {self.supplier.name}"
+
+    def clean(self):
+        super().clean()
+        if not self.contact_id:
+            self.contact_id = f"sup-cnt-{uuid.uuid4().hex[:12]}"
+        elif not str(self.contact_id).startswith("sup-cnt-"):
+            self.contact_id = f"sup-cnt-{self.contact_id}"
+        if self.supplier_id and self.tenant_id:
+            if hasattr(self, "supplier") and self.supplier and self.supplier.tenant_id != self.tenant_id:
+                raise ValidationError({"supplier": "Supplier must belong to the same tenant as the contact person."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 class ImportDuplicatePolicy(models.TextChoices):
     SKIP = "SKIP", "Skip duplicates"
     UPDATE_OVERWRITE = "UPDATE_OVERWRITE", "Update / Overwrite existing"
