@@ -4623,6 +4623,33 @@ class Manufacturer(models.Model):
         return f"{self.name} ({self.code})"
 
 
+class SupplierStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active"
+    INACTIVE = "INACTIVE", "Inactive"
+    SUSPENDED = "SUSPENDED", "Suspended"
+    BLACKLISTED = "BLACKLISTED", "Blacklisted"
+
+
+class SupplierRegion(models.TextChoices):
+    DHAKA = "DHAKA", "Dhaka"
+    CHITTAGONG = "CHITTAGONG", "Chittagong"
+    RAJSHAHI = "RAJSHAHI", "Rajshahi"
+    KHULNA = "KHULNA", "Khulna"
+    BARISAL = "BARISAL", "Barisal"
+    SYLHET = "SYLHET", "Sylhet"
+    RANGPUR = "RANGPUR", "Rangpur"
+    MYMENSINGH = "MYMENSINGH", "Mymensingh"
+    OTHER = "OTHER", "Other"
+
+
+class SupplierPostingType(models.TextChoices):
+    GRN_INVOICE = "GRN_INVOICE", "Goods Received Invoice"
+    PAYMENT = "PAYMENT", "Payment to Supplier"
+    RETURN_DEBIT_NOTE = "RETURN_DEBIT_NOTE", "Purchase Return / Debit Note"
+    OPENING_BALANCE = "OPENING_BALANCE", "Opening Balance"
+    ADJUSTMENT = "ADJUSTMENT", "Audit Adjustment"
+
+
 class Supplier(models.Model):
     """
     Architecture Decision: ADR-0127 (P127).
@@ -4645,7 +4672,37 @@ class Supplier(models.Model):
     email = models.EmailField(blank=True, default="")
     address = models.TextField(blank=True, default="")
     dl_number = models.CharField(max_length=128, blank=True, default="", help_text="Wholesale drug license number")
-    tax_id = models.CharField(max_length=64, blank=True, default="", help_text="TIN / BIN tax registration number")
+    legal_name = models.CharField(max_length=255, blank=True, default="", help_text="Registered company legal name")
+    region = models.CharField(max_length=32, choices=SupplierRegion.choices, default=SupplierRegion.DHAKA, db_index=True)
+    district = models.CharField(max_length=64, blank=True, default="")
+    tax_id = models.CharField(max_length=64, blank=True, default="", help_text="Legacy tax reference")
+    tin_number = models.CharField(max_length=64, blank=True, default="", help_text="Taxpayer Identification Number (e-TIN)")
+    bin_number = models.CharField(max_length=64, blank=True, default="", help_text="9 or 13-digit Business Identification Number (VAT)")
+    trade_license_number = models.CharField(max_length=128, blank=True, default="", help_text="City Corporation/Municipal Trade License")
+    status = models.CharField(max_length=32, choices=SupplierStatus.choices, default=SupplierStatus.ACTIVE, db_index=True)
+    payment_terms_days = models.PositiveIntegerField(default=30, help_text="Standard credit terms window in days")
+    credit_limit = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Approved credit limit in BDT",
+    )
+    current_balance = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        help_text="Current accounts payable balance owed to supplier (BDT)",
+    )
+    bank_name = models.CharField(max_length=128, blank=True, default="")
+    bank_account_name = models.CharField(max_length=128, blank=True, default="")
+    bank_account_no = models.CharField(max_length=64, blank=True, default="")
+    bank_branch = models.CharField(max_length=128, blank=True, default="")
+    bank_routing_number = models.CharField(max_length=32, blank=True, default="")
+    lead_time_days = models.PositiveIntegerField(default=2, help_text="Typical delivery lead time in days")
+    proof_of_origin_verified = models.BooleanField(default=False, help_text="Verified manufacturer/DGDA distribution proof")
+    proof_of_origin_notes = models.TextField(blank=True, default="")
+    notes = models.TextField(blank=True, default="")
     is_active = models.BooleanField(default=True, db_index=True)
     merged_into = models.ForeignKey(
         "self",
@@ -4673,11 +4730,120 @@ class Supplier(models.Model):
         ]
         indexes = [
             models.Index(fields=["tenant", "is_active"]),
+            models.Index(fields=["tenant", "status"]),
             models.Index(fields=["tenant", "phone"]),
+            models.Index(fields=["tenant", "region"]),
         ]
 
     def __str__(self) -> str:
         return f"{self.name} ({self.tenant_id})"
+
+    def clean(self):
+        super().clean()
+        if not self.supplier_id:
+            self.supplier_id = f"sup-{uuid.uuid4().hex[:12]}"
+        elif not str(self.supplier_id).startswith("sup-"):
+            self.supplier_id = f"sup-{self.supplier_id}"
+        if self.status != SupplierStatus.ACTIVE:
+            self.is_active = False
+        else:
+            self.is_active = True
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class SupplierLedgerEntry(models.Model):
+    """
+    Architecture Decision: ADR-0181 (P181).
+    Immutable double-entry accounts payable ledger tracking supplier invoice credits,
+    payment debits, return debit notes, and running balance.
+    """
+
+    posting_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="supplier_ledger_entries",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="ledger_entries",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "core.Branch",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_ledger_entries",
+    )
+    posting_type = models.CharField(
+        max_length=32,
+        choices=SupplierPostingType.choices,
+        default=SupplierPostingType.GRN_INVOICE,
+        db_index=True,
+    )
+    reference_number = models.CharField(max_length=128, db_index=True, help_text="GRN number, PO number, or payment voucher ID")
+    debit_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Decreases AP payable liability (payments, purchase return debit notes)",
+    )
+    credit_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Increases AP payable liability (GRN invoice receipts)",
+    )
+    balance_after = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        help_text="Running AP payable balance owed after this posting",
+    )
+    currency = models.CharField(max_length=8, default="BDT")
+    notes = models.TextField(blank=True, default="")
+    posted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_postings",
+    )
+    posted_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-posted_at"]
+        verbose_name = "Supplier Ledger Entry"
+        verbose_name_plural = "Supplier Ledger Entries"
+        indexes = [
+            models.Index(fields=["tenant", "supplier", "-posted_at"]),
+            models.Index(fields=["tenant", "reference_number"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"SupplierLedger {self.posting_id}: {self.supplier.name} ({self.posting_type} Ref: {self.reference_number})"
+
+    def clean(self):
+        super().clean()
+        if not self.posting_id:
+            self.posting_id = f"sup-post-{uuid.uuid4().hex[:12]}"
+        elif not str(self.posting_id).startswith("sup-post-"):
+            self.posting_id = f"sup-post-{self.posting_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+# Semantic alias for Phase 10
+SupplierOrganization = Supplier
 
 
 class ImportDuplicatePolicy(models.TextChoices):

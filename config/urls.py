@@ -90,6 +90,7 @@ from apps.core.return_safety_inspection_views import ReturnSafetyInspectionViewS
 from apps.core.batch_merge_views import BatchMergeViewSet
 from apps.core.stock_valuation_views import StockValuationViewSet
 from apps.core.packaging_concurrency_views import PackagingConcurrencyViewSet
+from apps.core.supplier_organization_views import SupplierOrganizationViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -260,6 +261,7 @@ router.register("inventory/return-inspections", ReturnSafetyInspectionViewSet, b
 router.register("inventory/batch-merges", BatchMergeViewSet, basename="inventory-batch-merges")
 router.register("inventory/valuation", StockValuationViewSet, basename="inventory-valuation")
 router.register("inventory/concurrency-tests", PackagingConcurrencyViewSet, basename="inventory-concurrency-tests")
+router.register("procurement/suppliers", SupplierOrganizationViewSet, basename="procurement-suppliers")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
