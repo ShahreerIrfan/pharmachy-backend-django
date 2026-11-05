@@ -157,7 +157,6 @@ class Tenant(models.Model):
         return target in valid_transitions.get(self.status, [])
 
     def transition_status(self, target_status: str, operator_id: str, reason: str) -> None:
-        from django.core.exceptions import ValidationError
         from django.utils import timezone
 
         from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
@@ -586,7 +585,6 @@ class TenantMedicineConfig(models.Model):
 
     def clean(self):
         super().clean()
-        from django.core.exceptions import ValidationError
 
         # Invariant 1: Cannot relax global prescription requirement
         if self.product_id and hasattr(self, "product") and self.product:
@@ -726,6 +724,16 @@ class BatchStock(models.Model):
         if self.is_expired or self.is_quarantined or self.recall_notice_id is not None:
             return False
         return self.available_quantity_base_units > 0
+
+    def clean(self):
+        super().clean()
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, 'branch') and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({'branch': 'Branch must belong to the same tenant as the batch.'})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
 
 
 class RegulatedStockEntry(models.Model):
@@ -8788,6 +8796,12 @@ class PurchaseCostLot(models.Model):
 
         if self.remaining_quantity > self.initial_quantity:
             raise ValidationError({"remaining_quantity": "Remaining quantity cannot exceed initial quantity."})
+
+        if self.batch_id and self.branch_id:
+            if hasattr(self, 'batch') and self.batch and self.batch.branch_id != self.branch_id:
+                raise ValidationError({'branch': 'Cost lot branch must match batch branch.'})
+            if hasattr(self, 'batch') and self.batch and self.batch.tenant_id != self.tenant_id:
+                raise ValidationError({'tenant': 'Cost lot tenant must match batch tenant.'})
 
     def save(self, *args, **kwargs):
         self.clean()
