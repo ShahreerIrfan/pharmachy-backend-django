@@ -4940,6 +4940,142 @@ class SupplierContactPerson(models.Model):
         super().save(*args, **kwargs)
 
 
+class VendorProductPriceList(models.Model):
+    """
+    Architecture Decision: ADR-0183 (P183).
+    Tenant-scoped supplier product price quotation governing unit purchasing costs,
+    packaging sizes, effective date windows, minimum order quantities (MOQ),
+    and negotiated trade discounts.
+    """
+
+    price_entry_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="vendor_price_lists",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="product_price_lists",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="supplier_price_lists",
+        db_index=True,
+    )
+    supplier_sku_code = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    package_type = models.CharField(max_length=32, default="BOX")
+    package_size = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Number of base units in package (e.g. 100 tablets per box)",
+    )
+    unit_cost_price = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0001"))],
+        help_text="Quoted purchase cost per individual base unit (BDT)",
+    )
+    package_cost_price = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Calculated total cost per package",
+    )
+    mrp_unit = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Maximum Retail Price benchmark for regulatory margin validation",
+    )
+    discount_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Negotiated trade or promotional discount percentage",
+    )
+    effective_from = models.DateField(db_index=True)
+    effective_to = models.DateField(null=True, blank=True, db_index=True)
+    minimum_order_quantity = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Minimum order threshold in base units required to claim this quotation",
+    )
+    free_goods_threshold = models.PositiveIntegerField(
+        default=0,
+        help_text="Buy X units bonus threshold (e.g. 10)",
+    )
+    free_goods_bonus_quantity = models.PositiveIntegerField(
+        default=0,
+        help_text="Get Y bonus units free (e.g. 1)",
+    )
+    is_contracted = models.BooleanField(
+        default=False,
+        help_text="Formal negotiated price agreement vs ad-hoc promotional quotation",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    notes = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_price_lists",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-effective_from", "product__brand_name"]
+        verbose_name = "Vendor Product Price List"
+        verbose_name_plural = "Vendor Product Price Lists"
+        indexes = [
+            models.Index(fields=["tenant", "supplier", "product", "is_active"]),
+            models.Index(fields=["tenant", "effective_from", "effective_to"]),
+            models.Index(fields=["tenant", "product", "unit_cost_price"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"PriceList {self.price_entry_id}: {self.product.brand_name} by {self.supplier.name} @ {self.unit_cost_price} BDT"
+
+    @property
+    def net_unit_cost(self) -> Decimal:
+        """Returns net unit cost after applying trade discount percentage."""
+        discount_factor = Decimal("1.0000") - (self.discount_percentage / Decimal("100.00"))
+        return (self.unit_cost_price * discount_factor).quantize(Decimal("0.0001"))
+
+    def clean(self):
+        super().clean()
+        if not self.price_entry_id:
+            self.price_entry_id = f"vpl-{uuid.uuid4().hex[:12]}"
+        elif not str(self.price_entry_id).startswith("vpl-"):
+            self.price_entry_id = f"vpl-{self.price_entry_id}"
+
+        if self.effective_to and self.effective_to < self.effective_from:
+            raise ValidationError({"effective_to": "Effective to date cannot precede effective from date."})
+
+        if self.mrp_unit and self.mrp_unit > Decimal("0.0000") and self.unit_cost_price > self.mrp_unit:
+            raise ValidationError({"unit_cost_price": "Quoted purchase unit cost cannot exceed Maximum Retail Price (MRP)."})
+
+        if self.package_cost_price == Decimal("0.0000") and self.unit_cost_price and self.package_size:
+            self.package_cost_price = (self.unit_cost_price * Decimal(self.package_size)).quantize(Decimal("0.0001"))
+
+        if self.supplier_id and self.tenant_id:
+            if hasattr(self, "supplier") and self.supplier and self.supplier.tenant_id != self.tenant_id:
+                raise ValidationError({"supplier": "Supplier must belong to the same tenant as the price list entry."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 class ImportDuplicatePolicy(models.TextChoices):
     SKIP = "SKIP", "Skip duplicates"
     UPDATE_OVERWRITE = "UPDATE_OVERWRITE", "Update / Overwrite existing"
