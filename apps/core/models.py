@@ -17,6 +17,7 @@ from datetime import timedelta
 from decimal import Decimal
 import uuid
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -3319,12 +3320,21 @@ class StockAdjustmentType(models.TextChoices):
     EXPIRY_REMOVAL = "EXPIRY_REMOVAL", "Expired Stock Removal"
     COUNT_CORRECTION = "COUNT_CORRECTION", "Physical Count Correction"
     INTERNAL_USE = "INTERNAL_USE", "Internal Clinic / Store Use"
+    THEFT_LOSS = "THEFT_LOSS", "Theft or Unaccounted Loss"
+    FOUND_SURPLUS = "FOUND_SURPLUS", "Found Physical Surplus"
+
+
+class StockCorrectionStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending Manager Approval"
+    APPROVED = "APPROVED", "Approved & Posted"
+    REJECTED = "REJECTED", "Rejected by Manager"
+    REVERSED = "REVERSED", "Reversed / Offset"
 
 
 class StockAdjustmentRecord(models.Model):
     """
-    Audited inventory adjustment record modifying physical stock counts (P104 / ADR-0104).
-    Enforces stock_change authority and tracks inventory value impact.
+    Audited inventory adjustment record modifying physical stock counts (P104 / P174 / ADR-0174).
+    Enforces stock_change authority, two-person approval workflows, and reversible ledger entries.
     """
 
     adjustment_id = models.CharField(max_length=64, primary_key=True)
@@ -3332,6 +3342,13 @@ class StockAdjustmentRecord(models.Model):
     branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="stock_adjustments")
     medicine = models.ForeignKey(MedicineProduct, on_delete=models.CASCADE, related_name="stock_adjustments")
     batch = models.ForeignKey(BatchStock, on_delete=models.SET_NULL, null=True, blank=True, related_name="stock_adjustments")
+    cost_lot = models.ForeignKey(
+        "PurchaseCostLot",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="stock_adjustments",
+    )
     adjustment_type = models.CharField(
         max_length=32,
         choices=StockAdjustmentType.choices,
@@ -3345,10 +3362,47 @@ class StockAdjustmentRecord(models.Model):
         default=Decimal("0.00"),
         validators=[MinValueValidator(Decimal("0.00"))],
     )
+    total_cost_impact = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        help_text="Total GAAP valuation impact: abs(quantity_delta) * unit_cost_bdt",
+    )
     reason = models.TextField(blank=True, default="")
-    status = models.CharField(max_length=32, default="POSTED", db_index=True)
+    status = models.CharField(
+        max_length=32,
+        choices=StockCorrectionStatus.choices,
+        default=StockCorrectionStatus.APPROVED,
+        db_index=True,
+    )
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="proposed_stock_adjustments",
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_stock_adjustments",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    reversal_of = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reversals",
+    )
+    is_reversed = models.BooleanField(default=False, db_index=True)
+    reversal_reason = models.TextField(blank=True, default="")
+    supporting_document_ref = models.CharField(max_length=128, blank=True, default="")
     adjusted_by_username = models.CharField(max_length=128, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -3357,10 +3411,29 @@ class StockAdjustmentRecord(models.Model):
         indexes = [
             models.Index(fields=["tenant", "status"]),
             models.Index(fields=["branch", "status"]),
+            models.Index(fields=["batch", "created_at"]),
+            models.Index(fields=["tenant", "is_reversed"]),
         ]
 
     def __str__(self) -> str:
-        return f"StockAdj {self.adjustment_id} - {self.medicine.brand_name} ({self.quantity_delta}) [{self.adjustment_type}]"
+        return f"StockAdj {self.adjustment_id} - {self.medicine.brand_name} ({self.quantity_delta}) [{self.adjustment_type}] - {self.status}"
+
+    def clean(self):
+        super().clean()
+        if not self.adjustment_id:
+            self.adjustment_id = f"stkadj-{uuid.uuid4().hex[:12]}"
+        elif not (str(self.adjustment_id).startswith("stkadj-") or str(self.adjustment_id).startswith("adj-")):
+            self.adjustment_id = f"stkadj-{self.adjustment_id}"
+
+        if self.quantity_delta == 0:
+            raise ValidationError({"quantity_delta": "Quantity delta cannot be zero."})
+
+        cost = self.unit_cost_bdt or Decimal("0.00")
+        self.total_cost_impact = abs(self.quantity_delta) * cost
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
 
 
 class BranchStaffMembership(models.Model):

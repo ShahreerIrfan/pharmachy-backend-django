@@ -83,6 +83,7 @@ from apps.core.fefo_allocation_views import FefoAllocationViewSet
 from apps.core.sale_lot_allocation_views import SaleLotAllocationViewSet
 from apps.core.stock_availability_views import StockAvailabilityViewSet
 from apps.core.batch_expiry_views import BatchExpiryViewSet
+from apps.core.stock_correction_views import StockCorrectionViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -246,6 +247,7 @@ router.register("inventory/fefo", FefoAllocationViewSet, basename="inventory-fef
 router.register("inventory/sale-lot-allocations", SaleLotAllocationViewSet, basename="inventory-sale-lot-allocations")
 router.register("inventory/availability", StockAvailabilityViewSet, basename="inventory-availability")
 router.register("inventory/expiry-windows", BatchExpiryViewSet, basename="inventory-expiry-windows")
+router.register("inventory/stock-corrections", StockCorrectionViewSet, basename="inventory-stock-corrections")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
