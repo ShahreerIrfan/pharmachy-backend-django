@@ -9818,3 +9818,109 @@ class ReturnSafetyInspection(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+
+class BatchMergeRecord(models.Model):
+    """
+    Architecture Decision: ADR-0178 (P178).
+    Captures audited batch consolidation events, enforcing strict compatibility guards
+    against merging batches with differing expiry dates, manufacturer lot numbers, or recall/quarantine states.
+    """
+
+    merge_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="batch_merges",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="batch_merges",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.PROTECT,
+        related_name="batch_merges",
+        db_index=True,
+    )
+    source_batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.PROTECT,
+        related_name="merges_as_source",
+        db_index=True,
+    )
+    target_batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.PROTECT,
+        related_name="merges_as_target",
+        db_index=True,
+    )
+    merged_quantity_base_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    source_cost_per_unit_before = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Unit cost of source batch immediately prior to merge consolidation.",
+    )
+    target_cost_per_unit_before = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Unit cost of target batch immediately prior to merge consolidation.",
+    )
+    target_cost_per_unit_after = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Weighted average unit cost calculated for target batch following merge.",
+    )
+    reason = models.TextField(help_text="Audited business justification for batch consolidation.")
+    merged_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="batch_merges",
+    )
+    is_reversed = models.BooleanField(default=False, db_index=True)
+    reversal_reason = models.TextField(blank=True, default="")
+    reversed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reversed_batch_merges",
+    )
+    reversed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Batch Merge Record"
+        verbose_name_plural = "Batch Merge Records"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "-created_at"]),
+            models.Index(fields=["source_batch", "created_at"]),
+            models.Index(fields=["target_batch", "created_at"]),
+            models.Index(fields=["product", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"BatchMerge {self.merge_id}: {self.source_batch_id} -> {self.target_batch_id} ({self.merged_quantity_base_units} units)"
+
+    def clean(self):
+        super().clean()
+        if not self.merge_id:
+            self.merge_id = f"bmerge-{uuid.uuid4().hex[:12]}"
+        elif not str(self.merge_id).startswith("bmerge-"):
+            self.merge_id = f"bmerge-{self.merge_id}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the merge record."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
