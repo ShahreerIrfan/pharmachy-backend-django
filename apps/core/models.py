@@ -9677,3 +9677,144 @@ class LandedCostAllocationLine(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+
+class ReturnInspectionDisposition(models.TextChoices):
+    RESTOCK_APPROVED = "RESTOCK_APPROVED", "Restock to Original Batch & Lot"
+    QUARANTINE_HOLD = "QUARANTINE_HOLD", "Quarantine Hold for QA Investigation"
+    DAMAGED_DESTROY = "DAMAGED_DESTROY", "Damaged / Disposed - Do Not Restock"
+
+
+class ReturnSafetyInspection(models.Model):
+    """
+    Architecture Decision: ADR-0177 (P177).
+    Records formal pharmacist safety inspection outcomes for sales returns,
+    enforcing clinical safety checks before restocking to exact batch & cost lot,
+    and routing uncertain products to quarantine hold.
+    """
+
+    inspection_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="return_inspections",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="return_inspections",
+        db_index=True,
+    )
+    allocation = models.ForeignKey(
+        SaleLotAllocation,
+        on_delete=models.CASCADE,
+        related_name="inspections",
+        db_index=True,
+    )
+    invoice = models.ForeignKey(
+        SaleInvoice,
+        on_delete=models.CASCADE,
+        related_name="return_inspections",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.PROTECT,
+        related_name="return_inspections",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.PROTECT,
+        related_name="return_inspections",
+        db_index=True,
+    )
+    cost_lot = models.ForeignKey(
+        PurchaseCostLot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="return_inspections",
+        db_index=True,
+    )
+    returned_quantity_base_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    disposition = models.CharField(
+        max_length=32,
+        choices=ReturnInspectionDisposition.choices,
+        db_index=True,
+    )
+    is_seal_intact = models.BooleanField(default=True)
+    is_packaging_undamaged = models.BooleanField(default=True)
+    is_storage_condition_verified = models.BooleanField(default=True)
+    is_unexpired = models.BooleanField(default=True)
+    temperature_reading_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Optional recorded temperature in Celsius for cold-chain returns.",
+    )
+    inspector = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="return_inspections",
+    )
+    customer_reason = models.TextField(blank=True, default="")
+    inspection_notes = models.TextField(blank=True, default="")
+    refund_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    restocked_cogs = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    is_reversed = models.BooleanField(default=False, db_index=True)
+    reversal_reason = models.TextField(blank=True, default="")
+    reversed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reversed_return_inspections",
+    )
+    reversed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Return Safety Inspection"
+        verbose_name_plural = "Return Safety Inspections"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "-created_at"]),
+            models.Index(fields=["allocation", "disposition"]),
+            models.Index(fields=["batch", "disposition"]),
+            models.Index(fields=["cost_lot", "disposition"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ReturnInspection {self.inspection_id} [{self.disposition}] - {self.returned_quantity_base_units} units"
+
+    def clean(self):
+        super().clean()
+        if not self.inspection_id:
+            self.inspection_id = f"retinsp-{uuid.uuid4().hex[:12]}"
+        elif not str(self.inspection_id).startswith("retinsp-"):
+            self.inspection_id = f"retinsp-{self.inspection_id}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the inspection."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
