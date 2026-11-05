@@ -5076,6 +5076,238 @@ class VendorProductPriceList(models.Model):
         super().save(*args, **kwargs)
 
 
+class RequisitionDepartment(models.TextChoices):
+    DISPENSARY = "DISPENSARY", "Dispensary / Outpatient"
+    CENTRAL_STORE = "CENTRAL_STORE", "Central Store"
+    OT_PHARMACY = "OT_PHARMACY", "Operation Theater Pharmacy"
+    INPATIENT = "INPATIENT", "Inpatient / Ward Pharmacy"
+    GENERAL = "GENERAL", "General Requisition"
+
+
+class RequisitionPriority(models.TextChoices):
+    LOW = "LOW", "Low"
+    MEDIUM = "MEDIUM", "Medium"
+    HIGH = "HIGH", "High"
+    EMERGENCY = "EMERGENCY", "Emergency / Urgent"
+
+
+class RequisitionStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    SUBMITTED = "SUBMITTED", "Submitted for Approval"
+    APPROVED = "APPROVED", "Approved"
+    REJECTED = "REJECTED", "Rejected"
+    CANCELLED = "CANCELLED", "Cancelled"
+    CONVERTED_TO_PO = "CONVERTED_TO_PO", "Converted to Purchase Order"
+
+
+class PurchaseRequisition(models.Model):
+    """
+    Architecture Decision: ADR-0184 (P184).
+    Tenant and branch scoped purchase requisition with department, priority,
+    budget tracking, and approval lifecycle state machine.
+    """
+
+    requisition_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="purchase_requisitions",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "core.Branch",
+        on_delete=models.CASCADE,
+        related_name="purchase_requisitions",
+        db_index=True,
+    )
+    department = models.CharField(
+        max_length=32,
+        choices=RequisitionDepartment.choices,
+        default=RequisitionDepartment.DISPENSARY,
+        db_index=True,
+    )
+    priority = models.CharField(
+        max_length=16,
+        choices=RequisitionPriority.choices,
+        default=RequisitionPriority.MEDIUM,
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=24,
+        choices=RequisitionStatus.choices,
+        default=RequisitionStatus.DRAFT,
+        db_index=True,
+    )
+    total_estimated_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Calculated total estimated cost of all line items (BDT)",
+    )
+    allocated_budget = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Allocated budget cap for this requisition (BDT)",
+    )
+    justification = models.TextField(blank=True, default="", help_text="Clinical or business justification")
+    target_delivery_date = models.DateField(null=True, blank=True, db_index=True)
+
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="submitted_requisitions",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_requisitions",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approval_notes = models.TextField(blank=True, default="")
+
+    rejected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rejected_requisitions",
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default="")
+
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_requisitions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Purchase Requisition"
+        verbose_name_plural = "Purchase Requisitions"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["tenant", "department", "status"]),
+            models.Index(fields=["tenant", "priority", "status"]),
+            models.Index(fields=["tenant", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Requisition {self.requisition_id} [{self.department}] ({self.status})"
+
+    def clean(self):
+        super().clean()
+        if not self.requisition_id:
+            self.requisition_id = f"req-{uuid.uuid4().hex[:12]}"
+        elif not (str(self.requisition_id).startswith("req-") or str(self.requisition_id).startswith("pr-")):
+            self.requisition_id = f"req-{self.requisition_id}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the requisition tenant."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class PurchaseRequisitionItem(models.Model):
+    """
+    Architecture Decision: ADR-0184 (P184).
+    Line item for a purchase requisition specifying medicine product,
+    packaging, requested quantity, and estimated procurement cost.
+    """
+
+    item_id = models.CharField(max_length=64, primary_key=True)
+    requisition = models.ForeignKey(
+        PurchaseRequisition,
+        on_delete=models.CASCADE,
+        related_name="items",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="requisition_items",
+        db_index=True,
+    )
+    preferred_supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="preferred_requisition_items",
+        db_index=True,
+    )
+    package_type = models.CharField(max_length=32, default="BOX")
+    package_size = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Units per package (e.g. 100 tablets per box)",
+    )
+    requested_quantity = models.PositiveIntegerField(
+        validators=[MinValueValidator(1)],
+        help_text="Total base units requested",
+    )
+    estimated_unit_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0001"))],
+        help_text="Estimated purchase cost per base unit (BDT)",
+    )
+    estimated_total_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Calculated line total (BDT)",
+    )
+    current_stock_quantity = models.IntegerField(
+        default=0,
+        help_text="Snapshot of on-hand branch inventory at requisition creation",
+    )
+    notes = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        ordering = ["item_id"]
+        verbose_name = "Purchase Requisition Item"
+        verbose_name_plural = "Purchase Requisition Items"
+        indexes = [
+            models.Index(fields=["requisition", "product"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Item {self.item_id}: {self.product.brand_name} x {self.requested_quantity}"
+
+    def clean(self):
+        super().clean()
+        if not self.item_id:
+            self.item_id = f"pri-{uuid.uuid4().hex[:12]}"
+        elif not str(self.item_id).startswith("pri-"):
+            self.item_id = f"pri-{self.item_id}"
+
+        if self.estimated_unit_cost and self.requested_quantity:
+            self.estimated_total_cost = (self.estimated_unit_cost * Decimal(self.requested_quantity)).quantize(Decimal("0.0001"))
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 class ImportDuplicatePolicy(models.TextChoices):
     SKIP = "SKIP", "Skip duplicates"
     UPDATE_OVERWRITE = "UPDATE_OVERWRITE", "Update / Overwrite existing"
