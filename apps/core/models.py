@@ -9483,3 +9483,197 @@ class BatchExpiryPolicy(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class LandedCostExpenseType(models.TextChoices):
+    TRANSPORT_FREIGHT = "TRANSPORT_FREIGHT", "Transport & Freight"
+    HANDLING_LABOR = "HANDLING_LABOR", "Handling & Labor"
+    INSURANCE_TARIFF = "INSURANCE_TARIFF", "Transit Insurance & Tariffs"
+    COLD_CHAIN_LOGISTICS = "COLD_CHAIN_LOGISTICS", "Cold Chain Logistics"
+    REGULATORY_FEE = "REGULATORY_FEE", "Regulatory Quality Inspection"
+    OTHER = "OTHER", "Other Landed Surcharge"
+
+
+class LandedCostAllocationMethod(models.TextChoices):
+    BY_VALUE = "BY_VALUE", "Pro-Rata by Purchase Value"
+    BY_QUANTITY = "BY_QUANTITY", "Pro-Rata by Received Base Quantity"
+    MANUAL_EQUAL = "MANUAL_EQUAL", "Equal Division across Lots"
+
+
+class LandedCostStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft Calculation"
+    POSTED = "POSTED", "Posted & Capitalized to Lots"
+    REVERSED = "REVERSED", "Reversed"
+
+
+class LandedCostExpense(models.Model):
+    """
+    Architecture Decision: ADR-0176 (P176).
+    Captures landed transport, freight, handling, and logistics costs
+    capitalized across received purchase lots per IAS 2 / GAAP rules.
+    """
+
+    expense_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="landed_costs",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="landed_costs",
+        db_index=True,
+    )
+    grn = models.ForeignKey(
+        "GoodsReceiptNote",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="landed_costs",
+        db_index=True,
+    )
+    expense_type = models.CharField(
+        max_length=32,
+        choices=LandedCostExpenseType.choices,
+        default=LandedCostExpenseType.TRANSPORT_FREIGHT,
+        db_index=True,
+    )
+    allocation_method = models.CharField(
+        max_length=32,
+        choices=LandedCostAllocationMethod.choices,
+        default=LandedCostAllocationMethod.BY_VALUE,
+    )
+    total_expense_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0100"))],
+        help_text="Total landed expense in BDT to be absorbed by inventory.",
+    )
+    invoice_ref = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    reason = models.TextField(blank=True, default="")
+    status = models.CharField(
+        max_length=32,
+        choices=LandedCostStatus.choices,
+        default=LandedCostStatus.POSTED,
+        db_index=True,
+    )
+    recorded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recorded_landed_costs",
+    )
+    posted_at = models.DateTimeField(null=True, blank=True)
+    reversal_reason = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Landed Cost Expense"
+        verbose_name_plural = "Landed Cost Expenses"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["grn", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"LandedCost {self.expense_id} - {self.expense_type} ({self.total_expense_bdt} BDT) [{self.status}]"
+
+    def clean(self):
+        super().clean()
+        if not self.expense_id:
+            self.expense_id = f"landed-{uuid.uuid4().hex[:12]}"
+        elif not str(self.expense_id).startswith("landed-"):
+            self.expense_id = f"landed-{self.expense_id}"
+
+        if self.total_expense_bdt is not None and self.total_expense_bdt <= Decimal("0.0000"):
+            raise ValidationError({"total_expense_bdt": "Landed expense must be strictly positive."})
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the landed expense."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class LandedCostAllocationLine(models.Model):
+    """
+    Architecture Decision: ADR-0176 (P176).
+    Line item connecting an absorbed landed expense share to a specific PurchaseCostLot and BatchStock.
+    """
+
+    allocation_id = models.CharField(max_length=64, primary_key=True)
+    expense = models.ForeignKey(
+        LandedCostExpense,
+        on_delete=models.CASCADE,
+        related_name="lines",
+        db_index=True,
+    )
+    cost_lot = models.ForeignKey(
+        PurchaseCostLot,
+        on_delete=models.CASCADE,
+        related_name="landed_cost_allocations",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.CASCADE,
+        related_name="landed_cost_allocations",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="landed_cost_allocations",
+        db_index=True,
+    )
+    lot_base_unit_cost_before = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Original invoice acquisition unit cost prior to landed expense absorption.",
+    )
+    allocated_expense_amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Exact currency amount of landed expense absorbed by this lot.",
+    )
+    allocated_cost_per_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Absorbed landed expense divided by lot initial integer base units.",
+    )
+    lot_landed_unit_cost_after = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        help_text="Final capitalized unit cost = base_unit_cost_before + allocated_cost_per_unit.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        verbose_name = "Landed Cost Allocation Line"
+        verbose_name_plural = "Landed Cost Allocation Lines"
+        indexes = [
+            models.Index(fields=["expense", "cost_lot"]),
+            models.Index(fields=["cost_lot", "created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Alloc {self.allocation_id}: Lot {self.cost_lot_id} (+{self.allocated_cost_per_unit} BDT/unit)"
+
+    def clean(self):
+        super().clean()
+        if not self.allocation_id:
+            self.allocation_id = f"lcalloc-{uuid.uuid4().hex[:12]}"
+        elif not str(self.allocation_id).startswith("lcalloc-"):
+            self.allocation_id = f"lcalloc-{self.allocation_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
