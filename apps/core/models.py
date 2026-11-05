@@ -9924,3 +9924,133 @@ class BatchMergeRecord(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class StockCostingMethod(models.TextChoices):
+    FIFO_ACTUAL = "FIFO_ACTUAL", "FIFO Actual Lot Cost"
+    WEIGHTED_AVERAGE = "WEIGHTED_AVERAGE", "Weighted Average Batch Cost"
+
+
+class StockValuationSnapshot(models.Model):
+    """
+    Architecture Decision: ADR-0179 (P179).
+    Audited point-in-time stock valuation snapshot capturing FIFO actual or weighted average
+    cost valuation, retail/MRP valuation, potential gross margin, 5-tier aging analysis,
+    and realized margin from immutable lot allocations.
+    """
+
+    snapshot_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="valuation_snapshots",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="valuation_snapshots",
+        db_index=True,
+    )
+    valuation_date = models.DateField(db_index=True)
+    costing_method = models.CharField(
+        max_length=32,
+        choices=StockCostingMethod.choices,
+        default=StockCostingMethod.FIFO_ACTUAL,
+        db_index=True,
+    )
+    total_products_count = models.PositiveIntegerField(default=0)
+    total_quantity_base_units = models.PositiveIntegerField(default=0)
+    total_cost_valuation_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Total acquisition cost of inventory in BDT.",
+    )
+    total_retail_valuation_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Total retail/MRP potential selling value in BDT.",
+    )
+    potential_gross_margin_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        help_text="Potential gross profit in BDT (retail - cost).",
+    )
+    potential_margin_pct = models.DecimalField(
+        max_digits=7,
+        decimal_places=2,
+        help_text="Potential gross margin percentage.",
+    )
+    aging_summary = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="5-tier inventory aging buckets (0-30, 31-60, 61-90, 91-180, 181+ days).",
+    )
+    realized_revenue_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        help_text="Realized sales revenue from committed lot allocations.",
+    )
+    realized_cogs_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        help_text="Realized cost of goods sold from committed lot allocations.",
+    )
+    realized_gross_profit_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        help_text="Realized gross profit from committed lot allocations.",
+    )
+    realized_margin_pct = models.DecimalField(
+        max_digits=7,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        help_text="Realized profit margin percentage.",
+    )
+    product_breakdown = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Itemized product-level stock valuation metrics.",
+    )
+    notes = models.TextField(blank=True, default="")
+    generated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="valuation_snapshots",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-valuation_date", "-created_at"]
+        verbose_name = "Stock Valuation Snapshot"
+        verbose_name_plural = "Stock Valuation Snapshots"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "-valuation_date"]),
+            models.Index(fields=["tenant", "costing_method", "valuation_date"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ValuationSnapshot {self.snapshot_id}: {self.branch.name} on {self.valuation_date} ({self.costing_method}) - BDT {self.total_cost_valuation_bdt}"
+
+    def clean(self):
+        super().clean()
+        if not self.snapshot_id:
+            self.snapshot_id = f"valsnap-{uuid.uuid4().hex[:12]}"
+        elif not str(self.snapshot_id).startswith("valsnap-"):
+            self.snapshot_id = f"valsnap-{self.snapshot_id}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the valuation snapshot."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)

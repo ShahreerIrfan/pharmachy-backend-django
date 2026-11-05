@@ -88,6 +88,7 @@ from apps.core.branch_batch_ownership_views import BranchBatchOwnershipViewSet
 from apps.core.landed_cost_views import LandedCostExpenseViewSet
 from apps.core.return_safety_inspection_views import ReturnSafetyInspectionViewSet
 from apps.core.batch_merge_views import BatchMergeViewSet
+from apps.core.stock_valuation_views import StockValuationViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -256,6 +257,7 @@ router.register("inventory/branch-batches", BranchBatchOwnershipViewSet, basenam
 router.register("inventory/landed-costs", LandedCostExpenseViewSet, basename="inventory-landed-costs")
 router.register("inventory/return-inspections", ReturnSafetyInspectionViewSet, basename="inventory-return-inspections")
 router.register("inventory/batch-merges", BatchMergeViewSet, basename="inventory-batch-merges")
+router.register("inventory/valuation", StockValuationViewSet, basename="inventory-valuation")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
