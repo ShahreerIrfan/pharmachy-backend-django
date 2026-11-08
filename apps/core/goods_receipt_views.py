@@ -176,3 +176,65 @@ class GoodsReceiptViewSet(viewsets.ViewSet):
         except NotFound as exc:
             return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
 
+    @action(detail=True, methods=["get"], url_path="cold-chain-evidence")
+    def cold_chain_evidence(self, request, pk=None) -> Response:
+        """GET /api/v2/procurement/goods-receipts/{pk}/cold-chain-evidence/"""
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+        try:
+            evidences = GoodsReceiptService.get_cold_chain_evidences(
+                tenant_id=tenant_id,
+                grn_id=pk,
+            )
+            return Response({"count": len(evidences), "results": evidences}, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except NotFound as exc:
+            return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=False, methods=["get"], url_path="cold-chain-quarantine")
+    def cold_chain_quarantine(self, request) -> Response:
+        """GET /api/v2/procurement/goods-receipts/cold-chain-quarantine/"""
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+        branch_id = request.query_params.get("branch_id")
+        status_filter = request.query_params.get("quarantine_status", "PENDING_REVIEW")
+        try:
+            evidences = GoodsReceiptService.get_cold_chain_evidences(
+                tenant_id=tenant_id,
+                quarantine_status=status_filter if status_filter != "ALL" else None,
+                branch_id=branch_id,
+            )
+            return Response({"count": len(evidences), "results": evidences}, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except NotFound as exc:
+            return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=["post"], url_path="resolve-quarantine")
+    def resolve_quarantine(self, request, pk=None) -> Response:
+        """POST /api/v2/procurement/goods-receipts/{pk}/resolve-quarantine/"""
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+        evidence_id = request.data.get("evidence_id")
+        resolution_action = request.data.get("resolution_action")
+        justification = request.data.get("justification", "")
+        notes = request.data.get("notes", "")
+
+        try:
+            resolved = GoodsReceiptService.resolve_cold_chain_quarantine(
+                tenant_id=tenant_id,
+                actor_user=request.user,
+                evidence_id=evidence_id,
+                resolution_action=resolution_action,
+                justification=justification,
+                notes=notes,
+            )
+            return Response(resolved, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+        except NotFound as exc:
+            return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+

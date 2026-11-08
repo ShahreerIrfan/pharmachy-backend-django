@@ -25,17 +25,20 @@ from apps.core.models import (
     BatchStatus,
     BatchStock,
     Branch,
+    ColdChainQuarantineStatus,
     DeliveryStatus,
     GoodsReceiptBatchLink,
     GoodsReceiptLine,
     GoodsReceiptNote,
     GoodsReceiptStatus,
     MedicineProduct,
+    PackagingCondition,
     PurchaseCostLot,
     PurchaseCostLotStatus,
     PurchaseOrder,
     PurchaseOrderItem,
     PurchaseOrderStatus,
+    ReceiptColdChainEvidence,
     StorageCondition,
     Supplier,
     Tenant,
@@ -126,14 +129,47 @@ class GoodsReceiptService:
             "is_bonus_goods": line.is_bonus_goods,
             "excess_quantity": line.excess_quantity,
             "excess_reason": line.excess_reason,
+            "is_quarantined": line.is_quarantined,
             "is_fully_allocated": line.is_fully_allocated,
             "created_at": line.created_at.isoformat() if line.created_at else None,
+        }
+
+    @classmethod
+    def serialize_cold_chain_evidence(cls, evidence: ReceiptColdChainEvidence) -> Dict[str, Any]:
+        """Serializes a ReceiptColdChainEvidence record."""
+        return {
+            "evidence_id": evidence.evidence_id,
+            "tenant_id": str(evidence.tenant_id),
+            "branch_id": str(evidence.branch_id),
+            "grn_id": str(evidence.grn_id),
+            "grn_line_id": str(evidence.grn_line_id) if evidence.grn_line_id else None,
+            "product_id": str(evidence.product_id),
+            "batch_number": evidence.batch_number,
+            "logger_serial_number": evidence.logger_serial_number,
+            "recorded_temperature_celsius": str(evidence.recorded_temperature_celsius),
+            "min_temperature_celsius": str(evidence.min_temperature_celsius) if evidence.min_temperature_celsius is not None else None,
+            "max_temperature_celsius": str(evidence.max_temperature_celsius) if evidence.max_temperature_celsius is not None else None,
+            "excursion_detected": evidence.excursion_detected,
+            "excursion_duration_minutes": evidence.excursion_duration_minutes,
+            "packaging_condition": evidence.packaging_condition,
+            "carrier_name": evidence.carrier_name,
+            "vehicle_type": evidence.vehicle_type,
+            "proof_attachment_reference": evidence.proof_attachment_reference,
+            "inspection_notes": evidence.inspection_notes,
+            "quarantine_status": evidence.quarantine_status,
+            "quarantine_reason": evidence.quarantine_reason,
+            "reviewed_by_id": str(evidence.reviewed_by_id) if evidence.reviewed_by_id else None,
+            "reviewed_at": evidence.reviewed_at.isoformat() if evidence.reviewed_at else None,
+            "review_notes": evidence.review_notes,
+            "resolution_action": evidence.resolution_action,
+            "created_at": evidence.created_at.isoformat() if evidence.created_at else None,
         }
 
     @classmethod
     def serialize_grn(cls, grn: GoodsReceiptNote) -> Dict[str, Any]:
         """Serializes a complete Goods Received Note."""
         lines = [cls.serialize_line(line) for line in grn.lines.select_related("product", "po_item").all()]
+        evidences = [cls.serialize_cold_chain_evidence(e) for e in grn.cold_chain_evidences.all()]
         return {
             "grn_id": grn.grn_id,
             "grn_number": grn.grn_number,
@@ -159,6 +195,7 @@ class GoodsReceiptService:
             "notes": grn.notes,
             "is_active": grn.is_active,
             "lines": lines,
+            "cold_chain_evidences": evidences,
             "created_at": grn.created_at.isoformat() if grn.created_at else None,
             "updated_at": grn.updated_at.isoformat() if grn.updated_at else None,
         }
@@ -218,31 +255,49 @@ class GoodsReceiptService:
         storage_condition = data.get("storage_condition", "ROOM_TEMPERATURE")
         storage_temp = data.get("storage_temperature_celsius")
         storage_check_passed = bool(data.get("storage_check_passed", True))
+        quarantine_suspicious = bool(data.get("quarantine_suspicious", False))
+        cce_payload = data.get("cold_chain_evidence") or {}
 
-        if storage_condition.upper() in ("COLD_CHAIN", "COLD_CHAIN_2_TO_8C"):
-            if not storage_check_passed:
-                raise ValidationError(
-                    {
-                        "error_code": "ERR_STORAGE_CHECK_FAILED",
-                        "detail": "Cold-chain physical inspection failed. Goods receipt blocked.",
-                    }
-                )
-            if storage_temp is not None:
-                temp_dec = Decimal(str(storage_temp))
-                if temp_dec < Decimal("2.0") or temp_dec > Decimal("8.0"):
+        is_cold_chain = "COLD_CHAIN" in storage_condition.upper() or bool(cce_payload)
+        temp_dec = None
+        if storage_temp is not None:
+            temp_dec = Decimal(str(storage_temp))
+        elif cce_payload.get("recorded_temperature_celsius") is not None:
+            temp_dec = Decimal(str(cce_payload["recorded_temperature_celsius"]))
+
+        has_temp_violation = False
+        if is_cold_chain and temp_dec is not None:
+            if temp_dec < Decimal("2.0") or temp_dec > Decimal("8.0"):
+                has_temp_violation = True
+
+        pack_cond_raw = str(cce_payload.get("packaging_condition", "")).upper()
+        has_pack_violation = pack_cond_raw in (
+            PackagingCondition.ICE_PACKS_MELTED,
+            PackagingCondition.SEAL_BROKEN,
+            PackagingCondition.CONTAINER_DAMAGED,
+        )
+        is_suspicious_delivery = has_temp_violation or has_pack_violation or (not storage_check_passed) or quarantine_suspicious
+
+        if is_suspicious_delivery:
+            if quarantine_suspicious or (is_cold_chain and bool(cce_payload.get("quarantine_suspicious", False))):
+                # P189: Suspicious cold-chain items quarantined pending review
+                pass
+            else:
+                # P187 baseline: strict gate rejection when quarantine is not requested
+                if has_temp_violation:
                     raise ValidationError(
                         {
                             "error_code": "ERR_STORAGE_CHECK_FAILED",
                             "detail": f"Cold-chain temperature violation ({temp_dec}°C). Accepted range is 2.0°C to 8.0°C.",
                         }
                     )
-        elif not storage_check_passed:
-            raise ValidationError(
-                {
-                    "error_code": "ERR_STORAGE_CHECK_FAILED",
-                    "detail": "Warehouse storage physical inspection failed.",
-                }
-            )
+                else:
+                    raise ValidationError(
+                        {
+                            "error_code": "ERR_STORAGE_CHECK_FAILED",
+                            "detail": "Cold-chain physical inspection failed. Goods receipt blocked." if is_cold_chain else "Warehouse storage physical inspection failed.",
+                        }
+                    )
 
         receipt_date_raw = data.get("receipt_date")
         if receipt_date_raw:
@@ -445,6 +500,8 @@ class GoodsReceiptService:
                     "is_bonus_goods": is_bonus_goods,
                     "excess_quantity": excess_qty,
                     "excess_reason": excess_reason,
+                    "is_quarantined": is_suspicious_delivery or bool(line_payload.get("is_quarantined", False)),
+                    "cold_chain_evidence": line_payload.get("cold_chain_evidence"),
                 }
             )
 
@@ -477,7 +534,7 @@ class GoodsReceiptService:
             )
 
             for line_dict in validated_lines:
-                GoodsReceiptLine.objects.create(
+                grn_line = GoodsReceiptLine.objects.create(
                     line_id=line_dict["line_id"],
                     grn=grn,
                     tenant=tenant,
@@ -500,8 +557,50 @@ class GoodsReceiptService:
                     is_bonus_goods=line_dict.get("is_bonus_goods", False),
                     excess_quantity=line_dict.get("excess_quantity", 0),
                     excess_reason=line_dict.get("excess_reason", ""),
+                    is_quarantined=line_dict.get("is_quarantined", False),
                     is_fully_allocated=False,
                 )
+
+                if is_cold_chain:
+                    line_cce = line_dict.get("cold_chain_evidence") or cce_payload or {}
+                    recorded_temp = Decimal(str(line_cce.get("recorded_temperature_celsius") or storage_temp or "4.0"))
+                    min_temp = Decimal(str(line_cce["min_temperature_celsius"])) if line_cce.get("min_temperature_celsius") is not None else None
+                    max_temp = Decimal(str(line_cce["max_temperature_celsius"])) if line_cce.get("max_temperature_celsius") is not None else None
+                    pack_cond = str(line_cce.get("packaging_condition") or (
+                        PackagingCondition.INTACT_SEALED if storage_check_passed else PackagingCondition.ICE_PACKS_MELTED
+                    )).upper()
+                    if pack_cond not in PackagingCondition.values:
+                        pack_cond = PackagingCondition.INTACT_SEALED
+
+                    line_is_suspicious = line_dict.get("is_quarantined", False)
+                    q_status = (
+                        ColdChainQuarantineStatus.PENDING_REVIEW if line_is_suspicious
+                        else ColdChainQuarantineStatus.NOT_QUARANTINED
+                    )
+                    q_reason = str(line_cce.get("quarantine_reason") or data.get("quarantine_reason", "Cold-chain anomaly detected")).strip() if line_is_suspicious else ""
+
+                    ReceiptColdChainEvidence.objects.create(
+                        evidence_id=f"cce-{uuid.uuid4().hex[:12]}",
+                        tenant=tenant,
+                        branch=branch,
+                        grn=grn,
+                        grn_line=grn_line,
+                        product=line_dict["product"],
+                        batch_number=line_dict["batch_number"],
+                        logger_serial_number=str(line_cce.get("logger_serial_number", "")).strip(),
+                        recorded_temperature_celsius=recorded_temp,
+                        min_temperature_celsius=min_temp,
+                        max_temperature_celsius=max_temp,
+                        excursion_detected=line_is_suspicious,
+                        excursion_duration_minutes=int(line_cce.get("excursion_duration_minutes", 0)),
+                        packaging_condition=pack_cond,
+                        carrier_name=str(line_cce.get("carrier_name", "")).strip(),
+                        vehicle_type=str(line_cce.get("vehicle_type", "REFRIGERATED_VAN")).strip(),
+                        proof_attachment_reference=str(line_cce.get("proof_attachment_reference", grn.proof_of_origin or "")).strip(),
+                        inspection_notes=str(line_cce.get("inspection_notes", grn.notes or "")).strip(),
+                        quarantine_status=q_status,
+                        quarantine_reason=q_reason,
+                    )
 
         AuditLogEntry.objects.create(
             request_id=f"req-{uuid.uuid4().hex[:8]}",
@@ -574,6 +673,10 @@ class GoodsReceiptService:
         posted_lots = []
 
         for line in lines:
+            is_line_quarantined = line.is_quarantined
+            target_status = BatchStatus.QUARANTINED if is_line_quarantined else BatchStatus.ACTIVE
+            cost_lot_status = PurchaseCostLotStatus.QUARANTINED if is_line_quarantined else PurchaseCostLotStatus.ACTIVE
+
             # 1. Update or create BatchStock
             batch = BatchStock.objects.filter(
                 tenant=grn.tenant,
@@ -599,16 +702,21 @@ class GoodsReceiptService:
                     expiry_date=line.expiry_date,
                     purchase_date=grn.receipt_date,
                     cost_per_unit=line.unit_cost,
-                    status=BatchStatus.ACTIVE,
+                    status=target_status,
+                    is_quarantined=is_line_quarantined,
                     manufacturing_date=line.mfg_date,
                     storage_condition=cond_val,
                     is_active=True,
                 )
             else:
                 batch.quantity_base_units += line.received_quantity_base_units
-                if batch.status == BatchStatus.DEPLETED:
+                if is_line_quarantined:
+                    batch.status = BatchStatus.QUARANTINED
+                    batch.is_quarantined = True
+                elif batch.status == BatchStatus.DEPLETED:
                     batch.status = BatchStatus.ACTIVE
-                batch.save(update_fields=["quantity_base_units", "status", "updated_at"])
+                    batch.is_quarantined = False
+                batch.save(update_fields=["quantity_base_units", "status", "is_quarantined", "updated_at"])
 
             # 2. Create distinct PurchaseCostLot
             cost_lot = PurchaseCostLot.objects.create(
@@ -626,7 +734,7 @@ class GoodsReceiptService:
                 unit_cost=line.unit_cost,
                 initial_quantity=line.received_quantity_base_units,
                 remaining_quantity=line.received_quantity_base_units,
-                status=PurchaseCostLotStatus.ACTIVE,
+                status=cost_lot_status,
                 notes=f"Posted via GRN {grn.grn_number} line {line.line_id}",
                 is_active=True,
             )
@@ -1020,4 +1128,163 @@ class GoodsReceiptService:
             "goods_receipts": grns_summary,
             "has_backorders": any(i["backordered_quantity"] > 0 for i in items_summary),
         }
+
+    @classmethod
+    @transaction.atomic
+    def resolve_cold_chain_quarantine(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        evidence_id: str,
+        resolution_action: str,
+        justification: str,
+        notes: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Executes a formal review of a quarantined cold-chain receipt evidence:
+        - APPROVE_RELEASE: Releases batch & cost lot to ACTIVE status with documented stability justification.
+        - REJECT_RETURN: Condemns batch for return to supplier; sets batch to RECALLED, reverses cost lot, credits AP liability.
+        - DISPOSE_DESTROY: Condemns batch for disposal/destruction; sets batch to DEPLETED, marks cost lot DEPLETED.
+        """
+        cls._assert_procurement_role(actor_user)
+        role = str(getattr(actor_user, "role", "")).upper()
+        if role not in ("BRANCH_MANAGER", "STAFF_PHARMACIST", "PHARMACY_OWNER", "SUPERADMIN"):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_STAFF_ROLE_DENIED",
+                    "detail": "Only Branch Managers and Registered Pharmacists can resolve cold-chain quarantine.",
+                }
+            )
+        tenant = cls._assert_tenant_active(tenant_id)
+
+        evidence = ReceiptColdChainEvidence.objects.select_for_update().filter(evidence_id=evidence_id).first()
+        if not evidence:
+            raise NotFound({"error_code": "ERR_EVIDENCE_NOT_FOUND", "detail": f"Cold-chain evidence '{evidence_id}' not found."})
+        if str(evidence.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant quarantine resolution forbidden."})
+
+        if evidence.quarantine_status != ColdChainQuarantineStatus.PENDING_REVIEW:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_ALREADY_RESOLVED",
+                    "detail": f"Evidence is already in status '{evidence.quarantine_status}'. Cannot resolve again.",
+                }
+            )
+
+        act = str(resolution_action).strip().upper()
+        if act not in ("APPROVE_RELEASE", "REJECT_RETURN", "DISPOSE_DESTROY"):
+            raise ValidationError(
+                {
+                    "error_code": "ERR_INVALID_RESOLUTION_ACTION",
+                    "detail": f"Invalid resolution action '{resolution_action}'. Must be APPROVE_RELEASE, REJECT_RETURN, or DISPOSE_DESTROY.",
+                }
+            )
+
+        just = str(justification).strip()
+        if not just:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_MISSING_JUSTIFICATION",
+                    "detail": "Documented stability justification is mandatory to resolve quarantined cold-chain stock.",
+                }
+            )
+
+        now = timezone.now()
+        evidence.resolution_action = act
+        evidence.review_notes = just if not notes.strip() else f"{just} | {notes.strip()}"
+        evidence.reviewed_by = actor_user
+        evidence.reviewed_at = now
+
+        batch = BatchStock.objects.select_for_update().filter(
+            tenant_id=evidence.tenant_id,
+            branch_id=evidence.branch_id,
+            product_id=evidence.product_id,
+            batch_number=evidence.batch_number,
+        ).first()
+
+        cost_lots = []
+        if evidence.grn_line_id:
+            links = GoodsReceiptBatchLink.objects.filter(line_id=evidence.grn_line_id).select_related("cost_lot")
+            cost_lots = [link.cost_lot for link in links if link.cost_lot]
+
+        grn = evidence.grn
+
+        if act == "APPROVE_RELEASE":
+            evidence.quarantine_status = ColdChainQuarantineStatus.RELEASED
+            if batch:
+                batch.status = BatchStatus.ACTIVE
+                batch.is_quarantined = False
+                batch.save(update_fields=["status", "is_quarantined", "updated_at"])
+            for cl in cost_lots:
+                cl.status = PurchaseCostLotStatus.ACTIVE
+                cl.save(update_fields=["status", "updated_at"])
+            audit_action = "COLD_CHAIN_QUARANTINE_RELEASED"
+
+        elif act == "REJECT_RETURN":
+            evidence.quarantine_status = ColdChainQuarantineStatus.RETURNED_TO_SUPPLIER
+            if batch:
+                batch.status = BatchStatus.RECALLED
+                batch.is_quarantined = False
+                batch.save(update_fields=["status", "is_quarantined", "updated_at"])
+            for cl in cost_lots:
+                cl.status = PurchaseCostLotStatus.REVERSED
+                cl.save(update_fields=["status", "updated_at"])
+            # Credit AP invoice liability on parent GRN
+            if evidence.grn_line and grn.ap_posting_status == "POSTED":
+                grn.ap_invoice_amount = max(Decimal("0.0000"), grn.ap_invoice_amount - evidence.grn_line.line_total)
+                grn.save(update_fields=["ap_invoice_amount", "updated_at"])
+            audit_action = "COLD_CHAIN_QUARANTINE_RETURNED"
+
+        else:  # DISPOSE_DESTROY
+            evidence.quarantine_status = ColdChainQuarantineStatus.DISPOSED
+            if batch:
+                batch.status = BatchStatus.DEPLETED
+                batch.is_quarantined = False
+                batch.save(update_fields=["status", "is_quarantined", "updated_at"])
+            for cl in cost_lots:
+                cl.status = PurchaseCostLotStatus.DEPLETED
+                cl.save(update_fields=["status", "updated_at"])
+            audit_action = "COLD_CHAIN_QUARANTINE_DESTROYED"
+
+        evidence.save(update_fields=["quarantine_status", "resolution_action", "review_notes", "reviewed_by", "reviewed_at", "updated_at"])
+
+        AuditLogEntry.objects.create(
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            tenant_id=str(tenant.tenant_id),
+            user_id=getattr(actor_user, "user_id", str(actor_user)),
+            actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+            actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+            action=audit_action,
+            resource_type="ReceiptColdChainEvidence",
+            resource_id=evidence.evidence_id,
+            ip_address="127.0.0.1",
+            status=AuditActionStatus.SUCCESS,
+            metadata_json={
+                "evidence_id": evidence.evidence_id,
+                "batch_number": evidence.batch_number,
+                "action": act,
+                "justification": just,
+                "grn_id": grn.grn_id,
+            },
+        )
+
+        return cls.serialize_cold_chain_evidence(evidence)
+
+    @classmethod
+    def get_cold_chain_evidences(
+        cls,
+        tenant_id: str,
+        grn_id: Optional[str] = None,
+        quarantine_status: Optional[str] = None,
+        branch_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        cls._assert_tenant_active(tenant_id)
+        qs = ReceiptColdChainEvidence.objects.filter(tenant_id=tenant_id).select_related("product", "grn", "grn_line", "reviewed_by")
+        if grn_id:
+            qs = qs.filter(grn_id=grn_id)
+        if branch_id:
+            qs = qs.filter(branch_id=branch_id)
+        if quarantine_status:
+            qs = qs.filter(quarantine_status=quarantine_status.upper())
+        return [cls.serialize_cold_chain_evidence(e) for e in qs]
 

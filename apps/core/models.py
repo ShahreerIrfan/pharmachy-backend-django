@@ -13,9 +13,9 @@ Normalized Core Domain Models for Bangladesh Pharmacy ERP & POS SaaS:
 
 from __future__ import annotations
 
+import uuid
 from datetime import timedelta
 from decimal import Decimal
-import uuid
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -9683,6 +9683,7 @@ class NonDivisiblePackPolicy(models.Model):
 
 class PurchaseCostLotStatus(models.TextChoices):
     ACTIVE = "ACTIVE", "Active"
+    QUARANTINED = "QUARANTINED", "Quarantined"
     DEPLETED = "DEPLETED", "Depleted"
     ADJUSTED = "ADJUSTED", "Adjusted"
     REVERSED = "REVERSED", "Reversed"
@@ -10006,6 +10007,11 @@ class GoodsReceiptLine(models.Model):
         default="",
         help_text="Authorized managerial justification for excess receipt",
     )
+    is_quarantined = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="True if line is held in quarantine due to cold-chain excursion",
+    )
     is_fully_allocated = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -10134,6 +10140,130 @@ class GoodsReceiptBatchLink(models.Model):
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+
+
+class PackagingCondition(models.TextChoices):
+    INTACT_SEALED = "INTACT_SEALED", "Intact & Sealed"
+    ICE_PACKS_FROZEN = "ICE_PACKS_FROZEN", "Ice Packs Fully Frozen"
+    ICE_PACKS_MELTED = "ICE_PACKS_MELTED", "Ice Packs Partially / Fully Melted"
+    SEAL_BROKEN = "SEAL_BROKEN", "Container Seal Tampered / Broken"
+    CONTAINER_DAMAGED = "CONTAINER_DAMAGED", "Outer Container Crushed / Damaged"
+
+
+class ColdChainQuarantineStatus(models.TextChoices):
+    NOT_QUARANTINED = "NOT_QUARANTINED", "Not Quarantined (Within Specs)"
+    PENDING_REVIEW = "PENDING_REVIEW", "Quarantined Pending Pharmacist Review"
+    RELEASED = "RELEASED", "Released to Active Stock"
+    RETURNED_TO_SUPPLIER = "RETURNED_TO_SUPPLIER", "Rejected & Returned to Supplier"
+    DISPOSED = "DISPOSED", "Condemned & Disposed"
+
+
+class ReceiptColdChainEvidence(models.Model):
+    """
+    Architecture Decision: ADR-0189 (P189).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+    Captures empirical cold-chain receipt evidence, temperature logger readings,
+    excursion detections, and guarded quarantine review transitions.
+    """
+
+    evidence_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="cold_chain_evidences",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="cold_chain_evidences",
+        db_index=True,
+    )
+    grn = models.ForeignKey(
+        GoodsReceiptNote,
+        on_delete=models.CASCADE,
+        related_name="cold_chain_evidences",
+        db_index=True,
+    )
+    grn_line = models.ForeignKey(
+        GoodsReceiptLine,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="cold_chain_evidences",
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="cold_chain_evidences",
+    )
+    batch_number = models.CharField(max_length=64, db_index=True)
+
+    # Temperature readings
+    logger_serial_number = models.CharField(max_length=64, blank=True, default="")
+    recorded_temperature_celsius = models.DecimalField(max_digits=5, decimal_places=2)
+    min_temperature_celsius = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    max_temperature_celsius = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+
+    # Excursion & Packaging
+    excursion_detected = models.BooleanField(default=False, db_index=True)
+    excursion_duration_minutes = models.PositiveIntegerField(default=0)
+    packaging_condition = models.CharField(
+        max_length=32,
+        choices=PackagingCondition.choices,
+        default=PackagingCondition.INTACT_SEALED,
+    )
+    carrier_name = models.CharField(max_length=128, blank=True, default="")
+    vehicle_type = models.CharField(max_length=64, blank=True, default="REFRIGERATED_VAN")
+    proof_attachment_reference = models.CharField(max_length=255, blank=True, default="")
+    inspection_notes = models.TextField(blank=True, default="")
+
+    # Quarantine & Review Workflow
+    quarantine_status = models.CharField(
+        max_length=32,
+        choices=ColdChainQuarantineStatus.choices,
+        default=ColdChainQuarantineStatus.NOT_QUARANTINED,
+        db_index=True,
+    )
+    quarantine_reason = models.CharField(max_length=255, blank=True, default="")
+    reviewed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_cold_chain_evidences",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True, default="")
+    resolution_action = models.CharField(max_length=32, blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Receipt Cold-Chain Evidence"
+        verbose_name_plural = "Receipt Cold-Chain Evidences"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "quarantine_status"]),
+            models.Index(fields=["tenant", "batch_number"]),
+            models.Index(fields=["grn", "excursion_detected"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ColdChainEvidence {self.evidence_id}: Batch {self.batch_number} ({self.recorded_temperature_celsius}°C - {self.quarantine_status})"
+
+    def clean(self):
+        super().clean()
+        if not self.evidence_id:
+            self.evidence_id = f"cce-{uuid.uuid4().hex[:12]}"
+        elif not str(self.evidence_id).startswith("cce-"):
+            self.evidence_id = f"cce-{self.evidence_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
 
 class StockReservationStatus(models.TextChoices):
     ACTIVE = "ACTIVE", "Active Reserved"
