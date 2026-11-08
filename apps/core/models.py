@@ -5308,6 +5308,265 @@ class PurchaseRequisitionItem(models.Model):
         super().save(*args, **kwargs)
 
 
+class PurchaseOrderStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    APPROVED = "APPROVED", "Approved"
+    ORDERED = "ORDERED", "Ordered / Sent to Supplier"
+    PARTIALLY_RECEIVED = "PARTIALLY_RECEIVED", "Partially Received"
+    CLOSED = "CLOSED", "Closed / Completed"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class PurchaseOrder(models.Model):
+    """
+    Architecture Decision: ADR-0185 (P185).
+    Tenant and branch scoped Purchase Order (PO) representing a formal commercial commitment
+    to a pharmaceutical distributor or manufacturer depot, with guarded lifecycle transitions.
+    """
+
+    po_id = models.CharField(max_length=64, primary_key=True)
+    po_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="purchase_orders",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "core.Branch",
+        on_delete=models.CASCADE,
+        related_name="purchase_orders",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        "core.Supplier",
+        on_delete=models.CASCADE,
+        related_name="purchase_orders",
+        db_index=True,
+    )
+    requisition = models.ForeignKey(
+        "core.PurchaseRequisition",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="purchase_orders",
+        db_index=True,
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=PurchaseOrderStatus.choices,
+        default=PurchaseOrderStatus.DRAFT,
+        db_index=True,
+    )
+    payment_terms_days = models.PositiveIntegerField(
+        default=30,
+        help_text="Agreed credit payment window in days",
+    )
+    currency = models.CharField(max_length=8, default="BDT")
+    subtotal_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Sum of gross line amounts before order-level discounts/taxes",
+    )
+    discount_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Negotiated overall order discount in BDT",
+    )
+    tax_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Applicable VAT/tax in BDT",
+    )
+    total_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Final net payable commitment in BDT",
+    )
+    expected_delivery_date = models.DateField(null=True, blank=True, db_index=True)
+    ordered_at = models.DateTimeField(null=True, blank=True)
+
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_purchase_orders",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approval_notes = models.TextField(blank=True, default="")
+
+    closed_at = models.DateTimeField(null=True, blank=True)
+    closing_notes = models.TextField(blank=True, default="")
+
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="cancelled_purchase_orders",
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancellation_reason = models.TextField(blank=True, default="")
+
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_purchase_orders",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Purchase Order"
+        verbose_name_plural = "Purchase Orders"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "po_number"],
+                name="unique_tenant_po_number",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["tenant", "supplier", "status"]),
+            models.Index(fields=["tenant", "status", "created_at"]),
+            models.Index(fields=["tenant", "po_number"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"PO {self.po_number} [{self.supplier.name}] ({self.status})"
+
+    def clean(self):
+        super().clean()
+        if not self.po_id:
+            self.po_id = f"po-{uuid.uuid4().hex[:12]}"
+        elif not str(self.po_id).startswith("po-"):
+            self.po_id = f"po-{self.po_id}"
+
+        if not self.po_number:
+            date_prefix = timezone.now().strftime("%Y%m")
+            self.po_number = f"PO-{date_prefix}-{uuid.uuid4().hex[:6].upper()}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the purchase order."})
+
+        if self.supplier_id and self.tenant_id:
+            if hasattr(self, "supplier") and self.supplier and self.supplier.tenant_id != self.tenant_id:
+                raise ValidationError({"supplier": "Supplier must belong to the same tenant as the purchase order."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class PurchaseOrderItem(models.Model):
+    """
+    Architecture Decision: ADR-0185 (P185).
+    Line item for a Purchase Order specifying ordered product, packaging,
+    cost price, trade discount, and delivered quantity tracking.
+    """
+
+    item_id = models.CharField(max_length=64, primary_key=True)
+    purchase_order = models.ForeignKey(
+        PurchaseOrder,
+        on_delete=models.CASCADE,
+        related_name="items",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="purchase_order_items",
+        db_index=True,
+    )
+    package_type = models.CharField(max_length=32, default="BOX")
+    package_size = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Units per package (e.g. 100 tablets per box)",
+    )
+    ordered_quantity = models.PositiveIntegerField(
+        validators=[MinValueValidator(1)],
+        help_text="Total base units ordered",
+    )
+    received_quantity = models.PositiveIntegerField(
+        default=0,
+        help_text="Cumulative base units received so far",
+    )
+    unit_cost_price = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0001"))],
+        help_text="Quoted purchase cost per individual base unit (BDT)",
+    )
+    discount_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Line trade or promotional discount percentage",
+    )
+    net_unit_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Net unit cost after discount (BDT)",
+    )
+    line_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Calculated line total liability (BDT)",
+    )
+    notes = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        ordering = ["item_id"]
+        verbose_name = "Purchase Order Item"
+        verbose_name_plural = "Purchase Order Items"
+        indexes = [
+            models.Index(fields=["purchase_order", "product"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"POItem {self.item_id}: {self.product.brand_name} (Ordered: {self.ordered_quantity}, Recv: {self.received_quantity})"
+
+    def clean(self):
+        super().clean()
+        if not self.item_id:
+            self.item_id = f"poi-{uuid.uuid4().hex[:12]}"
+        elif not str(self.item_id).startswith("poi-"):
+            self.item_id = f"poi-{self.item_id}"
+
+        discount_factor = Decimal("1.0000") - (self.discount_percentage / Decimal("100.00"))
+        self.net_unit_cost = (self.unit_cost_price * discount_factor).quantize(Decimal("0.0001"))
+        self.line_total = (self.net_unit_cost * Decimal(self.ordered_quantity)).quantize(Decimal("0.0001"))
+
+        if self.product_id and hasattr(self, "product") and self.product and self.product.mrp_unit and self.product.mrp_unit > Decimal("0.0000"):
+            if self.unit_cost_price > self.product.mrp_unit:
+                raise ValidationError({"unit_cost_price": "Quoted purchase unit cost cannot exceed Maximum Retail Price (MRP)."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 class ImportDuplicatePolicy(models.TextChoices):
     SKIP = "SKIP", "Skip duplicates"
     UPDATE_OVERWRITE = "UPDATE_OVERWRITE", "Update / Overwrite existing"
