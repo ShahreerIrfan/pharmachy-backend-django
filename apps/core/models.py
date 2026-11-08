@@ -10265,6 +10265,302 @@ class ReceiptColdChainEvidence(models.Model):
         super().save(*args, **kwargs)
 
 
+class InvoiceMatchingStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    MATCHED = "MATCHED", "Matched (Ready for AP)"
+    DISCREPANCY_QUEUE = "DISCREPANCY_QUEUE", "Discrepancy Exception Queue"
+    APPROVED_EXCEPTION = "APPROVED_EXCEPTION", "Approved Exception"
+    REJECTED = "REJECTED", "Rejected / Disputed"
+    POSTED_TO_AP = "POSTED_TO_AP", "Posted to Accounts Payable"
+
+
+class ItemMatchStatus(models.TextChoices):
+    MATCHED = "MATCHED", "Matched"
+    PRICE_VARIANCE = "PRICE_VARIANCE", "Price Variance"
+    QUANTITY_OVER_BILLING = "QUANTITY_OVER_BILLING", "Quantity Over-Billing"
+    QUANTITY_UNDER_BILLING = "QUANTITY_UNDER_BILLING", "Quantity Under-Billing"
+    UNMATCHED_ITEM = "UNMATCHED_ITEM", "Unmatched Item"
+
+
+class SupplierInvoice(models.Model):
+    """
+    Architecture Decision: ADR-0190 (P190).
+    3-Way matching between Purchase Order (PO), Goods Receipt Note (GRN), and Supplier Invoice.
+    Enforces variance tolerances, discrepancy routing, exception approvals, and AP ledger posting.
+    """
+
+    invoice_id = models.CharField(max_length=64, primary_key=True)
+    invoice_number = models.CharField(max_length=64, db_index=True, help_text="Vendor invoice/bill reference number")
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="supplier_invoices",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="supplier_invoices",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.PROTECT,
+        related_name="invoices",
+        db_index=True,
+    )
+    supplier_name = models.CharField(max_length=255, blank=True, default="")
+    purchase_order = models.ForeignKey(
+        "core.PurchaseOrder",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_invoices",
+    )
+    purchase_order_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    goods_receipt = models.ForeignKey(
+        GoodsReceiptNote,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_invoices",
+    )
+    goods_receipt_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    invoice_date = models.DateField(db_index=True)
+    due_date = models.DateField(null=True, blank=True)
+    currency = models.CharField(max_length=8, default="BDT")
+    subtotal_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    tax_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    discount_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    total_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    matching_status = models.CharField(
+        max_length=32,
+        choices=InvoiceMatchingStatus.choices,
+        default=InvoiceMatchingStatus.DRAFT,
+        db_index=True,
+    )
+    has_discrepancy = models.BooleanField(default=False)
+    discrepancy_reasons = models.JSONField(default=list, blank=True)
+    price_variance_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    quantity_variance_units = models.IntegerField(default=0)
+    total_variance_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    tolerated_price_variance_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("1.50"),
+        help_text="Maximum allowed price variance percentage before flagging discrepancy",
+    )
+    tolerated_amount_variance_bdt = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        default=Decimal("50.0000"),
+        help_text="Fixed amount threshold for rounding/tax difference tolerance",
+    )
+    exception_approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_supplier_invoices",
+    )
+    exception_approved_at = models.DateTimeField(null=True, blank=True)
+    exception_justification = models.TextField(blank=True, default="")
+    rejection_reason = models.TextField(blank=True, default="")
+    rejected_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="rejected_supplier_invoices",
+    )
+    rejected_at = models.DateTimeField(null=True, blank=True)
+    posted_to_ap_at = models.DateTimeField(null=True, blank=True)
+    ap_ledger_entry = models.ForeignKey(
+        SupplierLedgerEntry,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="invoices",
+    )
+    proof_attachment_reference = models.CharField(max_length=255, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_supplier_invoices",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Supplier Invoice"
+        verbose_name_plural = "Supplier Invoices"
+        unique_together = ("tenant", "supplier", "invoice_number")
+        indexes = [
+            models.Index(fields=["tenant", "matching_status"]),
+            models.Index(fields=["tenant", "supplier", "invoice_date"]),
+            models.Index(fields=["tenant", "has_discrepancy"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"SupplierInvoice {self.invoice_number} ({self.supplier_name}) - [{self.matching_status}]"
+
+    def clean(self):
+        super().clean()
+        if not self.invoice_id:
+            self.invoice_id = f"si-{uuid.uuid4().hex[:12]}"
+        elif not str(self.invoice_id).startswith("si-"):
+            self.invoice_id = f"si-{self.invoice_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class SupplierInvoiceItem(models.Model):
+    """
+    Architecture Decision: ADR-0190 (P190).
+    Line items of a supplier invoice matching PO item and GRN line.
+    """
+
+    item_id = models.CharField(max_length=64, primary_key=True)
+    invoice = models.ForeignKey(
+        SupplierInvoice,
+        on_delete=models.CASCADE,
+        related_name="items",
+        db_index=True,
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="supplier_invoice_items",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.PROTECT,
+        related_name="supplier_invoice_items",
+    )
+    po_item = models.ForeignKey(
+        "core.PurchaseOrderItem",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="invoice_items",
+    )
+    grn_line = models.ForeignKey(
+        GoodsReceiptLine,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="invoice_items",
+    )
+    batch_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    billed_quantity = models.PositiveIntegerField(default=1)
+    received_quantity = models.PositiveIntegerField(default=0)
+    ordered_quantity = models.PositiveIntegerField(default=0)
+    billed_unit_price = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    po_unit_price = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    line_subtotal = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    line_tax_percentage = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    line_discount_percentage = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    line_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    match_status = models.CharField(
+        max_length=32,
+        choices=ItemMatchStatus.choices,
+        default=ItemMatchStatus.MATCHED,
+    )
+    price_variance = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    quantity_variance = models.IntegerField(default=0)
+    notes = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["item_id"]
+        verbose_name = "Supplier Invoice Item"
+        verbose_name_plural = "Supplier Invoice Items"
+        indexes = [
+            models.Index(fields=["invoice", "product"]),
+            models.Index(fields=["tenant", "match_status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"SupplierInvoiceItem {self.item_id}: {self.product.brand_name} (Qty: {self.billed_quantity} @ {self.billed_unit_price})"
+
+    def clean(self):
+        super().clean()
+        if not self.item_id:
+            self.item_id = f"sii-{uuid.uuid4().hex[:12]}"
+        elif not str(self.item_id).startswith("sii-"):
+            self.item_id = f"sii-{self.item_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 class StockReservationStatus(models.TextChoices):
     ACTIVE = "ACTIVE", "Active Reserved"
     COMMITTED = "COMMITTED", "Committed / Sold"

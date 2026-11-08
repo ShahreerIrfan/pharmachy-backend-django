@@ -21,10 +21,15 @@ from apps.core.announcement_views import (
 )
 from apps.core.approval_views import ApprovalRequestViewSet
 from apps.core.barcode_identifier_views import BarcodeAlternateIdentifierViewSet
+from apps.core.batch_entity_views import BatchEntityViewSet
+from apps.core.batch_expiry_views import BatchExpiryViewSet
+from apps.core.batch_merge_views import BatchMergeViewSet
+from apps.core.batch_receipt_linking_views import BatchReceiptLinkingViewSet
 from apps.core.billing_report_views import (
     PlatformBillingReportViewSet,
     TenantBillingReportViewSet,
 )
+from apps.core.branch_batch_ownership_views import BranchBatchOwnershipViewSet
 from apps.core.branch_lifecycle_views import BranchLifecycleViewSet
 from apps.core.branch_membership_views import BranchStaffMembershipViewSet
 from apps.core.branch_operating_settings_views import BranchOperatingSettingsViewSet
@@ -56,16 +61,19 @@ from apps.core.feature_flag_views import (
     PlatformFeatureFlagViewSet,
     TenantFeatureFlagEvaluationViewSet,
 )
+from apps.core.fefo_allocation_views import FefoAllocationViewSet
 from apps.core.field_visibility_views import FieldVisibilityViewSet
 from apps.core.flexible_medicine_payload_views import FlexibleMedicinePayloadViewSet
 from apps.core.form_template_migration_views import FormTemplateMigrationViewSet
 from apps.core.gateway_views import PaymentGatewayViewSet
+from apps.core.goods_receipt_views import GoodsReceiptViewSet
 from apps.core.granular_permission_views import GranularPermissionViewSet
 from apps.core.health import legacy_health_check, liveness_probe, readiness_probe
 from apps.core.inhaler_views import InhalerEditorViewSet
 from apps.core.injection_vial_views import InjectionVialEditorViewSet
 from apps.core.insulin_views import InsulinEditorViewSet
 from apps.core.inventory_base_unit_views import InventoryBaseUnitStrategyViewSet
+from apps.core.landed_cost_views import LandedCostExpenseViewSet
 from apps.core.local_inventory_views import LocalInventoryViewSet
 from apps.core.loose_tablet_sales_views import LooseTabletSalesViewSet
 from apps.core.manual_payment_views import ManualPaymentClaimViewSet
@@ -76,25 +84,6 @@ from apps.core.medicine_form_template_views import MedicineFormTemplateViewSet
 from apps.core.medicine_search_views import MedicineSearchAutocompleteViewSet
 from apps.core.medicine_variant_views import MedicineVariantViewSet
 from apps.core.multi_level_unit_conversion_views import MultiLevelUnitConversionViewSet
-from apps.core.batch_entity_views import BatchEntityViewSet
-from apps.core.purchase_cost_lot_views import PurchaseCostLotViewSet
-from apps.core.batch_receipt_linking_views import BatchReceiptLinkingViewSet
-from apps.core.fefo_allocation_views import FefoAllocationViewSet
-from apps.core.sale_lot_allocation_views import SaleLotAllocationViewSet
-from apps.core.stock_availability_views import StockAvailabilityViewSet
-from apps.core.batch_expiry_views import BatchExpiryViewSet
-from apps.core.stock_correction_views import StockCorrectionViewSet
-from apps.core.branch_batch_ownership_views import BranchBatchOwnershipViewSet
-from apps.core.landed_cost_views import LandedCostExpenseViewSet
-from apps.core.return_safety_inspection_views import ReturnSafetyInspectionViewSet
-from apps.core.batch_merge_views import BatchMergeViewSet
-from apps.core.stock_valuation_views import StockValuationViewSet
-from apps.core.packaging_concurrency_views import PackagingConcurrencyViewSet
-from apps.core.supplier_organization_views import SupplierOrganizationViewSet
-from apps.core.vendor_price_list_views import VendorProductPriceListViewSet
-from apps.core.purchase_requisition_views import PurchaseRequisitionViewSet
-from apps.core.purchase_order_views import PurchaseOrderViewSet
-from apps.core.goods_receipt_views import GoodsReceiptViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -102,6 +91,7 @@ from apps.core.offline_lapse_views import LapsedPlanReconciliationViewSet
 from apps.core.onboarding_views import PlatformTenantOnboardingWizardViewSet
 from apps.core.override_precedence_views import OverridePrecedenceViewSet
 from apps.core.owner_dashboard_views import OwnerDashboardViewSet
+from apps.core.packaging_concurrency_views import PackagingConcurrencyViewSet
 from apps.core.packaging_hierarchy_views import PackagingHierarchyViewSet
 from apps.core.plan_catalogue_views import (
     PlanCatalogueViewSet,
@@ -111,12 +101,17 @@ from apps.core.plan_catalogue_views import (
 from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.product_metadata_review_views import ProductMetadataReviewViewSet
 from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
+from apps.core.purchase_cost_lot_views import PurchaseCostLotViewSet
+from apps.core.purchase_order_views import PurchaseOrderViewSet
+from apps.core.purchase_requisition_views import PurchaseRequisitionViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
 from apps.core.regulated_stock_entry_views import RegulatedStockEntryViewSet
 from apps.core.regulatory_source_views import RegulatorySourceAttachmentViewSet
 from apps.core.renewal_invoice_views import RenewalInvoiceViewSet
+from apps.core.return_safety_inspection_views import ReturnSafetyInspectionViewSet
 from apps.core.role_migration_views import RoleMigrationGrantsViewSet
 from apps.core.sachet_views import SachetEditorViewSet
+from apps.core.sale_lot_allocation_views import SaleLotAllocationViewSet
 from apps.core.shift_views import StaffShiftScheduleViewSet
 from apps.core.staff_lifecycle_views import StaffLifecycleViewSet
 from apps.core.staff_membership_views import (
@@ -125,11 +120,16 @@ from apps.core.staff_membership_views import (
 )
 from apps.core.staff_offline_auth_views import StaffOfflineAuthorizationViewSet
 from apps.core.staff_performance_views import StaffPerformanceMetricsViewSet
+from apps.core.stock_availability_views import StockAvailabilityViewSet
+from apps.core.stock_correction_views import StockCorrectionViewSet
+from apps.core.stock_valuation_views import StockValuationViewSet
 from apps.core.storage_conditional_views import StorageConditionalViewSet
 from apps.core.strength_taxonomy_views import StrengthTaxonomyViewSet
 from apps.core.subscription_portal_views import SubscriptionCustomerPortalViewSet
 from apps.core.subscription_support_views import SubscriptionSupportOverrideViewSet
 from apps.core.subscription_views import SubscriptionViewSet
+from apps.core.supplier_invoice_views import SupplierInvoiceViewSet
+from apps.core.supplier_organization_views import SupplierOrganizationViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -153,6 +153,7 @@ from apps.core.tenant_export_views import (
 from apps.core.tenant_medicine_config_views import TenantMedicineConfigViewSet
 from apps.core.topical_views import TopicalEditorViewSet
 from apps.core.trial_policy_views import TrialPolicyViewSet
+from apps.core.vendor_price_list_views import VendorProductPriceListViewSet
 from apps.core.views import (
     ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
@@ -270,6 +271,7 @@ router.register("procurement/price-lists", VendorProductPriceListViewSet, basena
 router.register("procurement/requisitions", PurchaseRequisitionViewSet, basename="procurement-requisitions")
 router.register("procurement/orders", PurchaseOrderViewSet, basename="procurement-orders")
 router.register("procurement/goods-receipts", GoodsReceiptViewSet, basename="procurement-goods-receipts")
+router.register("procurement/supplier-invoices", SupplierInvoiceViewSet, basename="procurement-supplier-invoices")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")
