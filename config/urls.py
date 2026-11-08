@@ -94,6 +94,7 @@ from apps.core.supplier_organization_views import SupplierOrganizationViewSet
 from apps.core.vendor_price_list_views import VendorProductPriceListViewSet
 from apps.core.purchase_requisition_views import PurchaseRequisitionViewSet
 from apps.core.purchase_order_views import PurchaseOrderViewSet
+from apps.core.goods_receipt_views import GoodsReceiptViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -268,6 +269,7 @@ router.register("procurement/suppliers", SupplierOrganizationViewSet, basename="
 router.register("procurement/price-lists", VendorProductPriceListViewSet, basename="procurement-price-lists")
 router.register("procurement/requisitions", PurchaseRequisitionViewSet, basename="procurement-requisitions")
 router.register("procurement/orders", PurchaseOrderViewSet, basename="procurement-orders")
+router.register("procurement/goods-receipts", GoodsReceiptViewSet, basename="procurement-goods-receipts")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

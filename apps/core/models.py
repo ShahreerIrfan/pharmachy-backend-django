@@ -9800,9 +9800,22 @@ class GoodsReceiptNote(models.Model):
         related_name="goods_receipt_notes",
     )
     supplier_name = models.CharField(max_length=255, blank=True, default="")
+    purchase_order = models.ForeignKey(
+        "core.PurchaseOrder",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="goods_receipt_notes",
+    )
     purchase_order_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
     supplier_invoice_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    challan_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    challan_date = models.DateField(null=True, blank=True)
     receipt_date = models.DateField(db_index=True)
+    storage_condition = models.CharField(max_length=64, default="ROOM_TEMPERATURE")
+    storage_temperature_celsius = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    storage_check_passed = models.BooleanField(default=True)
+    proof_of_origin = models.CharField(max_length=255, blank=True, default="")
     status = models.CharField(
         max_length=32,
         choices=GoodsReceiptStatus.choices,
@@ -9811,6 +9824,13 @@ class GoodsReceiptNote(models.Model):
     )
     total_received_base_units = models.PositiveIntegerField(default=0)
     total_invoice_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    ap_posting_status = models.CharField(max_length=32, default="PENDING")
+    ap_invoice_amount = models.DecimalField(
         max_digits=14,
         decimal_places=4,
         default=Decimal("0.0000"),
@@ -9887,6 +9907,19 @@ class GoodsReceiptLine(models.Model):
         related_name="goods_receipt_lines",
         db_index=True,
     )
+    po_item = models.ForeignKey(
+        "core.PurchaseOrderItem",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="grn_lines",
+    )
+    batch_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    expiry_date = models.DateField(null=True, blank=True, db_index=True)
+    mfg_date = models.DateField(null=True, blank=True)
+    pack_unit = models.CharField(max_length=32, default="BOX")
+    package_size = models.PositiveIntegerField(default=1)
+    received_packages = models.PositiveIntegerField(default=0)
     ordered_quantity_base_units = models.PositiveIntegerField(default=0)
     received_quantity_base_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
     unit_cost = models.DecimalField(
@@ -9895,6 +9928,31 @@ class GoodsReceiptLine(models.Model):
         validators=[MinValueValidator(Decimal("0.0000"))],
         default=Decimal("0.0000"),
     )
+    mrp_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    discount_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+    )
+    tax_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+    )
+    line_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    storage_location = models.CharField(max_length=64, blank=True, default="MAIN_RACK")
     is_fully_allocated = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -9917,6 +9975,16 @@ class GoodsReceiptLine(models.Model):
             self.line_id = f"grnl-{uuid.uuid4().hex[:12]}"
         elif not str(self.line_id).startswith("grnl-"):
             self.line_id = f"grnl-{self.line_id}"
+        if self.received_packages and self.received_packages > 0:
+            calc_units = self.received_packages * max(1, self.package_size)
+            if not self.received_quantity_base_units:
+                self.received_quantity_base_units = calc_units
+        if not self.line_total or self.line_total == Decimal("0.0000"):
+            discount_factor = Decimal("1.0000") - ((self.discount_percentage or Decimal("0.00")) / Decimal("100.00"))
+            net_cost = (self.unit_cost or Decimal("0.0000")) * discount_factor
+            subtotal = net_cost * Decimal(self.received_quantity_base_units or 0)
+            tax = subtotal * ((self.tax_percentage or Decimal("0.00")) / Decimal("100.00"))
+            self.line_total = (subtotal + tax).quantize(Decimal("0.0001"))
 
     def save(self, *args, **kwargs):
         self.clean()
