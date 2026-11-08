@@ -5473,6 +5473,14 @@ class PurchaseOrder(models.Model):
         super().save(*args, **kwargs)
 
 
+class DeliveryStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending Delivery"
+    PARTIALLY_DELIVERED = "PARTIALLY_DELIVERED", "Partially Delivered"
+    FULLY_DELIVERED = "FULLY_DELIVERED", "Fully Delivered"
+    BACKORDERED = "BACKORDERED", "Backordered"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
 class PurchaseOrderItem(models.Model):
     """
     Architecture Decision: ADR-0185 (P185) & ADR-0186 (P186).
@@ -5513,6 +5521,16 @@ class PurchaseOrderItem(models.Model):
     received_quantity = models.PositiveIntegerField(
         default=0,
         help_text="Cumulative base units received so far",
+    )
+    cancelled_quantity = models.PositiveIntegerField(
+        default=0,
+        help_text="Quantity cancelled or closed as unfulfillable backorder",
+    )
+    delivery_status = models.CharField(
+        max_length=32,
+        choices=DeliveryStatus.choices,
+        default=DeliveryStatus.PENDING,
+        db_index=True,
     )
     unit_cost_price = models.DecimalField(
         max_digits=14,
@@ -5594,6 +5612,14 @@ class PurchaseOrderItem(models.Model):
     def __str__(self) -> str:
         return f"POItem {self.item_id}: {self.product.brand_name} (Ordered: {self.ordered_quantity}, Recv: {self.received_quantity})"
 
+    @property
+    def backordered_quantity(self) -> int:
+        return max(0, self.ordered_quantity - self.received_quantity - self.cancelled_quantity)
+
+    @property
+    def is_backordered(self) -> bool:
+        return self.backordered_quantity > 0 and self.received_quantity > 0
+
     def clean(self):
         super().clean()
         if not self.item_id:
@@ -5628,6 +5654,19 @@ class PurchaseOrderItem(models.Model):
 
         if mrp and mrp > Decimal("0.0000") and self.unit_cost_price > mrp:
             raise ValidationError({"unit_cost_price": "Quoted purchase unit cost cannot exceed Maximum Retail Price (MRP)."})
+
+        # Synchronize delivery status
+        if self.received_quantity >= self.ordered_quantity:
+            self.delivery_status = DeliveryStatus.FULLY_DELIVERED
+        elif self.received_quantity > 0:
+            if (self.received_quantity + self.cancelled_quantity) >= self.ordered_quantity:
+                self.delivery_status = DeliveryStatus.FULLY_DELIVERED
+            else:
+                self.delivery_status = DeliveryStatus.PARTIALLY_DELIVERED
+        elif self.cancelled_quantity >= self.ordered_quantity:
+            self.delivery_status = DeliveryStatus.CANCELLED
+        else:
+            self.delivery_status = DeliveryStatus.PENDING
 
     def save(self, *args, **kwargs):
         self.clean()
@@ -9953,6 +9992,20 @@ class GoodsReceiptLine(models.Model):
         validators=[MinValueValidator(Decimal("0.0000"))],
     )
     storage_location = models.CharField(max_length=64, blank=True, default="MAIN_RACK")
+    is_bonus_goods = models.BooleanField(
+        default=False,
+        help_text="Promotional bonus units received at zero cost liability",
+    )
+    excess_quantity = models.PositiveIntegerField(
+        default=0,
+        help_text="Units received in excess of the PO line ordered quantity",
+    )
+    excess_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Authorized managerial justification for excess receipt",
+    )
     is_fully_allocated = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -9979,7 +10032,12 @@ class GoodsReceiptLine(models.Model):
             calc_units = self.received_packages * max(1, self.package_size)
             if not self.received_quantity_base_units:
                 self.received_quantity_base_units = calc_units
-        if not self.line_total or self.line_total == Decimal("0.0000"):
+        if self.is_bonus_goods:
+            self.unit_cost = Decimal("0.0000")
+            self.discount_percentage = Decimal("0.00")
+            self.tax_percentage = Decimal("0.00")
+            self.line_total = Decimal("0.0000")
+        elif not self.line_total or self.line_total == Decimal("0.0000"):
             discount_factor = Decimal("1.0000") - ((self.discount_percentage or Decimal("0.00")) / Decimal("100.00"))
             net_cost = (self.unit_cost or Decimal("0.0000")) * discount_factor
             subtotal = net_cost * Decimal(self.received_quantity_base_units or 0)

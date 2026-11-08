@@ -16,6 +16,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.response import Response
 
+from apps.core.goods_receipt_service import GoodsReceiptService
 from apps.core.models import TenantLifecycleStatus
 from apps.core.purchase_order_service import PurchaseOrderService
 
@@ -331,6 +332,47 @@ class PurchaseOrderViewSet(viewsets.ViewSet):
             return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
         except ValidationError as exc:
             return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+        except NotFound as exc:
+            return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=["post"], url_path="cancel-backorder")
+    def cancel_backorder(self, request, pk=None) -> Response:
+        """POST /api/v2/procurement/orders/{pk}/cancel-backorder/"""
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+        item_id = request.data.get("item_id")
+        cancel_quantity = request.data.get("cancel_quantity", 0)
+        reason = request.data.get("reason", "")
+        try:
+            result = GoodsReceiptService.cancel_po_backorder(
+                tenant_id=tenant_id,
+                actor_user=request.user,
+                po_id=pk,
+                item_id=item_id,
+                cancel_quantity=cancel_quantity,
+                reason=reason,
+            )
+            return Response(result, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+        except NotFound as exc:
+            return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=["get"], url_path="delivery-summary")
+    def delivery_summary(self, request, pk=None) -> Response:
+        """GET /api/v2/procurement/orders/{pk}/delivery-summary/"""
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+        try:
+            summary = GoodsReceiptService.get_po_delivery_summary(
+                tenant_id=tenant_id,
+                po_id=pk,
+            )
+            return Response(summary, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
         except NotFound as exc:
             return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
 

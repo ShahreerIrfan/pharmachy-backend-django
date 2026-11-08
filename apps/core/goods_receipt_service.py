@@ -25,6 +25,7 @@ from apps.core.models import (
     BatchStatus,
     BatchStock,
     Branch,
+    DeliveryStatus,
     GoodsReceiptBatchLink,
     GoodsReceiptLine,
     GoodsReceiptNote,
@@ -122,6 +123,9 @@ class GoodsReceiptService:
             "tax_percentage": str(line.tax_percentage),
             "line_total": str(line.line_total),
             "storage_location": line.storage_location,
+            "is_bonus_goods": line.is_bonus_goods,
+            "excess_quantity": line.excess_quantity,
+            "excess_reason": line.excess_reason,
             "is_fully_allocated": line.is_fully_allocated,
             "created_at": line.created_at.isoformat() if line.created_at else None,
         }
@@ -351,38 +355,70 @@ class GoodsReceiptService:
             if calc_qty <= 0:
                 raise ValidationError({"error_code": "ERR_INVALID_QUANTITY", "detail": "Received quantity must be >= 1."})
 
+            is_bonus_goods = bool(line_payload.get("is_bonus_goods", False))
+            allow_excess = bool(data.get("allow_excess", False) or line_payload.get("allow_excess", False))
+            excess_reason = str(line_payload.get("excess_reason", data.get("excess_reason", ""))).strip()
+            excess_qty = 0
+
             # Over-receipt check against PO item
             if po_item:
-                remaining_qty = po_item.ordered_quantity - po_item.received_quantity
+                remaining_qty = max(0, po_item.ordered_quantity - po_item.received_quantity - po_item.cancelled_quantity)
                 if calc_qty > remaining_qty:
+                    if is_bonus_goods:
+                        excess_qty = calc_qty - remaining_qty
+                    elif allow_excess:
+                        role = getattr(actor_user, "role", None)
+                        if str(role).upper() not in ("BRANCH_MANAGER", "PHARMACY_OWNER", "SUPERADMIN"):
+                            raise PermissionDenied(
+                                {
+                                    "error_code": "ERR_STAFF_ROLE_DENIED",
+                                    "detail": "Only Branch Managers and Owners can authorize excess delivery quantities.",
+                                }
+                            )
+                        if not excess_reason:
+                            raise ValidationError(
+                                {
+                                    "error_code": "ERR_MISSING_EXCESS_REASON",
+                                    "detail": "Managerial justification (excess_reason) is required to authorize excess deliveries.",
+                                }
+                            )
+                        excess_qty = calc_qty - remaining_qty
+                    else:
+                        raise ValidationError(
+                            {
+                                "error_code": "ERR_EXCESS_RECEIPT",
+                                "detail": f"Received quantity ({calc_qty}) exceeds remaining unreceived quantity ({remaining_qty}) on PO item.",
+                            }
+                        )
+
+            if is_bonus_goods:
+                unit_cost = Decimal("0.0000")
+                line_total = Decimal("0.0000")
+                mrp_unit = Decimal(str(line_payload.get("mrp_unit", getattr(po_item, "mrp_unit", product.mrp_unit or "0.0000"))))
+                disc_pct = Decimal("0.00")
+                tax_pct = Decimal("0.00")
+            else:
+                unit_cost = Decimal(str(line_payload.get("unit_cost", getattr(po_item, "unit_cost_price", product.cost_unit or "1.0000"))))
+                if unit_cost <= Decimal("0.0000"):
+                    raise ValidationError({"error_code": "ERR_INVALID_COST", "detail": "Unit cost must be positive."})
+
+                mrp_unit = Decimal(str(line_payload.get("mrp_unit", getattr(po_item, "mrp_unit", product.mrp_unit or "0.0000"))))
+                if mrp_unit > Decimal("0.0000") and unit_cost > mrp_unit:
                     raise ValidationError(
                         {
-                            "error_code": "ERR_EXCESS_RECEIPT",
-                            "detail": f"Received quantity ({calc_qty}) exceeds remaining unreceived quantity ({remaining_qty}) on PO item.",
+                            "error_code": "ERR_COST_EXCEEDS_MRP",
+                            "detail": f"Unit cost ({unit_cost}) cannot exceed maximum retail price ({mrp_unit}).",
                         }
                     )
 
-            unit_cost = Decimal(str(line_payload.get("unit_cost", getattr(po_item, "unit_cost_price", product.cost_unit or "1.0000"))))
-            if unit_cost <= Decimal("0.0000"):
-                raise ValidationError({"error_code": "ERR_INVALID_COST", "detail": "Unit cost must be positive."})
+                disc_pct = Decimal(str(line_payload.get("discount_percentage", getattr(po_item, "discount_percentage", "0.00"))))
+                tax_pct = Decimal(str(line_payload.get("tax_percentage", getattr(po_item, "tax_percentage", "0.00"))))
 
-            mrp_unit = Decimal(str(line_payload.get("mrp_unit", getattr(po_item, "mrp_unit", product.mrp_unit or "0.0000"))))
-            if mrp_unit > Decimal("0.0000") and unit_cost > mrp_unit:
-                raise ValidationError(
-                    {
-                        "error_code": "ERR_COST_EXCEEDS_MRP",
-                        "detail": f"Unit cost ({unit_cost}) cannot exceed maximum retail price ({mrp_unit}).",
-                    }
-                )
-
-            disc_pct = Decimal(str(line_payload.get("discount_percentage", getattr(po_item, "discount_percentage", "0.00"))))
-            tax_pct = Decimal(str(line_payload.get("tax_percentage", getattr(po_item, "tax_percentage", "0.00"))))
-
-            disc_factor = Decimal("1.0000") - (disc_pct / Decimal("100.00"))
-            net_cost = (unit_cost * disc_factor).quantize(Decimal("0.0001"))
-            line_subtotal = (net_cost * Decimal(calc_qty)).quantize(Decimal("0.0001"))
-            line_tax = (line_subtotal * (tax_pct / Decimal("100.00"))).quantize(Decimal("0.0001"))
-            line_total = (line_subtotal + line_tax).quantize(Decimal("0.0001"))
+                disc_factor = Decimal("1.0000") - (disc_pct / Decimal("100.00"))
+                net_cost = (unit_cost * disc_factor).quantize(Decimal("0.0001"))
+                line_subtotal = (net_cost * Decimal(calc_qty)).quantize(Decimal("0.0001"))
+                line_tax = (line_subtotal * (tax_pct / Decimal("100.00"))).quantize(Decimal("0.0001"))
+                line_total = (line_subtotal + line_tax).quantize(Decimal("0.0001"))
 
             total_units += calc_qty
             total_amount += line_total
@@ -406,6 +442,9 @@ class GoodsReceiptService:
                     "tax_percentage": tax_pct,
                     "line_total": line_total,
                     "storage_location": str(line_payload.get("storage_location", "MAIN_RACK")).strip(),
+                    "is_bonus_goods": is_bonus_goods,
+                    "excess_quantity": excess_qty,
+                    "excess_reason": excess_reason,
                 }
             )
 
@@ -458,6 +497,9 @@ class GoodsReceiptService:
                     tax_percentage=line_dict["tax_percentage"],
                     line_total=line_dict["line_total"],
                     storage_location=line_dict["storage_location"],
+                    is_bonus_goods=line_dict.get("is_bonus_goods", False),
+                    excess_quantity=line_dict.get("excess_quantity", 0),
+                    excess_reason=line_dict.get("excess_reason", ""),
                     is_fully_allocated=False,
                 )
 
@@ -606,10 +648,17 @@ class GoodsReceiptService:
             line.is_fully_allocated = True
             line.save(update_fields=["is_fully_allocated", "updated_at"])
 
-            # 4. Update PO line item received quantity
+            # 4. Update PO line item received quantity & delivery status
             if line.po_item:
                 line.po_item.received_quantity += line.received_quantity_base_units
-                line.po_item.save(update_fields=["received_quantity"])
+                if (line.po_item.received_quantity + line.po_item.cancelled_quantity) >= line.po_item.ordered_quantity:
+                    if line.po_item.received_quantity > 0:
+                        line.po_item.delivery_status = DeliveryStatus.FULLY_DELIVERED
+                    else:
+                        line.po_item.delivery_status = DeliveryStatus.CANCELLED
+                elif line.po_item.received_quantity > 0:
+                    line.po_item.delivery_status = DeliveryStatus.PARTIALLY_DELIVERED
+                line.po_item.save(update_fields=["received_quantity", "delivery_status"])
 
             posted_lots.append(cost_lot.lot_id)
 
@@ -617,13 +666,13 @@ class GoodsReceiptService:
         if grn.purchase_order:
             po = grn.purchase_order
             po_items = list(po.items.all())
-            all_fulfilled = all(item.received_quantity >= item.ordered_quantity for item in po_items)
+            all_fulfilled = all((item.received_quantity + item.cancelled_quantity) >= item.ordered_quantity for item in po_items)
             any_received = any(item.received_quantity > 0 for item in po_items)
 
             if all_fulfilled:
                 po.status = PurchaseOrderStatus.CLOSED
                 po.closed_at = now
-                po.closing_notes = f"Fully received via GRN {grn.grn_number}"
+                po.closing_notes = f"Fully received/fulfilled via GRN {grn.grn_number}"
             elif any_received:
                 po.status = PurchaseOrderStatus.PARTIALLY_RECEIVED
 
@@ -714,22 +763,36 @@ class GoodsReceiptService:
             link.is_posted = False
             link.save(update_fields=["is_posted"])
 
-        # Roll back PO item received quantities
+        # Roll back PO item received quantities & delivery status
         for line in grn.lines.select_related("po_item").all():
             if line.po_item:
                 line.po_item.received_quantity = max(0, line.po_item.received_quantity - line.received_quantity_base_units)
-                line.po_item.save(update_fields=["received_quantity"])
+                if (line.po_item.received_quantity + line.po_item.cancelled_quantity) >= line.po_item.ordered_quantity:
+                    if line.po_item.received_quantity > 0:
+                        line.po_item.delivery_status = DeliveryStatus.FULLY_DELIVERED
+                    else:
+                        line.po_item.delivery_status = DeliveryStatus.CANCELLED
+                elif line.po_item.received_quantity > 0:
+                    line.po_item.delivery_status = DeliveryStatus.PARTIALLY_DELIVERED
+                elif line.po_item.cancelled_quantity >= line.po_item.ordered_quantity:
+                    line.po_item.delivery_status = DeliveryStatus.CANCELLED
+                else:
+                    line.po_item.delivery_status = DeliveryStatus.PENDING
+                line.po_item.save(update_fields=["received_quantity", "delivery_status"])
 
         # Roll back parent Purchase Order status
         if grn.purchase_order:
             po = grn.purchase_order
             po_items = list(po.items.all())
+            all_fulfilled = all((item.received_quantity + item.cancelled_quantity) >= item.ordered_quantity for item in po_items)
             any_received = any(item.received_quantity > 0 for item in po_items)
-            if any_received:
+            if all_fulfilled:
+                po.status = PurchaseOrderStatus.CLOSED
+            elif any_received:
                 po.status = PurchaseOrderStatus.PARTIALLY_RECEIVED
             else:
                 po.status = PurchaseOrderStatus.ORDERED
-            po.closed_at = None
+                po.closed_at = None
             po.save(update_fields=["status", "closed_at", "updated_at"])
 
         grn.status = GoodsReceiptStatus.REVERSED
@@ -786,4 +849,175 @@ class GoodsReceiptService:
             qs = qs.filter(status=status.upper())
         qs = qs.order_by("-receipt_date", "-created_at")
         return [cls.serialize_grn(grn) for grn in qs]
+
+    @classmethod
+    @transaction.atomic
+    def cancel_po_backorder(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        po_id: str,
+        item_id: str,
+        cancel_quantity: int,
+        reason: str,
+    ) -> Dict[str, Any]:
+        """
+        Cancels unfulfillable backordered quantities on a PO line item.
+        Guarded: Only Managers/Owners can cancel. Unreceived stock is never counted in inventory.
+        If all line backorders are cancelled/fulfilled, transitions the PO to CLOSED.
+        """
+        role = getattr(actor_user, "role", None)
+        if str(role).upper() not in ("BRANCH_MANAGER", "PHARMACY_OWNER", "SUPERADMIN"):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_STAFF_ROLE_DENIED",
+                    "detail": "Only Branch Managers and Owners can cancel purchase order backorders.",
+                }
+            )
+        tenant = cls._assert_tenant_active(tenant_id)
+
+        po = PurchaseOrder.objects.select_for_update().filter(po_id=po_id).first()
+        if not po:
+            raise NotFound({"error_code": "ERR_PO_NOT_FOUND", "detail": f"Purchase order '{po_id}' not found."})
+        if str(po.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant PO access forbidden."})
+
+        if po.status not in (PurchaseOrderStatus.ORDERED, PurchaseOrderStatus.PARTIALLY_RECEIVED):
+            raise ValidationError(
+                {
+                    "error_code": "ERR_PO_NOT_MODIFIABLE",
+                    "detail": f"Cannot cancel backorders on PO in '{po.status}' status.",
+                }
+            )
+
+        po_item = po.items.select_for_update().filter(item_id=item_id).first()
+        if not po_item:
+            raise NotFound({"error_code": "ERR_PO_ITEM_NOT_FOUND", "detail": f"PO item '{item_id}' not found on order '{po_id}'."})
+
+        cancel_qty = int(cancel_quantity)
+        if cancel_qty <= 0:
+            raise ValidationError({"error_code": "ERR_INVALID_CANCEL_QUANTITY", "detail": "cancel_quantity must be positive."})
+
+        current_backorder = po_item.backordered_quantity
+        if cancel_qty > current_backorder:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_INVALID_CANCEL_QUANTITY",
+                    "detail": f"Cannot cancel {cancel_qty} units; only {current_backorder} units are currently backordered.",
+                }
+            )
+
+        if not str(reason).strip():
+            raise ValidationError({"error_code": "ERR_MISSING_CANCEL_REASON", "detail": "Cancellation reason is required."})
+
+        po_item.cancelled_quantity += cancel_qty
+        if (po_item.received_quantity + po_item.cancelled_quantity) >= po_item.ordered_quantity:
+            if po_item.received_quantity > 0:
+                po_item.delivery_status = DeliveryStatus.FULLY_DELIVERED
+            else:
+                po_item.delivery_status = DeliveryStatus.CANCELLED
+        else:
+            po_item.delivery_status = DeliveryStatus.PARTIALLY_DELIVERED
+
+        po_item.save(update_fields=["cancelled_quantity", "delivery_status"])
+
+        # Check if all lines are satisfied
+        po_items = list(po.items.all())
+        all_fulfilled = all((item.received_quantity + item.cancelled_quantity) >= item.ordered_quantity for item in po_items)
+        if all_fulfilled:
+            po.status = PurchaseOrderStatus.CLOSED
+            po.closed_at = timezone.now()
+            po.closing_notes = f"Closed after backorder cancellation: {reason.strip()}"
+            po.save(update_fields=["status", "closed_at", "closing_notes", "updated_at"])
+
+        AuditLogEntry.objects.create(
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            tenant_id=str(tenant.tenant_id),
+            user_id=getattr(actor_user, "user_id", str(actor_user)),
+            actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+            actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+            action="PO_BACKORDER_CANCELLED",
+            resource_type="PurchaseOrderItem",
+            resource_id=po_item.item_id,
+            ip_address="127.0.0.1",
+            status=AuditActionStatus.SUCCESS,
+            metadata_json={
+                "po_id": po.po_id,
+                "item_id": po_item.item_id,
+                "cancelled_quantity": cancel_qty,
+                "remaining_backorder": po_item.backordered_quantity,
+                "reason": reason.strip(),
+            },
+        )
+
+        return {
+            "item_id": po_item.item_id,
+            "product_id": str(po_item.product_id),
+            "ordered_quantity": po_item.ordered_quantity,
+            "received_quantity": po_item.received_quantity,
+            "cancelled_quantity": po_item.cancelled_quantity,
+            "backordered_quantity": po_item.backordered_quantity,
+            "delivery_status": po_item.delivery_status,
+            "po_status": po.status,
+        }
+
+    @classmethod
+    def get_po_delivery_summary(cls, tenant_id: str, po_id: str) -> Dict[str, Any]:
+        """Returns delivery progress, line fulfillment, backorders, and linked GRNs for a PO."""
+        cls._assert_tenant_active(tenant_id)
+        po = PurchaseOrder.objects.filter(po_id=po_id).first()
+        if not po:
+            raise NotFound({"error_code": "ERR_PO_NOT_FOUND", "detail": f"Purchase order '{po_id}' not found."})
+        if str(po.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant PO access forbidden."})
+
+        items_summary = []
+        for itm in po.items.select_related("product").all():
+            items_summary.append({
+                "item_id": itm.item_id,
+                "product_id": str(itm.product_id),
+                "product_brand_name": itm.product.brand_name if itm.product else "",
+                "pack_unit": itm.pack_unit,
+                "package_size": itm.package_size,
+                "ordered_quantity": itm.ordered_quantity,
+                "received_quantity": itm.received_quantity,
+                "cancelled_quantity": itm.cancelled_quantity,
+                "backordered_quantity": itm.backordered_quantity,
+                "delivery_status": itm.delivery_status,
+                "unit_cost_price": str(itm.unit_cost_price),
+                "mrp_unit": str(itm.mrp_unit),
+            })
+
+        grns_summary = []
+        for grn in po.goods_receipt_notes.all():
+            grns_summary.append({
+                "grn_id": grn.grn_id,
+                "grn_number": grn.grn_number,
+                "challan_number": grn.challan_number,
+                "receipt_date": grn.receipt_date.isoformat(),
+                "status": grn.status,
+                "total_received_base_units": grn.total_received_base_units,
+                "total_invoice_amount": str(grn.total_invoice_amount),
+            })
+
+        total_ordered = sum(i["ordered_quantity"] for i in items_summary)
+        total_received = sum(i["received_quantity"] for i in items_summary)
+        total_cancelled = sum(i["cancelled_quantity"] for i in items_summary)
+        total_backordered = sum(i["backordered_quantity"] for i in items_summary)
+
+        return {
+            "po_id": po.po_id,
+            "po_number": po.po_number,
+            "po_status": po.status,
+            "tenant_id": str(po.tenant_id),
+            "branch_id": str(po.branch_id),
+            "total_ordered_units": total_ordered,
+            "total_received_units": total_received,
+            "total_cancelled_units": total_cancelled,
+            "total_backordered_units": total_backordered,
+            "items": items_summary,
+            "linked_grns": grns_summary,
+            "goods_receipts": grns_summary,
+            "has_backorders": any(i["backordered_quantity"] > 0 for i in items_summary),
+        }
 
