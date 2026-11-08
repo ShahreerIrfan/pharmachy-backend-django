@@ -84,6 +84,21 @@ from apps.core.medicine_form_template_views import MedicineFormTemplateViewSet
 from apps.core.medicine_search_views import MedicineSearchAutocompleteViewSet
 from apps.core.medicine_variant_views import MedicineVariantViewSet
 from apps.core.multi_level_unit_conversion_views import MultiLevelUnitConversionViewSet
+from apps.core.supplier_invoice_views import SupplierInvoiceViewSet
+from apps.core.purchase_return_views import PurchaseReturnViewSet
+from apps.core.supplier_credit_note_views import SupplierCreditNoteViewSet
+from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
+from apps.core.auto_reorder_planner_views import AutoReorderPlannerViewSet
+from apps.core.multi_supplier_comparison_views import MultiSupplierComparisonViewSet
+from apps.core.delivery_logistics_views import DeliveryLogisticsViewSet
+from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
+from apps.core.purchase_document_views import PurchaseDocumentViewSet
+from apps.core.supplier_dashboard_views import SupplierDashboardViewSet
+from apps.core.stock_ledger_views import StockLedgerViewSet
+from apps.core.procurement_e2e_qa_views import ProcurementE2EQaViewSet
+from apps.core.warehouse_location_views import WarehouseViewSet, StorageLocationViewSet
+from apps.core.stock_inquiry_views import StockInquiryViewSet
+from apps.core.inventory_count_views import InventoryCountSessionViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -129,6 +144,21 @@ from apps.core.subscription_portal_views import SubscriptionCustomerPortalViewSe
 from apps.core.subscription_support_views import SubscriptionSupportOverrideViewSet
 from apps.core.subscription_views import SubscriptionViewSet
 from apps.core.supplier_invoice_views import SupplierInvoiceViewSet
+from apps.core.purchase_return_views import PurchaseReturnViewSet
+from apps.core.supplier_credit_note_views import SupplierCreditNoteViewSet
+from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
+from apps.core.auto_reorder_planner_views import AutoReorderPlannerViewSet
+from apps.core.multi_supplier_comparison_views import MultiSupplierComparisonViewSet
+from apps.core.delivery_logistics_views import DeliveryLogisticsViewSet
+from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
+from apps.core.purchase_document_views import PurchaseDocumentViewSet
+from apps.core.supplier_dashboard_views import SupplierDashboardViewSet
+from apps.core.stock_ledger_views import StockLedgerViewSet
+from apps.core.procurement_e2e_qa_views import ProcurementE2EQaViewSet
+from apps.core.warehouse_location_views import WarehouseViewSet, StorageLocationViewSet
+from apps.core.stock_inquiry_views import StockInquiryViewSet
+from apps.core.inventory_count_views import InventoryCountSessionViewSet
+from apps.core.stock_adjustment_views import StockAdjustmentViewSet
 from apps.core.supplier_organization_views import SupplierOrganizationViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
@@ -272,6 +302,22 @@ router.register("procurement/requisitions", PurchaseRequisitionViewSet, basename
 router.register("procurement/orders", PurchaseOrderViewSet, basename="procurement-orders")
 router.register("procurement/goods-receipts", GoodsReceiptViewSet, basename="procurement-goods-receipts")
 router.register("procurement/supplier-invoices", SupplierInvoiceViewSet, basename="procurement-supplier-invoices")
+router.register("procurement/purchase-returns", PurchaseReturnViewSet, basename="procurement-purchase-returns")
+router.register("procurement/supplier-credit-notes", SupplierCreditNoteViewSet, basename="procurement-supplier-credit-notes")
+router.register("procurement/payment-schedules", SupplierPaymentScheduleViewSet, basename="procurement-payment-schedules")
+router.register("procurement/reorder-plans", AutoReorderPlannerViewSet, basename="procurement-reorder-plans")
+router.register("procurement/supplier-comparison", MultiSupplierComparisonViewSet, basename="procurement-supplier-comparison")
+router.register("procurement/shipments", DeliveryLogisticsViewSet, basename="procurement-shipments")
+router.register("procurement/traceability", SupplyChainTraceabilityViewSet, basename="procurement-traceability")
+router.register("procurement/documents", PurchaseDocumentViewSet, basename="procurement-documents")
+router.register("procurement/supplier-dashboard", SupplierDashboardViewSet, basename="procurement-supplier-dashboard")
+router.register("inventory/stock-ledger", StockLedgerViewSet, basename="inventory-stock-ledger")
+router.register("inventory/warehouses", WarehouseViewSet, basename="inventory-warehouses")
+router.register("inventory/locations", StorageLocationViewSet, basename="inventory-locations")
+router.register("inventory/stock-inquiry", StockInquiryViewSet, basename="inventory-stock-inquiry")
+router.register("inventory/count-sessions", InventoryCountSessionViewSet, basename="inventory-count-sessions")
+router.register("inventory/adjustments", StockAdjustmentViewSet, basename="inventory-adjustments")
+router.register("procurement/qa", ProcurementE2EQaViewSet, basename="procurement-qa")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
 router.register("medicines/strength-taxonomy", StrengthTaxonomyViewSet, basename="strength-taxonomy")

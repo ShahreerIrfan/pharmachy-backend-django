@@ -236,3 +236,4 @@ class SupplierInvoiceViewSet(viewsets.ViewSet):
             return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
         except NotFound as exc:
             return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+

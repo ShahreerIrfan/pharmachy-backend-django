@@ -685,6 +685,12 @@ class BatchStock(models.Model):
     )
     recall_reason = models.CharField(max_length=255, blank=True, default="")
     manufacturer_name = models.CharField(max_length=128, blank=True, default="")
+    storage_location = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Primary shelf, bin, fridge or quarantine location code.",
+    )
     is_active = models.BooleanField(default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True, null=True, blank=True)
@@ -3377,6 +3383,9 @@ class StockAdjustmentRecord(models.Model):
         help_text="Total GAAP valuation impact: abs(quantity_delta) * unit_cost_bdt",
     )
     reason = models.TextField(blank=True, default="")
+    reason_code = models.CharField(max_length=48, blank=True, default="COUNT_CORRECTION")
+    is_nontrivial = models.BooleanField(default=False)
+    ledger_entry_id = models.CharField(max_length=64, blank=True, default="")
     status = models.CharField(
         max_length=32,
         choices=StockCorrectionStatus.choices,
@@ -4646,6 +4655,8 @@ class SupplierPostingType(models.TextChoices):
     GRN_INVOICE = "GRN_INVOICE", "Goods Received Invoice"
     PAYMENT = "PAYMENT", "Payment to Supplier"
     RETURN_DEBIT_NOTE = "RETURN_DEBIT_NOTE", "Purchase Return / Debit Note"
+    SUPPLIER_CREDIT_NOTE = "SUPPLIER_CREDIT_NOTE", "Supplier Credit Note"
+    CREDIT_NOTE_REVERSAL = "CREDIT_NOTE_REVERSAL", "Supplier Credit Note Reversal"
     OPENING_BALANCE = "OPENING_BALANCE", "Opening Balance"
     ADJUSTMENT = "ADJUSTMENT", "Audit Adjustment"
 
@@ -10561,6 +10572,233 @@ class SupplierInvoiceItem(models.Model):
         super().save(*args, **kwargs)
 
 
+class PurchaseReturnStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    POSTED_DEBIT_NOTE = "POSTED_DEBIT_NOTE", "Posted / Debit Note Issued"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class PurchaseReturnReason(models.TextChoices):
+    EXPIRED_STOCK = "EXPIRED_STOCK", "Expired or Near-Expiry Stock"
+    DAMAGED_DELIVERY = "DAMAGED_DELIVERY", "Damaged / Broken Packaging"
+    COLD_CHAIN_FAILURE = "COLD_CHAIN_FAILURE", "Cold-Chain Temperature Excursion"
+    RECALLED_DRUG = "RECALLED_DRUG", "Manufacturer / DGDA Recall"
+    OVER_DELIVERY = "OVER_DELIVERY", "Excess Delivery Not Authorized"
+    WRONG_ITEM_SUPPLIED = "WRONG_ITEM_SUPPLIED", "Wrong Item / Specification"
+    OTHER = "OTHER", "Other Justified Reason"
+
+
+class StockDisposition(models.TextChoices):
+    RETURNED_TO_VENDOR = "RETURNED_TO_VENDOR", "Returned to Vendor Logistics"
+    QUARANTINE_FOR_PICKUP = "QUARANTINE_FOR_PICKUP", "Quarantined for Vendor Pickup"
+    DESTROYED_ON_SITE = "DESTROYED_ON_SITE", "Condemned & Destroyed on Site"
+
+
+class PurchaseReturn(models.Model):
+    """
+    Architecture Decision: ADR-0191 (P191).
+    Supplier purchase return tied to original purchase cost lots, GRN, and batch stock.
+    Decrements physical inventory and issues accounts payable debit note.
+    """
+
+    return_id = models.CharField(max_length=64, primary_key=True)
+    return_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="purchase_returns",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="purchase_returns",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.PROTECT,
+        related_name="purchase_returns",
+        db_index=True,
+    )
+    supplier_name = models.CharField(max_length=255, blank=True, default="")
+    goods_receipt = models.ForeignKey(
+        GoodsReceiptNote,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="purchase_returns",
+    )
+    purchase_order = models.ForeignKey(
+        "core.PurchaseOrder",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="purchase_returns",
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=PurchaseReturnStatus.choices,
+        default=PurchaseReturnStatus.DRAFT,
+        db_index=True,
+    )
+    return_reason = models.CharField(
+        max_length=32,
+        choices=PurchaseReturnReason.choices,
+        default=PurchaseReturnReason.DAMAGED_DELIVERY,
+    )
+    disposition = models.CharField(
+        max_length=32,
+        choices=StockDisposition.choices,
+        default=StockDisposition.RETURNED_TO_VENDOR,
+    )
+    reason_notes = models.TextField(blank=True, default="")
+    total_return_quantity = models.PositiveIntegerField(default=0)
+    total_debit_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    debit_note_reference = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    vendor_credit_note_ref = models.CharField(max_length=64, blank=True, default="")
+    carrier_pickup_reference = models.CharField(max_length=128, blank=True, default="")
+    debit_ledger_entry = models.ForeignKey(
+        SupplierLedgerEntry,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="purchase_returns",
+    )
+    posted_at = models.DateTimeField(null=True, blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_purchase_returns",
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_purchase_returns",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Purchase Return"
+        verbose_name_plural = "Purchase Returns"
+        unique_together = ("tenant", "return_number")
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "supplier", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"PurchaseReturn {self.return_number} ({self.supplier_name}) - [{self.status}]"
+
+    def clean(self):
+        super().clean()
+        if not self.return_id:
+            self.return_id = f"pret-{uuid.uuid4().hex[:12]}"
+        elif not str(self.return_id).startswith("pret-"):
+            self.return_id = f"pret-{self.return_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class PurchaseReturnItem(models.Model):
+    """
+    Architecture Decision: ADR-0191 (P191).
+    Line items for a purchase return linked to BatchStock and PurchaseCostLot.
+    """
+
+    item_id = models.CharField(max_length=64, primary_key=True)
+    purchase_return = models.ForeignKey(
+        PurchaseReturn,
+        on_delete=models.CASCADE,
+        related_name="items",
+        db_index=True,
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="purchase_return_items",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.PROTECT,
+        related_name="purchase_return_items",
+    )
+    batch_stock = models.ForeignKey(
+        BatchStock,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="purchase_return_items",
+    )
+    cost_lot = models.ForeignKey(
+        PurchaseCostLot,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="purchase_return_items",
+    )
+    batch_number = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    return_quantity = models.PositiveIntegerField(default=1)
+    unit_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    line_debit_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    reason = models.CharField(
+        max_length=32,
+        choices=PurchaseReturnReason.choices,
+        default=PurchaseReturnReason.DAMAGED_DELIVERY,
+    )
+    notes = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["item_id"]
+        verbose_name = "Purchase Return Item"
+        verbose_name_plural = "Purchase Return Items"
+        indexes = [
+            models.Index(fields=["purchase_return", "product"]),
+            models.Index(fields=["tenant", "batch_number"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"PurchaseReturnItem {self.item_id}: {self.product.brand_name} (Qty: {self.return_quantity} @ ৳{self.unit_cost})"
+
+    def clean(self):
+        super().clean()
+        if not self.item_id:
+            self.item_id = f"pri-{uuid.uuid4().hex[:12]}"
+        elif not str(self.item_id).startswith("pri-"):
+            self.item_id = f"pri-{self.item_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 class StockReservationStatus(models.TextChoices):
     ACTIVE = "ACTIVE", "Active Reserved"
     COMMITTED = "COMMITTED", "Committed / Sold"
@@ -11668,4 +11906,2652 @@ class PackagingConcurrencyAuditRecord(models.Model):
 
     def save(self, *args, **kwargs):
         self.clean()
+        super().save(*args, **kwargs)
+
+
+class SupplierCreditNoteStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    POSTED = "POSTED", "Posted to Accounts Payable"
+    REVERSED = "REVERSED", "Reversed (Audited Correction)"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class SupplierCreditNoteReason(models.TextChoices):
+    PRICE_DIFFERENCE = "PRICE_DIFFERENCE", "Price / Rate Variance Settlement"
+    VOLUME_REBATE = "VOLUME_REBATE", "Volume / Turnover Rebate"
+    DAMAGED_EXPIRED_SETTLEMENT = "DAMAGED_EXPIRED_SETTLEMENT", "Damaged / Expired Goods Settlement"
+    SHORTAGE_CORRECTION = "SHORTAGE_CORRECTION", "Billing Shortage Correction"
+    COMMERCIAL_DISPUTE_SETTLEMENT = "COMMERCIAL_DISPUTE_SETTLEMENT", "Commercial Dispute Settlement"
+    OTHER = "OTHER", "Other Commercial Reason"
+
+
+class CreditNoteOriginType(models.TextChoices):
+    INVOICE = "INVOICE", "Supplier Invoice"
+    PURCHASE_RETURN = "PURCHASE_RETURN", "Purchase Return"
+    GOODS_RECEIPT = "GOODS_RECEIPT", "Goods Receipt Note"
+    PURCHASE_ORDER = "PURCHASE_ORDER", "Purchase Order"
+    GENERAL_COMMERCIAL = "GENERAL_COMMERCIAL", "General Commercial Agreement"
+
+
+class SupplierCreditNote(models.Model):
+    """
+    Architecture Decision: ADR-0192 (P192).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+
+    Records supplier credit notes as immutable financial events with traceable origin
+    and non-destructive corrections via explicit reversal entries.
+    Offsets and decrements Accounts Payable balance in the double-entry supplier ledger.
+    """
+
+    note_id = models.CharField(max_length=64, primary_key=True)
+    note_number = models.CharField(max_length=64, db_index=True)
+    supplier_credit_note_ref = models.CharField(
+        max_length=128,
+        db_index=True,
+        help_text="Vendor's official paper credit note reference number",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="supplier_credit_notes",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_credit_notes",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="credit_notes",
+        db_index=True,
+    )
+    supplier_name = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(
+        max_length=32,
+        choices=SupplierCreditNoteStatus.choices,
+        default=SupplierCreditNoteStatus.DRAFT,
+        db_index=True,
+    )
+    reason = models.CharField(
+        max_length=48,
+        choices=SupplierCreditNoteReason.choices,
+        default=SupplierCreditNoteReason.PRICE_DIFFERENCE,
+        db_index=True,
+    )
+    origin_type = models.CharField(
+        max_length=32,
+        choices=CreditNoteOriginType.choices,
+        default=CreditNoteOriginType.INVOICE,
+        db_index=True,
+    )
+    supplier_invoice = models.ForeignKey(
+        "core.SupplierInvoice",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credit_notes",
+    )
+    purchase_return = models.ForeignKey(
+        "core.PurchaseReturn",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credit_notes",
+    )
+    goods_receipt = models.ForeignKey(
+        "core.GoodsReceiptNote",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credit_notes",
+    )
+    purchase_order = models.ForeignKey(
+        "core.PurchaseOrder",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credit_notes",
+    )
+    origin_reference = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    note_date = models.DateField(default=timezone.now)
+
+    subtotal_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    tax_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    total_credit_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Total financial credit applied to AP (BDT)",
+    )
+
+    debit_ledger_entry = models.ForeignKey(
+        "core.SupplierLedgerEntry",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="applied_credit_notes",
+    )
+    reversal_ledger_entry = models.ForeignKey(
+        "core.SupplierLedgerEntry",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reversed_credit_notes",
+    )
+    reversal_reason = models.TextField(blank=True, default="")
+    reversal_posted_at = models.DateTimeField(null=True, blank=True)
+    reversed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reversed_supplier_credit_notes",
+    )
+
+    notes = models.TextField(blank=True, default="")
+    posted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_supplier_credit_notes",
+    )
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="approved_supplier_credit_notes",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-note_number"]
+        verbose_name = "Supplier Credit Note"
+        verbose_name_plural = "Supplier Credit Notes"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "note_number"],
+                name="uniq_supplier_credit_note_number",
+            ),
+            models.UniqueConstraint(
+                fields=["tenant", "supplier", "supplier_credit_note_ref"],
+                name="uniq_supplier_vendor_credit_ref",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "supplier", "status"]),
+            models.Index(fields=["tenant", "origin_type", "origin_reference"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"SupplierCreditNote {self.note_number} ({self.supplier_name}): ৳{self.total_credit_amount} [{self.status}]"
+
+    def clean(self):
+        super().clean()
+        if not self.note_id:
+            self.note_id = f"scn-{uuid.uuid4().hex[:12]}"
+        elif not str(self.note_id).startswith("scn-"):
+            self.note_id = f"scn-{self.note_id}"
+
+        if not self.note_number:
+            now_str = timezone.now().strftime("%Y%m")
+            self.note_number = f"SCN-{now_str}-{uuid.uuid4().hex[:4].upper()}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the credit note."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class SupplierCreditNoteItem(models.Model):
+    """
+    Architecture Decision: ADR-0192 (P192).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+
+    Line items of a supplier credit note representing specific SKU price reductions,
+    returned/damaged settlements, or volume discounts.
+    """
+
+    item_id = models.CharField(max_length=64, primary_key=True)
+    credit_note = models.ForeignKey(
+        SupplierCreditNote,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="supplier_credit_note_items",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credit_note_items",
+    )
+    product_name = models.CharField(max_length=255, blank=True, default="")
+    quantity = models.PositiveIntegerField(default=0)
+    unit_credit_rate = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    tax_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    line_total = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    description = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        ordering = ["item_id"]
+        verbose_name = "Supplier Credit Note Item"
+        verbose_name_plural = "Supplier Credit Note Items"
+        indexes = [
+            models.Index(fields=["credit_note", "product"]),
+            models.Index(fields=["tenant", "product_name"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"CreditNoteItem {self.item_id}: {self.product_name} - ৳{self.line_total}"
+
+    def clean(self):
+        super().clean()
+        if not self.item_id:
+            self.item_id = f"scni-{uuid.uuid4().hex[:12]}"
+        elif not str(self.item_id).startswith("scni-"):
+            self.item_id = f"scni-{self.item_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class PaymentScheduleStatus(models.TextChoices):
+    SCHEDULED = "SCHEDULED", "Scheduled / Pending"
+    PARTIALLY_SETTLED = "PARTIALLY_SETTLED", "Partially Settled"
+    SETTLED = "SETTLED", "Fully Settled"
+    OVERDUE = "OVERDUE", "Overdue"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class PaymentSchedulePriority(models.TextChoices):
+    URGENT = "URGENT", "Urgent (Supply Freeze Risk)"
+    HIGH = "HIGH", "High"
+    MEDIUM = "MEDIUM", "Medium"
+    LOW = "LOW", "Low"
+
+
+class PaymentMethodPreference(models.TextChoices):
+    BANK_TRANSFER = "BANK_TRANSFER", "Bank Transfer / BEFTN / NPSB"
+    CHEQUE = "CHEQUE", "Account Payee Cheque"
+    CASH = "CASH", "Cash"
+    MFS_BKASH = "MFS_BKASH", "bKash Merchant"
+    MFS_NAGAD = "MFS_NAGAD", "Nagad"
+    OTHER = "OTHER", "Other"
+
+
+class SupplierPaymentSchedule(models.Model):
+    """
+    Architecture Decision: ADR-0193 (P193).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+
+    Schedules supplier dues, settlement dates, priority queues, and partial payments
+    with immutable Accounts Payable ledger consistency.
+    """
+
+    schedule_id = models.CharField(max_length=64, primary_key=True)
+    schedule_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="supplier_payment_schedules",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_payment_schedules",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="payment_schedules",
+        db_index=True,
+    )
+    supplier_name = models.CharField(max_length=255, blank=True, default="")
+    supplier_invoice = models.ForeignKey(
+        "core.SupplierInvoice",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="payment_schedules",
+    )
+    purchase_order = models.ForeignKey(
+        "core.PurchaseOrder",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="payment_schedules",
+    )
+    goods_receipt = models.ForeignKey(
+        "core.GoodsReceiptNote",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="payment_schedules",
+    )
+    reference_note = models.CharField(max_length=128, blank=True, default="", db_index=True)
+
+    due_date = models.DateField(db_index=True)
+    planned_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0001"))],
+        help_text="Total planned due amount for this settlement schedule (BDT)",
+    )
+    settled_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Cumulative settled / paid amount disbursed so far (BDT)",
+    )
+    remaining_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Remaining unpaid balance for this schedule (BDT)",
+    )
+
+    status = models.CharField(
+        max_length=32,
+        choices=PaymentScheduleStatus.choices,
+        default=PaymentScheduleStatus.SCHEDULED,
+        db_index=True,
+    )
+    priority = models.CharField(
+        max_length=32,
+        choices=PaymentSchedulePriority.choices,
+        default=PaymentSchedulePriority.MEDIUM,
+        db_index=True,
+    )
+    payment_method_preference = models.CharField(
+        max_length=32,
+        choices=PaymentMethodPreference.choices,
+        default=PaymentMethodPreference.BANK_TRANSFER,
+        db_index=True,
+    )
+    cheque_reference = models.CharField(max_length=64, blank=True, default="")
+    cheque_date = models.DateField(null=True, blank=True)
+
+    reschedule_count = models.PositiveIntegerField(default=0)
+    last_reschedule_reason = models.TextField(blank=True, default="")
+    last_rescheduled_at = models.DateTimeField(null=True, blank=True)
+
+    notes = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_payment_schedules",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["due_date", "priority", "-created_at"]
+        verbose_name = "Supplier Payment Schedule"
+        verbose_name_plural = "Supplier Payment Schedules"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "schedule_number"],
+                name="uniq_supplier_payment_schedule_number",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "status", "due_date"]),
+            models.Index(fields=["tenant", "supplier", "status"]),
+            models.Index(fields=["tenant", "priority", "due_date"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"PaymentSchedule {self.schedule_number} ({self.supplier_name}): Due ৳{self.planned_amount} on {self.due_date} [{self.status}]"
+
+    def clean(self):
+        super().clean()
+        if not self.schedule_id:
+            self.schedule_id = f"sps-{uuid.uuid4().hex[:12]}"
+        elif not str(self.schedule_id).startswith("sps-"):
+            self.schedule_id = f"sps-{self.schedule_id}"
+
+        if not self.schedule_number:
+            now_str = timezone.now().strftime("%Y%m")
+            self.schedule_number = f"SPS-{now_str}-{uuid.uuid4().hex[:4].upper()}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the schedule."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class SupplierPaymentInstallment(models.Model):
+    """
+    Architecture Decision: ADR-0193 (P193).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+
+    Audited disbursement installment executed against a payment schedule.
+    Creates an immutable AP SupplierLedgerEntry debit note reducing payable liability.
+    """
+
+    installment_id = models.CharField(max_length=64, primary_key=True)
+    schedule = models.ForeignKey(
+        SupplierPaymentSchedule,
+        on_delete=models.CASCADE,
+        related_name="installments",
+        db_index=True,
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="supplier_payment_installments",
+        db_index=True,
+    )
+    amount_paid = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        validators=[MinValueValidator(Decimal("0.0001"))],
+        help_text="Amount disbursed in this settlement installment (BDT)",
+    )
+    payment_method = models.CharField(
+        max_length=32,
+        choices=PaymentMethodPreference.choices,
+        default=PaymentMethodPreference.BANK_TRANSFER,
+        db_index=True,
+    )
+    payment_reference = models.CharField(
+        max_length=128,
+        db_index=True,
+        help_text="Bank transaction voucher, cheque number, or MR reference",
+    )
+    transaction_date = models.DateField(default=timezone.now)
+    ledger_entry = models.ForeignKey(
+        "core.SupplierLedgerEntry",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="schedule_installments",
+    )
+    notes = models.TextField(blank=True, default="")
+    disbursed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="disbursed_supplier_installments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Supplier Payment Installment"
+        verbose_name_plural = "Supplier Payment Installments"
+        indexes = [
+            models.Index(fields=["schedule", "transaction_date"]),
+            models.Index(fields=["tenant", "payment_reference"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Installment {self.installment_id}: ৳{self.amount_paid} via {self.payment_method} (Ref: {self.payment_reference})"
+
+    def clean(self):
+        super().clean()
+        if not self.installment_id:
+            self.installment_id = f"spi-{uuid.uuid4().hex[:12]}"
+        elif not str(self.installment_id).startswith("spi-"):
+            self.installment_id = f"spi-{self.installment_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class ReorderPlanStatus(models.TextChoices):
+    DRAFT_PROPOSAL = "DRAFT_PROPOSAL", "Draft Proposal (Awaiting Review)"
+    APPROVED = "APPROVED", "Approved (Ready for PO Generation)"
+    CONVERTED_TO_PO = "CONVERTED_TO_PO", "Converted to Purchase Order(s)"
+    DISMISSED = "DISMISSED", "Dismissed / Rejected"
+
+
+class ReorderUrgency(models.TextChoices):
+    CRITICAL = "CRITICAL", "Critical Stockout Risk (< 2 Days)"
+    HIGH = "HIGH", "High Priority (< Lead Time)"
+    MEDIUM = "MEDIUM", "Medium Priority (Below ROP)"
+    NORMAL = "NORMAL", "Normal Replenishment"
+
+
+class ReorderProposal(models.Model):
+    """
+    Architecture Decision: ADR-0194 (P194).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+
+    Automatic reorder planner recommending replenishment quantities using supplier lead time,
+    safety stock, FEFO expiry exposure, and historic demand velocity.
+    Never orders silently; generates structured proposals requiring explicit human authorization.
+    """
+
+    proposal_id = models.CharField(max_length=64, primary_key=True)
+    proposal_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="reorder_proposals",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="reorder_proposals",
+        db_index=True,
+    )
+    plan_date = models.DateField(default=timezone.now, db_index=True)
+    planning_horizon_days = models.PositiveIntegerField(default=14)
+    status = models.CharField(
+        max_length=32,
+        choices=ReorderPlanStatus.choices,
+        default=ReorderPlanStatus.DRAFT_PROPOSAL,
+        db_index=True,
+    )
+    total_recommended_skus = models.PositiveIntegerField(default=0)
+    total_estimated_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    notes = models.TextField(blank=True, default="")
+    generated_by_algorithm = models.CharField(max_length=64, default="DEMAND_LEADTIME_FEFO_V1")
+
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reviewed_reorder_proposals",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Reorder Proposal"
+        verbose_name_plural = "Reorder Proposals"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "proposal_number"],
+                name="uniq_reorder_proposal_number",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["tenant", "plan_date", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ReorderProposal {self.proposal_number} ({self.total_recommended_skus} SKUs, ৳{self.total_estimated_cost}) [{self.status}]"
+
+    def clean(self):
+        super().clean()
+        if not self.proposal_id:
+            self.proposal_id = f"rop-{uuid.uuid4().hex[:12]}"
+        elif not str(self.proposal_id).startswith("rop-"):
+            self.proposal_id = f"rop-{self.proposal_id}"
+
+        if not self.proposal_number:
+            now_str = timezone.now().strftime("%Y%m")
+            self.proposal_number = f"ROP-{now_str}-{uuid.uuid4().hex[:4].upper()}"
+
+        if self.branch_id and self.tenant_id:
+            if hasattr(self, "branch") and self.branch and self.branch.tenant_id != self.tenant_id:
+                raise ValidationError({"branch": "Branch must belong to the same tenant as the proposal."})
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class ReorderProposalItem(models.Model):
+    """
+    Architecture Decision: ADR-0194 (P194).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+
+    Line item representing a recommended medicine replenishment recommendation
+    with full algorithmic transparency: current stock, lead time, FEFO risk, and demand.
+    """
+
+    item_id = models.CharField(max_length=64, primary_key=True)
+    proposal = models.ForeignKey(
+        ReorderProposal,
+        on_delete=models.CASCADE,
+        related_name="items",
+        db_index=True,
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="reorder_proposal_items",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="reorder_recommendations",
+        db_index=True,
+    )
+    product_name = models.CharField(max_length=255, blank=True, default="")
+    suggested_supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reorder_items",
+    )
+    supplier_name = models.CharField(max_length=255, blank=True, default="")
+
+    current_stock_units = models.IntegerField(default=0)
+    pending_incoming_units = models.IntegerField(default=0)
+    expiring_soon_units = models.IntegerField(default=0, help_text="FEFO risk deducted from effective stock")
+    effective_stock_units = models.IntegerField(default=0)
+    average_daily_demand = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal("0.00"))
+    lead_time_days = models.PositiveIntegerField(default=2)
+    safety_stock_units = models.PositiveIntegerField(default=0)
+    reorder_point_units = models.PositiveIntegerField(default=0)
+    raw_recommended_units = models.PositiveIntegerField(default=0)
+    approved_order_units = models.PositiveIntegerField(default=0)
+
+    pack_unit = models.CharField(max_length=32, default="BASE_UNIT")
+    estimated_unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    estimated_line_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    urgency = models.CharField(
+        max_length=32,
+        choices=ReorderUrgency.choices,
+        default=ReorderUrgency.MEDIUM,
+        db_index=True,
+    )
+    stockout_risk_days = models.DecimalField(max_digits=6, decimal_places=1, default=Decimal("0.0"))
+    conversion_po = models.ForeignKey(
+        PurchaseOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reorder_items",
+    )
+    rationale = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["urgency", "stockout_risk_days", "item_id"]
+        verbose_name = "Reorder Proposal Item"
+        verbose_name_plural = "Reorder Proposal Items"
+        indexes = [
+            models.Index(fields=["proposal", "urgency"]),
+            models.Index(fields=["tenant", "product", "urgency"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ReorderItem {self.item_id}: {self.product_name} -> Recommend {self.approved_order_units} units ({self.urgency})"
+
+    def clean(self):
+        super().clean()
+        if not self.item_id:
+            self.item_id = f"ropi-{uuid.uuid4().hex[:12]}"
+        elif not str(self.item_id).startswith("ropi-"):
+            self.item_id = f"ropi-{self.item_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class SupplierComparisonStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft Comparison"
+    FINALIZED = "FINALIZED", "Finalized Comparison"
+    ORDER_PLACED = "ORDER_PLACED", "Order Placed"
+    ARCHIVED = "ARCHIVED", "Archived"
+
+
+class SupplierComparisonEvaluation(models.Model):
+    """
+    Architecture Decision: ADR-0195 (P195).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+    Multi-supplier comparison snapshot evaluating product cost, delivery reliability,
+    lead time, pack size, and approved terms before procurement commitment.
+    """
+
+    evaluation_id = models.CharField(max_length=64, primary_key=True)
+    evaluation_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="supplier_comparisons",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_comparisons",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="supplier_comparisons",
+        db_index=True,
+    )
+    target_order_quantity = models.PositiveIntegerField(
+        default=100,
+        validators=[MinValueValidator(1)],
+        help_text="Target procurement volume to evaluate against minimum order quantities (MOQ).",
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=SupplierComparisonStatus.choices,
+        default=SupplierComparisonStatus.DRAFT,
+        db_index=True,
+    )
+    selected_supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="selected_comparisons",
+        db_index=True,
+    )
+    selection_reason = models.TextField(blank=True, default="")
+    evaluated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="conducted_supplier_evaluations",
+    )
+    evaluated_at = models.DateTimeField(null=True, blank=True)
+    created_po = models.ForeignKey(
+        PurchaseOrder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="supplier_evaluations",
+    )
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Supplier Comparison Evaluation"
+        verbose_name_plural = "Supplier Comparison Evaluations"
+        unique_together = (("tenant", "evaluation_number"),)
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "product", "status"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Comparison {self.evaluation_number}: Product {self.product_id} [{self.status}]"
+
+    def clean(self):
+        super().clean()
+        if not self.evaluation_id:
+            self.evaluation_id = f"sce-{uuid.uuid4().hex[:12]}"
+        elif not str(self.evaluation_id).startswith("sce-"):
+            self.evaluation_id = f"sce-{self.evaluation_id}"
+
+        if not self.evaluation_number:
+            now = timezone.now()
+            self.evaluation_number = f"SCE-{now.strftime('%Y%m')}-{uuid.uuid4().hex[:6].upper()}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class SupplierComparisonLine(models.Model):
+    """
+    Individual vendor quotation and performance comparison line within an evaluation.
+    Captures unit costs, package economics, historical delivery reliability, lead times, and terms.
+    """
+
+    line_id = models.CharField(max_length=64, primary_key=True)
+    evaluation = models.ForeignKey(
+        SupplierComparisonEvaluation,
+        on_delete=models.CASCADE,
+        related_name="comparison_lines",
+        db_index=True,
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="supplier_comparison_lines",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="comparison_lines",
+        db_index=True,
+    )
+    supplier_name = models.CharField(max_length=255)
+    package_type = models.CharField(max_length=64, default="BOX")
+    package_size = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
+    package_cost_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    unit_cost_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    mrp_unit = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    discount_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+    )
+    effective_net_unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    minimum_order_quantity = models.PositiveIntegerField(default=1)
+    lead_time_days = models.PositiveIntegerField(default=2)
+    payment_terms_days = models.PositiveIntegerField(default=30)
+    delivery_reliability_score = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("100.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Historical on-time delivery percentage (0-100)",
+    )
+    proof_of_origin_verified = models.BooleanField(
+        default=True,
+        help_text="Whether supplier has verified DGDA distribution channel authorization",
+    )
+    composite_rank = models.PositiveIntegerField(default=1)
+    composite_score = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+    )
+    is_recommended = models.BooleanField(default=False, db_index=True)
+    notes = models.TextField(blank=True, default="")
+
+    class Meta:
+        ordering = ["composite_rank", "effective_net_unit_cost", "line_id"]
+        verbose_name = "Supplier Comparison Line"
+        verbose_name_plural = "Supplier Comparison Lines"
+        indexes = [
+            models.Index(fields=["evaluation", "is_recommended"]),
+            models.Index(fields=["tenant", "supplier"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"CompLine {self.line_id}: {self.supplier_name} - Rank #{self.composite_rank} (Score {self.composite_score})"
+
+    def clean(self):
+        super().clean()
+        if not self.line_id:
+            self.line_id = f"scl-{uuid.uuid4().hex[:12]}"
+        elif not str(self.line_id).startswith("scl-"):
+            self.line_id = f"scl-{self.line_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class ShipmentStage(models.TextChoices):
+    DISPATCHED = "DISPATCHED", "Dispatched from Depot"
+    IN_TRANSIT = "IN_TRANSIT", "In Transit"
+    OUT_FOR_DELIVERY = "OUT_FOR_DELIVERY", "Out for Delivery"
+    DELIVERED = "DELIVERED", "Delivered at Branch Gate"
+    RECEIVING_CONFIRMED = "RECEIVING_CONFIRMED", "Receiving Confirmed"
+    EXCEPTION = "EXCEPTION", "Logistics Exception"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class ShipmentDiscrepancyType(models.TextChoices):
+    NONE = "NONE", "No Discrepancy"
+    SHORTAGE = "SHORTAGE", "Package Shortage / Missing Units"
+    DAMAGED = "DAMAGED", "Damaged Packages in Transit"
+    OVERAGE = "OVERAGE", "Excess Unordered Packages"
+    TEMPERATURE_BREACH = "TEMPERATURE_BREACH", "Cold-chain Temperature Excursion"
+    REJECTED = "REJECTED", "Entire Delivery Rejected"
+
+
+class CarrierType(models.TextChoices):
+    SUPPLIER_FLEET = "SUPPLIER_FLEET", "Supplier Dedicated Van / Fleet"
+    COURIER = "COURIER", "Commercial Courier Service"
+    THIRD_PARTY_LOGISTICS = "THIRD_PARTY_LOGISTICS", "Third-Party Logistics (3PL)"
+
+
+class ProcurementShipment(models.Model):
+    """
+    Architecture Decision: ADR-0196 (P196).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+    Delivery and logistics tracking model managing shipment stages, courier/vehicle metadata,
+    transit ETAs, cold-chain checks, received package discrepancies, and branch receipt confirmations.
+    """
+
+    shipment_id = models.CharField(max_length=64, primary_key=True)
+    tracking_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="procurement_shipments",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="procurement_shipments",
+        db_index=True,
+    )
+    purchase_order = models.ForeignKey(
+        PurchaseOrder,
+        on_delete=models.CASCADE,
+        related_name="shipments",
+        db_index=True,
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.CASCADE,
+        related_name="shipments",
+        db_index=True,
+    )
+    carrier_type = models.CharField(
+        max_length=32,
+        choices=CarrierType.choices,
+        default=CarrierType.SUPPLIER_FLEET,
+        db_index=True,
+    )
+    carrier_name = models.CharField(max_length=255)
+    consignment_number = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    vehicle_registration_number = models.CharField(max_length=64, blank=True, default="")
+    driver_name = models.CharField(max_length=128, blank=True, default="")
+    driver_phone = models.CharField(max_length=32, blank=True, default="")
+    stage = models.CharField(
+        max_length=32,
+        choices=ShipmentStage.choices,
+        default=ShipmentStage.DISPATCHED,
+        db_index=True,
+    )
+    dispatched_at = models.DateTimeField(default=timezone.now)
+    estimated_delivery_at = models.DateTimeField()
+    actual_delivery_at = models.DateTimeField(null=True, blank=True)
+
+    total_packages_dispatched = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+    )
+    total_packages_received = models.PositiveIntegerField(default=0)
+    damaged_packages = models.PositiveIntegerField(default=0)
+    missing_packages = models.PositiveIntegerField(default=0)
+    discrepancy_type = models.CharField(
+        max_length=32,
+        choices=ShipmentDiscrepancyType.choices,
+        default=ShipmentDiscrepancyType.NONE,
+        db_index=True,
+    )
+    discrepancy_notes = models.TextField(blank=True, default="")
+
+    requires_cold_chain = models.BooleanField(default=False)
+    transit_temp_celsius = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    cold_chain_breached = models.BooleanField(default=False)
+
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="confirmed_procurement_shipments",
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    goods_receipt_note = models.ForeignKey(
+        GoodsReceiptNote,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tracked_shipments",
+    )
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-dispatched_at"]
+        verbose_name = "Procurement Shipment"
+        verbose_name_plural = "Procurement Shipments"
+        unique_together = (("tenant", "tracking_number"),)
+        indexes = [
+            models.Index(fields=["tenant", "stage"]),
+            models.Index(fields=["tenant", "branch", "stage"]),
+            models.Index(fields=["purchase_order", "stage"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Shipment {self.tracking_number} ({self.carrier_name}) [{self.stage}]"
+
+    def clean(self):
+        super().clean()
+        if not self.shipment_id:
+            self.shipment_id = f"shp-{uuid.uuid4().hex[:12]}"
+        elif not str(self.shipment_id).startswith("shp-"):
+            self.shipment_id = f"shp-{self.shipment_id}"
+
+        if not self.tracking_number:
+            now = timezone.now()
+            self.tracking_number = f"SHP-{now.strftime('%Y%m')}-{uuid.uuid4().hex[:6].upper()}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class ProcurementShipmentEvent(models.Model):
+    """
+    Chronological tracking checkpoint and stage transition event log for a shipment.
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    shipment = models.ForeignKey(
+        ProcurementShipment,
+        on_delete=models.CASCADE,
+        related_name="events",
+        db_index=True,
+    )
+    stage = models.CharField(max_length=32, choices=ShipmentStage.choices)
+    location_name = models.CharField(max_length=255, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
+    recorded_by = models.CharField(max_length=128, blank=True, default="")
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["recorded_at"]
+        verbose_name = "Procurement Shipment Event"
+        verbose_name_plural = "Procurement Shipment Events"
+        indexes = [
+            models.Index(fields=["shipment", "stage"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Event {self.event_id}: {self.stage} at {self.location_name}"
+
+    def clean(self):
+        super().clean()
+        if not self.event_id:
+            self.event_id = f"she-{uuid.uuid4().hex[:12]}"
+        elif not str(self.event_id).startswith("she-"):
+            self.event_id = f"she-{self.event_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class TraceAuditPurpose(models.TextChoices):
+    REGULATORY_INSPECTION = "REGULATORY_INSPECTION", "DGDA Regulatory Inspection"
+    QUALITY_INVESTIGATION = "QUALITY_INVESTIGATION", "Product Quality / Customer Complaint"
+    RECALL_VERIFICATION = "RECALL_VERIFICATION", "Pharmacovigilance Batch Recall Trace"
+    INTERNAL_AUDIT = "INTERNAL_AUDIT", "Routine Internal Inventory Audit"
+
+
+class SupplyChainTraceabilityRecord(models.Model):
+    """
+    Architecture Decision: ADR-0197 (P197).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain.
+    End-to-end supply-chain traceability record tracking each medicine lot from supplier origin,
+    purchase order, shipment logistics, goods receipt note (GRN), internal storage, to downstream sale dispensing.
+    """
+
+    trace_id = models.CharField(max_length=64, primary_key=True)
+    trace_number = models.CharField(max_length=64, db_index=True)
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name="traceability_records",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name="traceability_records",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="traceability_records",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.CASCADE,
+        related_name="traceability_records",
+        db_index=True,
+    )
+    batch_number = models.CharField(max_length=64, db_index=True)
+    lot_reference = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    audit_purpose = models.CharField(
+        max_length=32,
+        choices=TraceAuditPurpose.choices,
+        default=TraceAuditPurpose.INTERNAL_AUDIT,
+        db_index=True,
+    )
+    lineage_snapshot = models.JSONField(
+        default=dict,
+        help_text="Full structured upstream and downstream supply chain trace",
+    )
+    total_received_quantity = models.PositiveIntegerField(default=0)
+    total_dispensed_quantity = models.PositiveIntegerField(default=0)
+    total_returned_quantity = models.PositiveIntegerField(default=0)
+    current_stock_on_hand = models.IntegerField(default=0)
+    discrepancy_quantity = models.IntegerField(default=0)
+    cold_chain_breached_in_transit = models.BooleanField(default=False)
+    immutable_verification_hash = models.CharField(max_length=64, blank=True, default="")
+    generated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="generated_traceability_records",
+    )
+    generated_at = models.DateTimeField(default=timezone.now)
+    notes = models.TextField(blank=True, default="")
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-generated_at"]
+        verbose_name = "Supply Chain Traceability Record"
+        verbose_name_plural = "Supply Chain Traceability Records"
+        unique_together = (("tenant", "trace_number"),)
+        indexes = [
+            models.Index(fields=["tenant", "batch_number"]),
+            models.Index(fields=["tenant", "product", "batch_number"]),
+            models.Index(fields=["tenant", "audit_purpose"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"Trace {self.trace_number}: Batch {self.batch_number} [{self.audit_purpose}]"
+
+    def compute_hash(self) -> str:
+        import hashlib
+
+        raw = (
+            f"{self.trace_id}|{self.tenant_id}|{self.batch_id}|{self.batch_number}|"
+            f"{self.total_received_quantity}|{self.total_dispensed_quantity}|"
+            f"{self.current_stock_on_hand}|{self.cold_chain_breached_in_transit}|"
+            f"{self.audit_purpose}|{self.generated_at.isoformat() if self.generated_at else ''}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if not self.trace_id:
+            self.trace_id = f"trc-{uuid.uuid4().hex[:12]}"
+        elif not str(self.trace_id).startswith("trc-"):
+            self.trace_id = f"trc-{self.trace_id}"
+
+        if not self.trace_number:
+            now = timezone.now()
+            self.trace_number = f"TRC-{now.strftime('%Y%m')}-{uuid.uuid4().hex[:6].upper()}"
+
+        if not self.immutable_verification_hash:
+            self.immutable_verification_hash = self.compute_hash()
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        if not self.immutable_verification_hash:
+            self.immutable_verification_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+
+class PurchaseDocumentType(models.TextChoices):
+    PURCHASE_ORDER = "PURCHASE_ORDER", "Purchase Order"
+    GOODS_RECEIPT_NOTE = "GOODS_RECEIPT_NOTE", "Goods Receipt Note"
+    PURCHASE_RETURN = "PURCHASE_RETURN", "Purchase Return Voucher"
+    SUPPLIER_STATEMENT = "SUPPLIER_STATEMENT", "Supplier Statement of Account"
+
+
+class PurchaseDocumentFormat(models.TextChoices):
+    A4_PDF = "A4_PDF", "A4 PDF Document"
+    THERMAL_80MM = "THERMAL_80MM", "80mm Thermal Print"
+    JSON_DATA = "JSON_DATA", "JSON Data Feed"
+
+
+class PurchaseDocumentStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    FINAL = "FINAL", "Final Published"
+    SUPERSEDED = "SUPERSEDED", "Superseded by Newer Version"
+    VOID = "VOID", "Voided"
+
+
+class PurchaseDocument(models.Model):
+    """
+    Architecture Decision: ADR-0198 (P198).
+    Versioned, immutable procurement document snapshots (Purchase Orders, GRNs, 
+    Supplier Returns, and Supplier Statements) formatted as A4 PDF or thermal prints,
+    complete with tamper-evident SHA-256 verification hash and full audit history.
+    """
+    document_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="purchase_documents",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "core.Branch",
+        on_delete=models.CASCADE,
+        related_name="purchase_documents",
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+    document_type = models.CharField(
+        max_length=32,
+        choices=PurchaseDocumentType.choices,
+        db_index=True,
+    )
+    document_number = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="Canonical document sequence number (e.g. DOC-PO-202611-0001)",
+    )
+    version = models.PositiveIntegerField(
+        default=1,
+        help_text="Monotonically increasing version number for document regenerations",
+    )
+    is_latest = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="True if this document is the current active version",
+    )
+    source_id = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="ID of the underlying entity (po_id, grn_id, return_id, or supplier_id)",
+    )
+    source_reference = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="Human readable reference of underlying entity (e.g. PO-001, GRN-001)",
+    )
+    supplier = models.ForeignKey(
+        Supplier,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="purchase_documents",
+        db_index=True,
+    )
+    supplier_name = models.CharField(max_length=255, blank=True, default="")
+    document_format = models.CharField(
+        max_length=32,
+        choices=PurchaseDocumentFormat.choices,
+        default=PurchaseDocumentFormat.A4_PDF,
+    )
+    title = models.CharField(max_length=255)
+    title_bn = models.CharField(max_length=255, blank=True, default="")
+    
+    total_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    currency = models.CharField(max_length=8, default="BDT")
+    
+    document_payload = models.JSONField(
+        default=dict,
+        help_text="Full immutable snapshot of all headers, lines, calculations, and terms",
+    )
+    immutable_verification_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Cryptographic SHA-256 hash of document payload for tamper detection",
+    )
+    pdf_file_path = models.CharField(
+        max_length=512,
+        blank=True,
+        default="",
+        help_text="Local path or storage key of generated PDF",
+    )
+    pdf_size_bytes = models.PositiveIntegerField(
+        default=0,
+        help_text="Byte length of the generated PDF file",
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=PurchaseDocumentStatus.choices,
+        default=PurchaseDocumentStatus.FINAL,
+        db_index=True,
+    )
+    notes = models.TextField(blank=True, default="")
+    generated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="generated_purchase_documents",
+    )
+    generated_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-generated_at", "-version"]
+        verbose_name = "Purchase Document"
+        verbose_name_plural = "Purchase Documents"
+        unique_together = (("tenant", "document_type", "source_id", "version"),)
+        indexes = [
+            models.Index(fields=["tenant", "document_type", "source_id"]),
+            models.Index(fields=["tenant", "document_type", "is_latest"]),
+            models.Index(fields=["tenant", "supplier", "document_type"]),
+            models.Index(fields=["tenant", "document_number"]),
+        ]
+
+    def compute_hash(self) -> str:
+        import hashlib, json
+        raw = f"{self.document_id}|{self.tenant_id}|{self.document_type}|{self.source_id}|{self.version}|{self.total_amount}|{json.dumps(self.document_payload, sort_keys=True)}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if not self.document_id:
+            self.document_id = f"pdoc-{uuid.uuid4().hex[:12]}"
+        elif not str(self.document_id).startswith("pdoc-"):
+            self.document_id = f"pdoc-{self.document_id}"
+
+        if not self.document_number:
+            now = timezone.now()
+            prefix = {
+                PurchaseDocumentType.PURCHASE_ORDER: "DOC-PO",
+                PurchaseDocumentType.GOODS_RECEIPT_NOTE: "DOC-GRN",
+                PurchaseDocumentType.PURCHASE_RETURN: "DOC-RET",
+                PurchaseDocumentType.SUPPLIER_STATEMENT: "DOC-STMT",
+            }.get(self.document_type, "DOC-PUR")
+            self.document_number = f"{prefix}-{now.strftime('%Y%m')}-{uuid.uuid4().hex[:6].upper()}"
+
+        if not self.immutable_verification_hash:
+            self.immutable_verification_hash = self.compute_hash()
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        if not self.immutable_verification_hash:
+            self.immutable_verification_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+
+class SupplierDashboardSnapshot(models.Model):
+    """
+    Architecture Decision: ADR-0199 (P199).
+    Audited snapshot of supplier operations dashboard metrics at a point in time,
+    capturing open commitments, delivery delays, accounts payable dues, and 
+    low-stock sourcing replenishment recommendations with SHA-256 integrity hash.
+    """
+    snapshot_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="supplier_dashboard_snapshots",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "core.Branch",
+        on_delete=models.CASCADE,
+        related_name="supplier_dashboard_snapshots",
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+    snapshot_date = models.DateField(default=timezone.now, db_index=True)
+    
+    # High-level Metrics
+    open_orders_count = models.PositiveIntegerField(default=0)
+    open_orders_value = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    overdue_deliveries_count = models.PositiveIntegerField(default=0)
+    overdue_deliveries_value = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    total_due_balance = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    overdue_due_balance = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    low_stock_opportunities_count = models.PositiveIntegerField(default=0)
+    estimated_reorder_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+    )
+    active_suppliers_count = models.PositiveIntegerField(default=0)
+    
+    # Detailed Data Payload (JSON)
+    dashboard_metrics = models.JSONField(
+        default=dict,
+        help_text="Detailed JSON payload including open order items, overdue list, due balances by supplier, and sourcing opportunities.",
+    )
+    immutable_verification_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Cryptographic SHA-256 hash of metrics payload.",
+    )
+    notes = models.TextField(blank=True, default="")
+    generated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="generated_supplier_snapshots",
+    )
+    generated_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-generated_at"]
+        verbose_name = "Supplier Dashboard Snapshot"
+        verbose_name_plural = "Supplier Dashboard Snapshots"
+        indexes = [
+            models.Index(fields=["tenant", "snapshot_date"]),
+            models.Index(fields=["tenant", "branch", "snapshot_date"]),
+        ]
+
+    def compute_hash(self) -> str:
+        import hashlib, json
+        raw = (
+            f"{self.snapshot_id}|{self.tenant_id}|{self.snapshot_date}|"
+            f"{self.open_orders_count}|{self.open_orders_value}|"
+            f"{self.overdue_deliveries_count}|{self.total_due_balance}|"
+            f"{json.dumps(self.dashboard_metrics, sort_keys=True)}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if not self.snapshot_id:
+            self.snapshot_id = f"sdash-{uuid.uuid4().hex[:12]}"
+        elif not str(self.snapshot_id).startswith("sdash-"):
+            self.snapshot_id = f"sdash-{self.snapshot_id}"
+
+        if not self.immutable_verification_hash:
+            self.immutable_verification_hash = self.compute_hash()
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        if not self.immutable_verification_hash:
+            self.immutable_verification_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+
+class StockMovementType(models.TextChoices):
+    PURCHASE_RECEIPT = "PURCHASE_RECEIPT", "Purchase Receipt (GRN Inward)"
+    SALE_DISPENSE = "SALE_DISPENSE", "Sale Dispense (Invoice Outward)"
+    CUSTOMER_RETURN = "CUSTOMER_RETURN", "Customer Sale Return"
+    PURCHASE_RETURN = "PURCHASE_RETURN", "Supplier Purchase Return"
+    TRANSFER_OUT = "TRANSFER_OUT", "Branch Transfer Outward"
+    TRANSFER_IN = "TRANSFER_IN", "Branch Transfer Inward"
+    EXPIRY_DISPOSAL = "EXPIRY_DISPOSAL", "Expired Stock Disposal"
+    STOCK_ADJUSTMENT_IN = "STOCK_ADJUSTMENT_IN", "Inventory Count Positive Adjustment"
+    STOCK_ADJUSTMENT_OUT = "STOCK_ADJUSTMENT_OUT", "Inventory Count Negative Adjustment"
+    QUARANTINE_HOLD = "QUARANTINE_HOLD", "Quality / DGDA Quarantine Hold"
+    QUARANTINE_RELEASE = "QUARANTINE_RELEASE", "Quality Quarantine Release"
+
+
+class StockLedgerEntry(models.Model):
+    """
+    Architecture Decision: ADR-0201 (P201).
+    Phase 11: Inventory, Warehouse, Cold Chain & Transfers.
+    
+    Append-only stock movement ledger recording every physical and operational stock transition.
+    Enforces exact inventory conservation (balance_after == balance_before + quantity_delta),
+    cost-lot traceability, immutable SHA-256 cryptographic verification hashes, and
+    strict mutation locking (no updates, no deletes).
+    """
+    entry_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="stock_ledger_entries",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "core.Branch",
+        on_delete=models.CASCADE,
+        related_name="stock_ledger_entries",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="stock_ledger_entries",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="stock_ledger_entries",
+        db_index=True,
+    )
+    batch_number = models.CharField(max_length=64, db_index=True)
+    cost_lot = models.ForeignKey(
+        PurchaseCostLot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="stock_ledger_entries",
+    )
+    movement_type = models.CharField(
+        max_length=32,
+        choices=StockMovementType.choices,
+        db_index=True,
+    )
+    quantity_delta = models.IntegerField(
+        help_text="Signed integer: positive for stock additions, negative for deductions. Zero disallowed.",
+    )
+    balance_before = models.PositiveIntegerField(
+        help_text="Available stock units immediately prior to this movement.",
+    )
+    balance_after = models.PositiveIntegerField(
+        help_text="Available stock units immediately following this movement.",
+    )
+    unit_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Unit cost basis at the time of movement in BDT.",
+    )
+    total_cost = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Total acquisition cost value of the moved quantity (abs(quantity_delta) * unit_cost).",
+    )
+    unit_price = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Selling price / MRP per unit if movement relates to a sale or return.",
+    )
+    source_entity_type = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="Originating event type (e.g. GOODS_RECEIPT_NOTE, SALE_INVOICE, PURCHASE_RETURN, TRANSFER_ORDER, STOCK_ADJUSTMENT).",
+    )
+    source_entity_id = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="Primary key of originating document or transaction.",
+    )
+    source_reference = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="Human readable document number (e.g. GRN-202611-001, INV-202611-0088, RET-202611-001).",
+    )
+    is_cold_chain = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Flag indicating whether this item requires cold-chain (2-8°C) handling.",
+    )
+    storage_location = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text="Shelf, rack, bin, or cold room location where stock was moved.",
+    )
+    notes = models.TextField(blank=True, default="")
+    immutable_verification_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Cryptographic SHA-256 tamper-evident verification hash.",
+    )
+    posted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="posted_stock_ledger_entries",
+    )
+    posted_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-posted_at", "-entry_id"]
+        verbose_name = "Stock Ledger Entry"
+        verbose_name_plural = "Stock Ledger Entries"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "product"]),
+            models.Index(fields=["tenant", "batch_number"]),
+            models.Index(fields=["tenant", "movement_type", "posted_at"]),
+            models.Index(fields=["tenant", "source_entity_type", "source_entity_id"]),
+        ]
+
+    def compute_hash(self) -> str:
+        import hashlib
+        cost_str = f"{self.total_cost:.4f}" if self.total_cost is not None else "0.0000"
+        raw = (
+            f"{self.entry_id}|{self.tenant_id}|{self.branch_id}|{self.product_id}|"
+            f"{self.batch_number}|{self.movement_type}|{self.quantity_delta}|"
+            f"{self.balance_before}|{self.balance_after}|{cost_str}|"
+            f"{self.source_entity_id}|{self.posted_at.isoformat() if self.posted_at else ''}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if not self.entry_id:
+            self.entry_id = f"stkld-{uuid.uuid4().hex[:12]}"
+        elif not str(self.entry_id).startswith("stkld-"):
+            self.entry_id = f"stkld-{self.entry_id}"
+
+        if self.quantity_delta == 0:
+            raise ValidationError({"quantity_delta": "Stock movement quantity_delta cannot be zero."})
+
+        expected_after = self.balance_before + self.quantity_delta
+        if expected_after != self.balance_after:
+            raise ValidationError(
+                f"Conservation invariant violated: balance_after ({self.balance_after}) must equal "
+                f"balance_before ({self.balance_before}) + quantity_delta ({self.quantity_delta}) = {expected_after}."
+            )
+
+        if not self.total_cost and self.unit_cost:
+            self.total_cost = abs(Decimal(str(self.quantity_delta))) * self.unit_cost
+
+        if not self.immutable_verification_hash:
+            self.immutable_verification_hash = self.compute_hash()
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            existing = StockLedgerEntry.objects.filter(pk=self.pk).exists()
+            if existing:
+                raise ValidationError("Stock ledger entries are strictly append-only and cannot be updated.")
+        self.clean()
+        if not self.immutable_verification_hash:
+            self.immutable_verification_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Stock ledger entries are strictly append-only and cannot be deleted.")
+
+
+
+
+
+
+
+
+class QaRunStatus(models.TextChoices):
+    PASSED = "PASSED", "All Verification Assertions Passed"
+    FAILED = "FAILED", "Verification Assertions Failed"
+    BLOCKED = "BLOCKED", "Prerequisites Not Met / Blocked"
+
+
+class ProcurementVerificationRun(models.Model):
+    """
+    Architecture Decision: ADR-0200 (P200).
+    Phase 10: Suppliers, Purchase Orders & Supply Chain Capstone.
+
+    Audit record of executed procurement End-to-End & conflict QA runs.
+    Logs lifecycle assertions (PO -> GRN -> Lot -> AP -> Settlement -> Returns),
+    concurrency conflict outcomes, and DGDA GDP traceability verification.
+    """
+    run_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "core.Tenant",
+        on_delete=models.CASCADE,
+        related_name="procurement_verification_runs",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "core.Branch",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="procurement_verification_runs",
+        db_index=True,
+    )
+    test_type = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="Verification category (e.g. FULL_E2E_CYCLE, DUPLICATE_RECEIPT_CONFLICT, RETURN_REVERSAL, RBAC_BOUNDARY).",
+    )
+    po_reference = models.CharField(max_length=64, blank=True, default="")
+    grn_reference = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(
+        max_length=32,
+        choices=QaRunStatus.choices,
+        default=QaRunStatus.PASSED,
+        db_index=True,
+    )
+    assertions_count = models.PositiveIntegerField(default=0)
+    assertions_passed = models.PositiveIntegerField(default=0)
+    details_payload = models.JSONField(default=dict, blank=True)
+    verification_hash = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Cryptographic SHA-256 digest of test execution parameters and results.",
+    )
+    executed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="executed_procurement_qa_runs",
+    )
+    executed_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ["-executed_at", "-run_id"]
+        verbose_name = "Procurement Verification Run"
+        verbose_name_plural = "Procurement Verification Runs"
+        indexes = [
+            models.Index(fields=["tenant", "test_type", "status"]),
+            models.Index(fields=["tenant", "executed_at"]),
+        ]
+
+    def compute_hash(self) -> str:
+        import hashlib, json
+        raw = (
+            f"{self.run_id}|{self.tenant_id}|{self.test_type}|{self.status}|"
+            f"{self.assertions_count}|{self.assertions_passed}|"
+            f"{json.dumps(self.details_payload, sort_keys=True)}|"
+            f"{self.executed_at.isoformat() if self.executed_at else ''}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if not self.run_id:
+            self.run_id = f"pqarun-{uuid.uuid4().hex[:12]}"
+        elif not str(self.run_id).startswith("pqarun-"):
+            self.run_id = f"pqarun-{self.run_id}"
+
+        if not self.verification_hash:
+            self.verification_hash = self.compute_hash()
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        if not self.verification_hash:
+            self.verification_hash = self.compute_hash()
+        super().save(*args, **kwargs)
+
+
+# ==============================================================================
+# P202: Warehouse, Bin Location, Cold Chain & Controlled Storage Access
+# Architecture Decision: ADR-0202 (Phase 11: Inventory, Warehouse & Transfers)
+# ==============================================================================
+
+
+class WarehouseType(models.TextChoices):
+    MAIN_DISPENSARY = "MAIN_DISPENSARY", "Main Pharmacy Dispensary"
+    CENTRAL_WAREHOUSE = "CENTRAL_WAREHOUSE", "Central Storage Warehouse"
+    COLD_ROOM = "COLD_ROOM", "Cold Chain Storage Room"
+    QUARANTINE_AREA = "QUARANTINE_AREA", "Dedicated Quarantine Facility"
+    HOSPITAL_STORE = "HOSPITAL_STORE", "Hospital Inpatient Floor Store"
+
+
+class StorageLocationType(models.TextChoices):
+    SHELF = "SHELF", "Ambient Shelf / Rack"
+    BIN = "BIN", "Medicine Bin / Compartment"
+    FRIDGE = "FRIDGE", "Refrigerated Cold Chain Unit (2°C - 8°C)"
+    FREEZER = "FREEZER", "Deep Freezer Unit (-20°C)"
+    QUARANTINE_ZONE = "QUARANTINE_ZONE", "Quarantine Holding Zone"
+    NARCOTICS_VAULT = "NARCOTICS_VAULT", "Controlled Substance Narcotics Locker"
+    DISPENSARY_COUNTER = "DISPENSARY_COUNTER", "Front Quick Dispensary Counter"
+
+
+class Warehouse(models.Model):
+    """
+    Architecture Decision: ADR-0202 (P202).
+    Branch-scoped pharmaceutical storehouse, warehouse or dispensary backroom facility.
+    """
+
+    warehouse_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "Tenant",
+        on_delete=models.CASCADE,
+        related_name="warehouses",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="warehouses",
+        db_index=True,
+    )
+    name = models.CharField(max_length=255)
+    name_bn = models.CharField(max_length=255, blank=True, default="")
+    code = models.CharField(max_length=64, db_index=True)
+    warehouse_type = models.CharField(
+        max_length=32,
+        choices=WarehouseType.choices,
+        default=WarehouseType.MAIN_DISPENSARY,
+    )
+    is_cold_storage = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True, db_index=True)
+    address = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "code"],
+                name="unique_warehouse_code_per_branch",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "is_active"]),
+        ]
+        verbose_name = "Warehouse"
+        verbose_name_plural = "Warehouses"
+
+    def __str__(self):
+        return f"{self.name} [{self.code}] ({self.tenant_id})"
+
+    def clean(self):
+        super().clean()
+        if not self.warehouse_id:
+            self.warehouse_id = f"wh-{uuid.uuid4().hex[:12]}"
+        elif not str(self.warehouse_id).startswith("wh-"):
+            self.warehouse_id = f"wh-{self.warehouse_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class StorageLocation(models.Model):
+    """
+    Architecture Decision: ADR-0202 (P202).
+    Specific shelf, bin, fridge compartment, freezer, quarantine holding zone or narcotics vault.
+    """
+
+    location_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "Tenant",
+        on_delete=models.CASCADE,
+        related_name="storage_locations",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="storage_locations",
+        db_index=True,
+    )
+    warehouse = models.ForeignKey(
+        Warehouse,
+        on_delete=models.CASCADE,
+        related_name="locations",
+        db_index=True,
+    )
+    parent_location = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="child_locations",
+    )
+    location_type = models.CharField(
+        max_length=32,
+        choices=StorageLocationType.choices,
+        default=StorageLocationType.SHELF,
+        db_index=True,
+    )
+    code = models.CharField(max_length=64, db_index=True)
+    name = models.CharField(max_length=255)
+    name_bn = models.CharField(max_length=255, blank=True, default="")
+    capacity_pack_limit = models.PositiveIntegerField(
+        default=0,
+        help_text="0 indicates unlimited capacity.",
+    )
+    current_pack_count = models.PositiveIntegerField(default=0)
+    temperature_monitored = models.BooleanField(default=False)
+    min_temp_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        default=None,
+    )
+    max_temp_celsius = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        default=None,
+    )
+    is_controlled_access = models.BooleanField(
+        default=False,
+        help_text="True if location requires authorized role access (e.g. narcotics vault or quarantine).",
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "warehouse", "code"],
+                name="unique_storage_location_code_per_warehouse",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "warehouse", "location_type"]),
+            models.Index(fields=["tenant", "location_type", "is_controlled_access"]),
+        ]
+        verbose_name = "Storage Location"
+        verbose_name_plural = "Storage Locations"
+
+    def __str__(self):
+        return f"{self.name} [{self.code}] - {self.location_type} ({self.warehouse.code})"
+
+    def clean(self):
+        super().clean()
+        if not self.location_id:
+            self.location_id = f"loc-{uuid.uuid4().hex[:12]}"
+        elif not str(self.location_id).startswith("loc-"):
+            self.location_id = f"loc-{self.location_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class ControlledLocationAccessRule(models.Model):
+    """
+    Architecture Decision: ADR-0202 (P202).
+    Branch-specific controlled-location access governance.
+    Governs who can open, inspect, store or release medicines in controlled storage
+    (Narcotics safe, Quarantine quarantine zone, Cold-Chain fridge).
+    """
+
+    rule_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "Tenant",
+        on_delete=models.CASCADE,
+        related_name="location_access_rules",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="location_access_rules",
+        db_index=True,
+    )
+    location = models.ForeignKey(
+        StorageLocation,
+        on_delete=models.CASCADE,
+        related_name="access_rules",
+        db_index=True,
+    )
+    allowed_role = models.CharField(max_length=64, db_index=True)
+    requires_dual_authorization = models.BooleanField(
+        default=False,
+        help_text="True if dual sign-off (e.g. Pharmacist + Manager) is mandatory for access.",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "location", "allowed_role"],
+                name="unique_rule_per_location_role",
+            )
+        ]
+        verbose_name = "Controlled Location Access Rule"
+        verbose_name_plural = "Controlled Location Access Rules"
+
+    def __str__(self):
+        return f"AccessRule [{self.location.code}] -> Role {self.allowed_role} (Dual: {self.requires_dual_authorization})"
+
+    def clean(self):
+        super().clean()
+        if not self.rule_id:
+            self.rule_id = f"clar-{uuid.uuid4().hex[:12]}"
+        elif not str(self.rule_id).startswith("clar-"):
+            self.rule_id = f"clar-{self.rule_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class BatchLocationAssignment(models.Model):
+    """
+    Architecture Decision: ADR-0202 (P202).
+    Tracks physical placement of batch stocks inside storage bins/shelves/fridges/quarantine.
+    """
+
+    assignment_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "Tenant",
+        on_delete=models.CASCADE,
+        related_name="batch_location_assignments",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="batch_location_assignments",
+        db_index=True,
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        on_delete=models.CASCADE,
+        related_name="location_assignments",
+        db_index=True,
+    )
+    location = models.ForeignKey(
+        StorageLocation,
+        on_delete=models.CASCADE,
+        related_name="batch_assignments",
+        db_index=True,
+    )
+    quantity = models.PositiveIntegerField(default=0)
+    assigned_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="batch_assignments",
+    )
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    notes = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "batch", "location"],
+                name="unique_batch_per_location_assignment",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "location"]),
+            models.Index(fields=["tenant", "batch"]),
+        ]
+        verbose_name = "Batch Location Assignment"
+        verbose_name_plural = "Batch Location Assignments"
+
+    def __str__(self):
+        return f"Assignment {self.batch.batch_number} -> {self.location.code} (Qty: {self.quantity})"
+
+    def clean(self):
+        super().clean()
+        if not self.assignment_id:
+            self.assignment_id = f"bla-{uuid.uuid4().hex[:12]}"
+        elif not str(self.assignment_id).startswith("bla-"):
+            self.assignment_id = f"bla-{self.assignment_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+# ==============================================================================
+# P203: Stock Inquiry API & Audit
+# Architecture Decision: ADR-0203 (Phase 11: Inventory, Warehouse & Transfers)
+# ==============================================================================
+
+
+class StockInquiryAuditLog(models.Model):
+    """
+    Architecture Decision: ADR-0203 (P203).
+    Phase 11: Inventory, Warehouse, Cold Chain & Transfers.
+    Audit log tracking stock inquiries across tenant branches, products,
+    batches, expiry states, and controlled-substance inspections.
+    """
+
+    inquiry_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "Tenant",
+        on_delete=models.CASCADE,
+        related_name="stock_inquiry_logs",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="stock_inquiry_logs",
+        db_index=True,
+    )
+    queried_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_inquiries",
+    )
+    search_query = models.CharField(max_length=255, blank=True, default="")
+    filter_expiry_status = models.CharField(max_length=64, blank=True, default="ALL")
+    filter_location = models.CharField(max_length=64, blank=True, default="")
+    products_matched_count = models.PositiveIntegerField(default=0)
+    batches_matched_count = models.PositiveIntegerField(default=0)
+    total_available_units = models.PositiveIntegerField(default=0)
+    inquired_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-inquired_at", "-inquiry_id"]
+        verbose_name = "Stock Inquiry Audit Log"
+        verbose_name_plural = "Stock Inquiry Audit Logs"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "-inquired_at"]),
+        ]
+
+    def __str__(self):
+        return f"Inquiry [{self.inquiry_id}] - Branch {self.branch_id} ({self.inquired_at})"
+
+    def clean(self):
+        super().clean()
+        if not self.inquiry_id:
+            self.inquiry_id = f"inq-{uuid.uuid4().hex[:12]}"
+        elif not str(self.inquiry_id).startswith("inq-"):
+            self.inquiry_id = f"inq-{self.inquiry_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+# ==============================================================================
+# P204: Inventory Count Sessions, Scanner Collection & Maker-Checker Posting
+# Architecture Decision: ADR-0204 (Phase 11: Inventory, Warehouse & Transfers)
+# ==============================================================================
+
+
+class InventoryCountSessionType(models.TextChoices):
+    FULL_STOCKTAKE = "FULL_STOCKTAKE", "Full Pharmacy Stocktake"
+    CYCLE_COUNT = "CYCLE_COUNT", "Periodic Cycle Count"
+    CATEGORY_AUDIT = "CATEGORY_AUDIT", "Specific Category / Shelf Audit"
+    COLD_CHAIN_AUDIT = "COLD_CHAIN_AUDIT", "Cold-Chain Refrigerator Audit"
+    CONTROLLED_DRUG_AUDIT = "CONTROLLED_DRUG_AUDIT", "Narcotics / Schedule Drug Audit"
+    SPOT_CHECK = "SPOT_CHECK", "Discrepancy Spot Check"
+
+
+class InventoryCountSessionStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft Planning"
+    IN_PROGRESS = "IN_PROGRESS", "Counting in Progress"
+    SUBMITTED_FOR_REVIEW = "SUBMITTED_FOR_REVIEW", "Count Complete - Pending Checker Review"
+    APPROVED = "APPROVED", "Approved by Checker"
+    REJECTED = "REJECTED", "Rejected by Checker - Recount Mandated"
+    POSTED = "POSTED", "Posted & Stock Adjustments Emitted"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class InventoryCountDiscrepancyType(models.TextChoices):
+    MATCH = "MATCH", "Count Matches System Quantity"
+    SURPLUS = "SURPLUS", "Physical Surplus (Counted > System)"
+    SHORTAGE = "SHORTAGE", "Physical Shortage (Counted < System)"
+
+
+class InventoryCountSession(models.Model):
+    """
+    Architecture Decision: ADR-0204 (P204).
+    Phase 11: Inventory, Warehouse, Cold Chain & Transfers.
+    Formal physical count session with scanner collections, discrepancy calculations,
+    and strict maker-checker segregation of duties.
+    """
+
+    session_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "Tenant",
+        on_delete=models.CASCADE,
+        related_name="inventory_count_sessions",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="inventory_count_sessions",
+        db_index=True,
+    )
+    session_number = models.CharField(max_length=64, db_index=True)
+    session_type = models.CharField(
+        max_length=32,
+        choices=InventoryCountSessionType.choices,
+        default=InventoryCountSessionType.CYCLE_COUNT,
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=InventoryCountSessionStatus.choices,
+        default=InventoryCountSessionStatus.DRAFT,
+        db_index=True,
+    )
+    warehouse = models.ForeignKey(
+        "Warehouse",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="count_sessions",
+    )
+    location = models.ForeignKey(
+        "StorageLocation",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="count_sessions",
+    )
+    notes = models.TextField(blank=True, default="")
+    total_items_counted = models.PositiveIntegerField(default=0)
+    total_discrepancy_units = models.IntegerField(default=0)
+    total_cost_discrepancy_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    surplus_count = models.PositiveIntegerField(default=0)
+    shortage_count = models.PositiveIntegerField(default=0)
+    matched_count = models.PositiveIntegerField(default=0)
+
+    # Maker-Checker Roles
+    created_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_count_sessions",
+    )
+    counted_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="counted_sessions",
+        help_text="The Maker who performed the physical counting and scanner entries.",
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="reviewed_count_sessions",
+        help_text="The Checker who inspected discrepancies and authorized posting.",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    checker_notes = models.TextField(blank=True, default="")
+    posted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "session_number"],
+                name="unique_count_session_number_per_branch",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["tenant", "-created_at"]),
+        ]
+        verbose_name = "Inventory Count Session"
+        verbose_name_plural = "Inventory Count Sessions"
+
+    def __str__(self):
+        return f"{self.session_number} [{self.status}] ({self.tenant_id})"
+
+    def clean(self):
+        super().clean()
+        if not self.session_id:
+            self.session_id = f"cnt-{uuid.uuid4().hex[:12]}"
+        elif not str(self.session_id).startswith("cnt-"):
+            self.session_id = f"cnt-{self.session_id}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class InventoryCountItem(models.Model):
+    """
+    Architecture Decision: ADR-0204 (P204).
+    Line item inside an inventory count session recording system vs physical counts.
+    """
+
+    item_id = models.CharField(max_length=64, primary_key=True)
+    session = models.ForeignKey(
+        InventoryCountSession,
+        on_delete=models.CASCADE,
+        related_name="items",
+        db_index=True,
+    )
+    tenant = models.ForeignKey(
+        "Tenant",
+        on_delete=models.CASCADE,
+        related_name="count_items",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="count_items",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        "MedicineProduct",
+        on_delete=models.CASCADE,
+        related_name="count_items",
+    )
+    batch = models.ForeignKey(
+        "BatchStock",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="count_items",
+    )
+    batch_number = models.CharField(max_length=64, db_index=True)
+    storage_location = models.CharField(max_length=64, blank=True, default="")
+    system_quantity = models.PositiveIntegerField(
+        default=0,
+        help_text="Snapshot of recorded physical stock before count.",
+    )
+    counted_quantity = models.PositiveIntegerField(
+        default=0,
+        help_text="Actual physical stock units verified by scanner or manual count.",
+    )
+    discrepancy_quantity = models.IntegerField(
+        default=0,
+        help_text="counted_quantity - system_quantity",
+    )
+    unit_cost = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    cost_discrepancy_bdt = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+    )
+    discrepancy_type = models.CharField(
+        max_length=16,
+        choices=InventoryCountDiscrepancyType.choices,
+        default=InventoryCountDiscrepancyType.MATCH,
+    )
+    scanner_barcode = models.CharField(max_length=64, blank=True, default="")
+    scanned_at = models.DateTimeField(default=timezone.now)
+    scanned_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="scanned_count_items",
+    )
+    adjustment_ledger_entry_id = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="StockLedgerEntry ID emitted upon session posting.",
+    )
+    notes = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["session", "product", "batch_number", "storage_location"],
+                name="unique_item_per_count_session",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["session", "discrepancy_type"]),
+            models.Index(fields=["tenant", "batch_number"]),
+        ]
+        verbose_name = "Inventory Count Item"
+        verbose_name_plural = "Inventory Count Items"
+
+    def __str__(self):
+        return f"{self.product.brand_name} ({self.batch_number}): Sys {self.system_quantity} -> Count {self.counted_quantity}"
+
+    def clean(self):
+        super().clean()
+        if not self.item_id:
+            self.item_id = f"cnti-{uuid.uuid4().hex[:12]}"
+        elif not str(self.item_id).startswith("cnti-"):
+            self.item_id = f"cnti-{self.item_id}"
+
+        # Calculate discrepancy
+        self.discrepancy_quantity = self.counted_quantity - self.system_quantity
+        self.cost_discrepancy_bdt = Decimal(str(self.discrepancy_quantity)) * self.unit_cost
+
+        if self.discrepancy_quantity > 0:
+            self.discrepancy_type = InventoryCountDiscrepancyType.SURPLUS
+        elif self.discrepancy_quantity < 0:
+            self.discrepancy_type = InventoryCountDiscrepancyType.SHORTAGE
+        else:
+            self.discrepancy_type = InventoryCountDiscrepancyType.MATCH
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+# ==============================================================================
+# P205: Nontrivial Stock Adjustment Approval Flow & Immutable Difference Events
+# Architecture Decision: ADR-0205 (Phase 11: Inventory, Warehouse & Transfers)
+# ==============================================================================
+
+
+class StockAdjustmentReasonCode(models.TextChoices):
+    BREAKAGE_SPILLAGE = "BREAKAGE_SPILLAGE", "Breakage, Spillage or Physical Damage"
+    EXPIRY_SPOILAGE = "EXPIRY_SPOILAGE", "Expired / Deteriorated Product Spoilage"
+    THEFT_PILFERAGE = "THEFT_PILFERAGE", "Theft, Pilferage or Unaccounted Loss"
+    COLD_CHAIN_EXCURSION = "COLD_CHAIN_EXCURSION", "Cold-Chain Temperature Failure / Excursion"
+    DISPENSING_ERROR_REVERSAL = "DISPENSING_ERROR_REVERSAL", "Dispensing / Scanning Error Correction"
+    SUPPLIER_SHORT_SHIPMENT = "SUPPLIER_SHORT_SHIPMENT", "Supplier Delivery Shortfall / Mismatch"
+    REGULATORY_SEIZURE_DGDA = "REGULATORY_SEIZURE_DGDA", "DGDA Regulatory Quarantine / Seizure"
+    AUDIT_COUNT_VARIANCE = "AUDIT_COUNT_VARIANCE", "Physical Audit Count Reconciliation"
+    OTHER = "OTHER", "Other Documented Exception"
+
+
+class StockAdjustmentDifferenceEvent(models.Model):
+    """
+    Architecture Decision: ADR-0205 (P205).
+    Phase 11: Inventory, Warehouse, Cold Chain & Transfers.
+    Retains immutable difference events for all approved or nontrivial stock adjustments
+    with tamper-evident SHA-256 cryptographic hashes and full audit provenance.
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(
+        "Tenant",
+        on_delete=models.CASCADE,
+        related_name="adjustment_difference_events",
+        db_index=True,
+    )
+    branch = models.ForeignKey(
+        "Branch",
+        on_delete=models.CASCADE,
+        related_name="adjustment_difference_events",
+        db_index=True,
+    )
+    adjustment = models.ForeignKey(
+        StockAdjustmentRecord,
+        on_delete=models.CASCADE,
+        related_name="difference_events",
+        db_index=True,
+    )
+    product = models.ForeignKey(
+        MedicineProduct,
+        on_delete=models.CASCADE,
+        related_name="adjustment_difference_events",
+    )
+    batch = models.ForeignKey(
+        BatchStock,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="adjustment_difference_events",
+    )
+    batch_number = models.CharField(max_length=64, db_index=True)
+    pre_adjustment_quantity = models.PositiveIntegerField(default=0)
+    post_adjustment_quantity = models.PositiveIntegerField(default=0)
+    quantity_delta = models.IntegerField()
+    unit_cost_bdt = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0.0000"))
+    total_cost_impact_bdt = models.DecimalField(max_digits=14, decimal_places=4, default=Decimal("0.0000"))
+    is_nontrivial = models.BooleanField(default=False)
+    reason_code = models.CharField(max_length=48, default="COUNT_CORRECTION")
+    reason_text = models.TextField(blank=True, default="")
+    proposed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="proposed_difference_events",
+    )
+    approved_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="approved_difference_events",
+    )
+    ledger_entry_id = models.CharField(max_length=64, blank=True, default="")
+    immutable_event_hash = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at", "-event_id"]
+        verbose_name = "Stock Adjustment Difference Event"
+        verbose_name_plural = "Stock Adjustment Difference Events"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "-created_at"]),
+            models.Index(fields=["tenant", "batch_number"]),
+        ]
+
+    def compute_hash(self) -> str:
+        import hashlib
+        raw = (
+            f"{self.event_id}|{self.tenant_id}|{self.branch_id}|"
+            f"{self.product_id}|{self.batch_number}|{self.pre_adjustment_quantity}|"
+            f"{self.post_adjustment_quantity}|{self.quantity_delta}|"
+            f"{self.unit_cost_bdt:.4f}|{self.total_cost_impact_bdt:.4f}|"
+            f"{self.reason_code}|{self.ledger_entry_id}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def clean(self):
+        super().clean()
+        if not self.event_id:
+            self.event_id = f"adjevt-{uuid.uuid4().hex[:12]}"
+        elif not str(self.event_id).startswith("adjevt-"):
+            self.event_id = f"adjevt-{self.event_id}"
+
+        if not self.immutable_event_hash:
+            self.immutable_event_hash = self.compute_hash()
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        if not self.immutable_event_hash:
+            self.immutable_event_hash = self.compute_hash()
         super().save(*args, **kwargs)
