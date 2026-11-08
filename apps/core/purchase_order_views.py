@@ -260,3 +260,77 @@ class PurchaseOrderViewSet(viewsets.ViewSet):
         except NotFound as exc:
             return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
 
+    @action(detail=True, methods=["get", "post"], url_path="items")
+    def items(self, request, pk=None) -> Response:
+        """
+        GET /api/v2/procurement/orders/{pk}/items/ -> list all line items.
+        POST /api/v2/procurement/orders/{pk}/items/ -> add single line item.
+        """
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+        if request.method.lower() == "get":
+            try:
+                items_list = PurchaseOrderService.list_po_items(tenant_id=tenant_id, po_id=pk)
+                return Response({"count": len(items_list), "results": items_list}, status=status.HTTP_200_OK)
+            except PermissionDenied as exc:
+                return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+            except NotFound as exc:
+                return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+        # POST
+        try:
+            created = PurchaseOrderService.add_po_item(
+                tenant_id=tenant_id,
+                actor_user=request.user,
+                po_id=pk,
+                data=request.data,
+            )
+            return Response(created, status=status.HTTP_201_CREATED)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+        except NotFound as exc:
+            return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=["patch", "delete"], url_path=r"items/(?P<item_id>[^/.]+)")
+    def item_detail(self, request, pk=None, item_id=None) -> Response:
+        """
+        PATCH /api/v2/procurement/orders/{pk}/items/{item_id}/ -> update line item.
+        DELETE /api/v2/procurement/orders/{pk}/items/{item_id}/ -> delete line item.
+        """
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+        if request.method.lower() == "delete":
+            try:
+                result = PurchaseOrderService.delete_po_item(
+                    tenant_id=tenant_id,
+                    actor_user=request.user,
+                    po_id=pk,
+                    item_id=item_id,
+                )
+                return Response(result, status=status.HTTP_200_OK)
+            except PermissionDenied as exc:
+                return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+            except ValidationError as exc:
+                return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+            except NotFound as exc:
+                return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+        # PATCH
+        try:
+            updated = PurchaseOrderService.update_po_item(
+                tenant_id=tenant_id,
+                actor_user=request.user,
+                po_id=pk,
+                item_id=item_id,
+                data=request.data,
+            )
+            return Response(updated, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+        except NotFound as exc:
+            return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+

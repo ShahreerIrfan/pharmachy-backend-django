@@ -1,11 +1,11 @@
 """
 backend/apps/core/purchase_order_service.py
-Architecture Decision: ADR-0185 (P185).
+Architecture Decision: ADR-0185 (P185) & ADR-0186 (P186).
 Phase 10: Suppliers, Purchase Orders & Supply Chain.
 
-Service layer governing purchase order creation, line items calculation,
-DGDA MRP ceiling guard, supplier dispatch, goods receipt tracking,
-and multi-tier guarded lifecycle state transitions.
+Service layer governing purchase order creation, line items modeling,
+pack unit conversions, line-level trade discounts and taxes, SKU delivery dates,
+goods receipt tracking, and guarded lifecycle state transitions.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ APPROVAL_ROLES = {
 class PurchaseOrderService:
     """
     Authoritative service governing pharmaceutical purchase orders,
-    commercial commitments, supplier shipments, and guarded state transitions.
+    commercial commitments, line-level pack units, tax calculations, and state transitions.
     """
 
     @classmethod
@@ -124,14 +124,23 @@ class PurchaseOrderService:
             "item_id": item.item_id,
             "product_id": str(item.product_id),
             "product_name": item.product.brand_name if item.product else "",
+            "pack_unit": item.pack_unit,
             "package_type": item.package_type,
             "package_size": item.package_size,
+            "ordered_packages": item.ordered_packages,
             "ordered_quantity": item.ordered_quantity,
             "received_quantity": item.received_quantity,
             "unit_cost_price": str(item.unit_cost_price),
+            "package_cost_price": str(item.package_cost_price),
+            "mrp_unit": str(item.mrp_unit),
             "discount_percentage": str(item.discount_percentage),
             "net_unit_cost": str(item.net_unit_cost),
+            "tax_percentage": str(item.tax_percentage),
+            "tax_amount": str(item.tax_amount),
+            "line_subtotal": str(item.line_subtotal),
             "line_total": str(item.line_total),
+            "expected_delivery_date": item.expected_delivery_date.isoformat() if item.expected_delivery_date else None,
+            "free_goods_bonus_quantity": item.free_goods_bonus_quantity,
             "notes": item.notes or "",
         }
 
@@ -169,6 +178,21 @@ class PurchaseOrderService:
             "created_at": po.created_at.isoformat() if po.created_at else None,
             "updated_at": po.updated_at.isoformat() if po.updated_at else None,
         }
+
+    @classmethod
+    def recalculate_po_totals(cls, po: PurchaseOrder) -> None:
+        """Dynamically aggregates all line subtotals and line taxes to update parent PO."""
+        items = list(po.items.all())
+        subtotal = sum((itm.line_subtotal for itm in items), Decimal("0.0000"))
+        taxes = sum((itm.tax_amount for itm in items), Decimal("0.0000"))
+        total = (subtotal - po.discount_amount + taxes).quantize(Decimal("0.0001"))
+        if total < Decimal("0.0000"):
+            total = Decimal("0.0000")
+
+        po.subtotal_amount = subtotal
+        po.tax_amount = taxes
+        po.total_amount = total
+        po.save(update_fields=["subtotal_amount", "tax_amount", "total_amount", "updated_at"])
 
     @classmethod
     def get_purchase_order(cls, tenant_id: str, po_id: str) -> Dict[str, Any]:
@@ -212,6 +236,118 @@ class PurchaseOrderService:
         return [cls.serialize_po(po) for po in qs.order_by("-created_at")]
 
     @classmethod
+    def _validate_and_parse_item_payload(cls, item: Dict[str, Any], idx: int = 0) -> Dict[str, Any]:
+        """Validates all P186 line attributes including packs, prices, discounts, taxes, and dates."""
+        prod_id = item.get("product_id")
+        if not prod_id:
+            raise ValidationError({"error_code": "ERR_MISSING_PRODUCT_ID", "detail": f"Item at index {idx} is missing product_id."})
+
+        product = MedicineProduct.objects.filter(product_id=prod_id).first()
+        if not product:
+            raise NotFound({"error_code": "ERR_PRODUCT_NOT_FOUND", "detail": f"Product '{prod_id}' not found."})
+
+        # Packages & Conversion Size
+        pkg_size = max(1, int(item.get("package_size", 1)))
+        ordered_packages = max(1, int(item.get("ordered_packages", 1)))
+        ordered_qty_input = item.get("ordered_quantity")
+
+        if ordered_qty_input is not None:
+            try:
+                ordered_quantity = int(ordered_qty_input)
+                if ordered_quantity < 1:
+                    raise ValidationError({"error_code": "ERR_INVALID_QUANTITY", "detail": "Ordered quantity must be at least 1."})
+            except (ValueError, TypeError):
+                raise ValidationError({"error_code": "ERR_INVALID_QUANTITY", "detail": "Invalid quantity value."})
+        else:
+            ordered_quantity = ordered_packages * pkg_size
+
+        # Unit Cost Price
+        try:
+            unit_cost = Decimal(str(item.get("unit_cost_price", product.cost_unit or "1.0000")))
+            if unit_cost <= Decimal("0.0000"):
+                raise ValidationError({"error_code": "ERR_INVALID_COST_PRICE", "detail": "Unit cost price must be positive."})
+        except Exception as e:
+            if isinstance(e, ValidationError):
+                raise
+            raise ValidationError({"error_code": "ERR_INVALID_COST_PRICE", "detail": "Invalid unit cost price value."})
+
+        # DGDA MRP ceiling check
+        mrp = product.mrp_unit or Decimal("0.0000")
+        if "mrp_unit" in item:
+            try:
+                mrp = Decimal(str(item["mrp_unit"]))
+            except Exception:
+                pass
+
+        if mrp > Decimal("0.0000") and unit_cost > mrp:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_COST_EXCEEDS_MRP",
+                    "detail": f"Quoted cost price ({unit_cost} BDT) cannot exceed product retail price ({mrp} BDT).",
+                }
+            )
+
+        # Discount Percentage
+        try:
+            discount_pct = Decimal(str(item.get("discount_percentage", "0.00")))
+            if discount_pct < Decimal("0.00") or discount_pct > Decimal("100.00"):
+                raise ValidationError({"error_code": "ERR_INVALID_DISCOUNT_PERCENTAGE", "detail": "Discount must be between 0% and 100%."})
+        except Exception as e:
+            if isinstance(e, ValidationError):
+                raise
+            raise ValidationError({"error_code": "ERR_INVALID_DISCOUNT_PERCENTAGE", "detail": "Invalid discount percentage."})
+
+        # Tax Percentage
+        try:
+            tax_pct = Decimal(str(item.get("tax_percentage", "0.00")))
+            if tax_pct < Decimal("0.00") or tax_pct > Decimal("100.00"):
+                raise ValidationError({"error_code": "ERR_INVALID_TAX_PERCENTAGE", "detail": "Tax percentage must be between 0% and 100%."})
+        except Exception as e:
+            if isinstance(e, ValidationError):
+                raise
+            raise ValidationError({"error_code": "ERR_INVALID_TAX_PERCENTAGE", "detail": "Invalid tax percentage."})
+
+        # Expected Delivery Date on Line
+        line_delivery_date = None
+        edd_raw = item.get("expected_delivery_date")
+        if edd_raw:
+            try:
+                line_delivery_date = edd_raw if isinstance(edd_raw, datetime.date) else datetime.date.fromisoformat(str(edd_raw))
+            except ValueError:
+                raise ValidationError({"error_code": "ERR_INVALID_DATE_FORMAT", "detail": "Line expected_delivery_date must be YYYY-MM-DD."})
+
+        # Calculated Values
+        package_cost = (unit_cost * Decimal(pkg_size)).quantize(Decimal("0.0001"))
+        discount_factor = Decimal("1.0000") - (discount_pct / Decimal("100.00"))
+        net_unit_cost = (unit_cost * discount_factor).quantize(Decimal("0.0001"))
+        line_subtotal = (net_unit_cost * Decimal(ordered_quantity)).quantize(Decimal("0.0001"))
+        line_tax = (line_subtotal * (tax_pct / Decimal("100.00"))).quantize(Decimal("0.0001"))
+        line_total = (line_subtotal + line_tax).quantize(Decimal("0.0001"))
+
+        pack_unit = (item.get("pack_unit") or item.get("package_type") or "BOX").upper()
+
+        return {
+            "product": product,
+            "pack_unit": pack_unit,
+            "package_type": pack_unit,
+            "package_size": pkg_size,
+            "ordered_packages": ordered_packages,
+            "ordered_quantity": ordered_quantity,
+            "unit_cost_price": unit_cost,
+            "package_cost_price": package_cost,
+            "mrp_unit": mrp,
+            "discount_percentage": discount_pct,
+            "net_unit_cost": net_unit_cost,
+            "tax_percentage": tax_pct,
+            "tax_amount": line_tax,
+            "line_subtotal": line_subtotal,
+            "line_total": line_total,
+            "expected_delivery_date": line_delivery_date,
+            "free_goods_bonus_quantity": max(0, int(item.get("free_goods_bonus_quantity", 0))),
+            "notes": str(item.get("notes", "")).strip(),
+        }
+
+    @classmethod
     def create_purchase_order(
         cls,
         tenant_id: str,
@@ -242,20 +378,18 @@ class PurchaseOrderService:
         if str(supplier.tenant_id) != str(tenant_id):
             raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant supplier access forbidden."})
 
-        # Link to upstream Requisition if present
+        # Upstream requisition linkage
         requisition = None
         req_id = data.get("requisition_id")
         if req_id:
             requisition = PurchaseRequisition.objects.filter(requisition_id=req_id).first()
-            if requisition:
-                if str(requisition.tenant_id) != str(tenant_id):
-                    raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant requisition linkage forbidden."})
+            if requisition and str(requisition.tenant_id) != str(tenant_id):
+                raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant requisition linkage forbidden."})
 
         items_data = data.get("items")
         if not items_data or not isinstance(items_data, list):
             raise ValidationError({"error_code": "ERR_EMPTY_PO_ITEMS", "detail": "Purchase order must contain at least one item."})
 
-        # Expected delivery date
         expected_delivery_date = None
         edd_raw = data.get("expected_delivery_date")
         if edd_raw:
@@ -268,76 +402,20 @@ class PurchaseOrderService:
         if payment_terms_days < 0:
             payment_terms_days = 30
 
-        # Validate line items & calculate subtotal
+        # Validate line items
         validated_items = []
         subtotal = Decimal("0.0000")
+        taxes = Decimal("0.0000")
 
         for idx, item in enumerate(items_data):
-            prod_id = item.get("product_id")
-            if not prod_id:
-                raise ValidationError({"error_code": "ERR_MISSING_PRODUCT_ID", "detail": f"Item at index {idx} is missing product_id."})
-
-            product = MedicineProduct.objects.filter(product_id=prod_id).first()
-            if not product:
-                raise NotFound({"error_code": "ERR_PRODUCT_NOT_FOUND", "detail": f"Product '{prod_id}' not found."})
-
-            try:
-                qty = int(item.get("ordered_quantity", 1))
-                if qty < 1:
-                    raise ValidationError({"error_code": "ERR_INVALID_QUANTITY", "detail": "Ordered quantity must be at least 1."})
-            except (ValueError, TypeError):
-                raise ValidationError({"error_code": "ERR_INVALID_QUANTITY", "detail": "Invalid quantity value."})
-
-            try:
-                unit_cost = Decimal(str(item.get("unit_cost_price", product.cost_unit or "1.0000")))
-                if unit_cost <= Decimal("0.0000"):
-                    raise ValidationError({"error_code": "ERR_INVALID_COST_PRICE", "detail": "Unit cost price must be positive."})
-            except Exception as e:
-                if isinstance(e, ValidationError):
-                    raise
-                raise ValidationError({"error_code": "ERR_INVALID_COST_PRICE", "detail": "Invalid unit cost price value."})
-
-            # DGDA MRP ceiling check
-            if product.mrp_unit and product.mrp_unit > Decimal("0.0000") and unit_cost > product.mrp_unit:
-                raise ValidationError(
-                    {
-                        "error_code": "ERR_COST_EXCEEDS_MRP",
-                        "detail": f"Quoted cost price ({unit_cost} BDT) cannot exceed product retail price ({product.mrp_unit} BDT).",
-                    }
-                )
-
-            try:
-                discount_pct = Decimal(str(item.get("discount_percentage", "0.00")))
-                if discount_pct < Decimal("0.00") or discount_pct > Decimal("100.00"):
-                    raise ValidationError({"error_code": "ERR_INVALID_DISCOUNT_PERCENTAGE", "detail": "Discount must be between 0% and 100%."})
-            except Exception as e:
-                if isinstance(e, ValidationError):
-                    raise
-                raise ValidationError({"error_code": "ERR_INVALID_DISCOUNT_PERCENTAGE", "detail": "Invalid discount percentage."})
-
-            discount_factor = Decimal("1.0000") - (discount_pct / Decimal("100.00"))
-            net_unit_cost = (unit_cost * discount_factor).quantize(Decimal("0.0001"))
-            line_total = (net_unit_cost * Decimal(qty)).quantize(Decimal("0.0001"))
-            subtotal += line_total
-
-            pkg_size = max(1, int(item.get("package_size", 1)))
-            validated_items.append(
-                {
-                    "item_id": item.get("item_id") or f"poi-{uuid.uuid4().hex[:12]}",
-                    "product": product,
-                    "package_type": item.get("package_type", "BOX").upper(),
-                    "package_size": pkg_size,
-                    "ordered_quantity": qty,
-                    "unit_cost_price": unit_cost,
-                    "discount_percentage": discount_pct,
-                    "net_unit_cost": net_unit_cost,
-                    "line_total": line_total,
-                    "notes": str(item.get("notes", "")).strip(),
-                }
-            )
+            val = cls._validate_and_parse_item_payload(item, idx)
+            val["item_id"] = item.get("item_id") or f"poi-{uuid.uuid4().hex[:12]}"
+            subtotal += val["line_subtotal"]
+            taxes += val["tax_amount"]
+            validated_items.append(val)
 
         order_discount = Decimal(str(data.get("discount_amount", "0.0000")))
-        order_tax = Decimal(str(data.get("tax_amount", "0.0000")))
+        order_tax = taxes if "tax_amount" not in data else Decimal(str(data["tax_amount"]))
         total_amount = (subtotal - order_discount + order_tax).quantize(Decimal("0.0001"))
         if total_amount < Decimal("0.0000"):
             total_amount = Decimal("0.0000")
@@ -376,18 +454,26 @@ class PurchaseOrderService:
                     item_id=vi["item_id"],
                     purchase_order=po,
                     product=vi["product"],
+                    pack_unit=vi["pack_unit"],
                     package_type=vi["package_type"],
                     package_size=vi["package_size"],
+                    ordered_packages=vi["ordered_packages"],
                     ordered_quantity=vi["ordered_quantity"],
                     received_quantity=0,
                     unit_cost_price=vi["unit_cost_price"],
+                    package_cost_price=vi["package_cost_price"],
+                    mrp_unit=vi["mrp_unit"],
                     discount_percentage=vi["discount_percentage"],
                     net_unit_cost=vi["net_unit_cost"],
+                    tax_percentage=vi["tax_percentage"],
+                    tax_amount=vi["tax_amount"],
+                    line_subtotal=vi["line_subtotal"],
                     line_total=vi["line_total"],
+                    expected_delivery_date=vi["expected_delivery_date"],
+                    free_goods_bonus_quantity=vi["free_goods_bonus_quantity"],
                     notes=vi["notes"],
                 )
 
-            # If generated from Requisition, mark requisition as converted
             if requisition and requisition.status != RequisitionStatus.CONVERTED_TO_PO:
                 requisition.status = RequisitionStatus.CONVERTED_TO_PO
                 requisition.save(update_fields=["status", "updated_at"])
@@ -412,6 +498,243 @@ class PurchaseOrderService:
         )
 
         return cls.serialize_po(po)
+
+    @classmethod
+    def add_po_item(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        po_id: str,
+        item_data: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Adds a line item to a DRAFT purchase order and recalculates totals."""
+        cls._assert_procurement_role(actor_user)
+        tenant = cls._assert_tenant_active(tenant_id)
+        effective_data = data if data is not None else (item_data or {})
+
+        po = PurchaseOrder.objects.filter(po_id=po_id).first()
+        if not po:
+            raise NotFound({"error_code": "ERR_PO_NOT_FOUND", "detail": f"Purchase order '{po_id}' not found."})
+        if str(po.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant purchase order item addition forbidden."})
+
+        if po.status != PurchaseOrderStatus.DRAFT:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_PO_LOCKED",
+                    "detail": f"Cannot add item to purchase order in '{po.status}' status. PO must be in DRAFT.",
+                }
+            )
+
+        val = cls._validate_and_parse_item_payload(effective_data)
+        item_id = effective_data.get("item_id") or f"poi-{uuid.uuid4().hex[:12]}"
+
+        with transaction.atomic():
+            item = PurchaseOrderItem.objects.create(
+                item_id=item_id,
+                purchase_order=po,
+                product=val["product"],
+                pack_unit=val["pack_unit"],
+                package_type=val["package_type"],
+                package_size=val["package_size"],
+                ordered_packages=val["ordered_packages"],
+                ordered_quantity=val["ordered_quantity"],
+                received_quantity=0,
+                unit_cost_price=val["unit_cost_price"],
+                package_cost_price=val["package_cost_price"],
+                mrp_unit=val["mrp_unit"],
+                discount_percentage=val["discount_percentage"],
+                net_unit_cost=val["net_unit_cost"],
+                tax_percentage=val["tax_percentage"],
+                tax_amount=val["tax_amount"],
+                line_subtotal=val["line_subtotal"],
+                line_total=val["line_total"],
+                expected_delivery_date=val["expected_delivery_date"],
+                free_goods_bonus_quantity=val["free_goods_bonus_quantity"],
+                notes=val["notes"],
+            )
+            cls.recalculate_po_totals(po)
+
+        AuditLogEntry.objects.create(
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            tenant_id=str(tenant.tenant_id),
+            user_id=getattr(actor_user, "user_id", str(actor_user)),
+            actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+            actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+            action="PURCHASE_ORDER_ITEM_ADDED",
+            resource_type="PurchaseOrderItem",
+            resource_id=item.item_id,
+            ip_address="127.0.0.1",
+            status=AuditActionStatus.SUCCESS,
+            metadata_json={"po_id": po.po_id, "line_total": str(item.line_total)},
+        )
+
+        return cls.serialize_item(item)
+
+    @classmethod
+    def update_po_item(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        po_id: str,
+        item_id: str,
+        item_data: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Modifies a line item on a DRAFT purchase order and recalculates totals."""
+        cls._assert_procurement_role(actor_user)
+        tenant = cls._assert_tenant_active(tenant_id)
+        effective_data = data if data is not None else (item_data or {})
+
+        po = PurchaseOrder.objects.filter(po_id=po_id).first()
+        if not po:
+            raise NotFound({"error_code": "ERR_PO_NOT_FOUND", "detail": f"Purchase order '{po_id}' not found."})
+        if str(po.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant purchase order item update forbidden."})
+
+        if po.status != PurchaseOrderStatus.DRAFT:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_PO_LOCKED",
+                    "detail": f"Cannot modify item on purchase order in '{po.status}' status. PO must be in DRAFT.",
+                }
+            )
+
+        item = po.items.filter(item_id=item_id).first()
+        if not item:
+            raise NotFound({"error_code": "ERR_PO_ITEM_NOT_FOUND", "detail": f"Purchase order item '{item_id}' not found."})
+
+        if "package_size" in effective_data:
+            item.package_size = max(1, int(effective_data["package_size"]))
+        if "ordered_packages" in effective_data:
+            item.ordered_packages = max(1, int(effective_data["ordered_packages"]))
+            item.ordered_quantity = item.ordered_packages * item.package_size
+        elif "ordered_quantity" in effective_data:
+            qty = int(effective_data["ordered_quantity"])
+            if qty < 1:
+                raise ValidationError({"error_code": "ERR_INVALID_QUANTITY", "detail": "Ordered quantity must be >= 1."})
+            item.ordered_quantity = qty
+
+        if "unit_cost_price" in effective_data:
+            cost = Decimal(str(effective_data["unit_cost_price"]))
+            if cost <= Decimal("0.0000"):
+                raise ValidationError({"error_code": "ERR_INVALID_COST_PRICE", "detail": "Unit cost price must be positive."})
+            if item.product.mrp_unit and item.product.mrp_unit > Decimal("0.0000") and cost > item.product.mrp_unit:
+                raise ValidationError({"error_code": "ERR_COST_EXCEEDS_MRP", "detail": "Cost exceeds MRP."})
+            item.unit_cost_price = cost
+
+        if "discount_percentage" in effective_data:
+            disc = Decimal(str(effective_data["discount_percentage"]))
+            if disc < Decimal("0.00") or disc > Decimal("100.00"):
+                raise ValidationError({"error_code": "ERR_INVALID_DISCOUNT", "detail": "Discount between 0 and 100."})
+            item.discount_percentage = disc
+
+        if "tax_percentage" in effective_data:
+            tax = Decimal(str(effective_data["tax_percentage"]))
+            if tax < Decimal("0.00") or tax > Decimal("100.00"):
+                raise ValidationError({"error_code": "ERR_INVALID_TAX", "detail": "Tax between 0 and 100."})
+            item.tax_percentage = tax
+
+        if "pack_unit" in effective_data:
+            item.pack_unit = str(effective_data["pack_unit"]).upper()
+            item.package_type = item.pack_unit
+
+        if "expected_delivery_date" in effective_data:
+            edd = effective_data["expected_delivery_date"]
+            item.expected_delivery_date = edd if isinstance(edd, datetime.date) else datetime.date.fromisoformat(str(edd))
+
+        if "notes" in effective_data:
+            item.notes = str(effective_data["notes"]).strip()
+
+        with transaction.atomic():
+            item.clean()
+            item.save()
+            cls.recalculate_po_totals(po)
+
+        AuditLogEntry.objects.create(
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            tenant_id=str(tenant.tenant_id),
+            user_id=getattr(actor_user, "user_id", str(actor_user)),
+            actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+            actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+            action="PURCHASE_ORDER_ITEM_UPDATED",
+            resource_type="PurchaseOrderItem",
+            resource_id=item.item_id,
+            ip_address="127.0.0.1",
+            status=AuditActionStatus.SUCCESS,
+            metadata_json={"po_id": po.po_id, "updated_fields": list(effective_data.keys())},
+        )
+
+        return cls.serialize_item(item)
+
+    @classmethod
+    def delete_po_item(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        po_id: str,
+        item_id: str,
+    ) -> Dict[str, Any]:
+        """Deletes a line item from a DRAFT purchase order and recalculates totals."""
+        cls._assert_procurement_role(actor_user)
+        tenant = cls._assert_tenant_active(tenant_id)
+
+        po = PurchaseOrder.objects.filter(po_id=po_id).first()
+        if not po:
+            raise NotFound({"error_code": "ERR_PO_NOT_FOUND", "detail": f"Purchase order '{po_id}' not found."})
+        if str(po.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant purchase order item deletion forbidden."})
+
+        if po.status != PurchaseOrderStatus.DRAFT:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_PO_LOCKED",
+                    "detail": f"Cannot delete item on purchase order in '{po.status}' status. PO must be in DRAFT.",
+                }
+            )
+
+        if po.items.count() <= 1:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_CANNOT_DELETE_LAST_ITEM",
+                    "detail": "Cannot delete the only remaining item on a purchase order. Purchase order must contain at least one item.",
+                }
+            )
+
+        item = po.items.filter(item_id=item_id).first()
+        if not item:
+            raise NotFound({"error_code": "ERR_PO_ITEM_NOT_FOUND", "detail": f"Purchase order item '{item_id}' not found."})
+
+        with transaction.atomic():
+            item.delete()
+            cls.recalculate_po_totals(po)
+
+        AuditLogEntry.objects.create(
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            tenant_id=str(tenant.tenant_id),
+            user_id=getattr(actor_user, "user_id", str(actor_user)),
+            actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+            actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+            action="PURCHASE_ORDER_ITEM_DELETED",
+            resource_type="PurchaseOrderItem",
+            resource_id=item_id,
+            ip_address="127.0.0.1",
+            status=AuditActionStatus.SUCCESS,
+            metadata_json={"po_id": po.po_id},
+        )
+
+        return {"deleted": True, "po_id": po.po_id, "deleted_item_id": item_id}
+
+    @classmethod
+    def list_po_items(cls, tenant_id: str, po_id: str) -> List[Dict[str, Any]]:
+        cls._assert_tenant_active(tenant_id)
+        po = PurchaseOrder.objects.filter(po_id=po_id).first()
+        if not po:
+            raise NotFound({"error_code": "ERR_PO_NOT_FOUND", "detail": f"Purchase order '{po_id}' not found."})
+        if str(po.tenant_id) != str(tenant_id):
+            raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant purchase order access forbidden."})
+        return [cls.serialize_item(item) for item in po.items.select_related("product").all()]
 
     @classmethod
     def update_purchase_order(
@@ -609,7 +932,6 @@ class PurchaseOrderService:
                 item.received_quantity += qty
                 item.save(update_fields=["received_quantity"])
 
-            # Check overall completion
             all_items = list(po.items.all())
             all_fulfilled = all(itm.received_quantity >= itm.ordered_quantity for itm in all_items)
             any_received = any(itm.received_quantity > 0 for itm in all_items)
@@ -713,7 +1035,6 @@ class PurchaseOrderService:
                 }
             )
 
-        # Check if any items received
         total_received = sum(item.received_quantity for item in po.items.all())
         if total_received > 0:
             raise ValidationError(
@@ -753,4 +1074,3 @@ class PurchaseOrderService:
         )
 
         return cls.serialize_po(po)
-

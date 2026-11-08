@@ -5475,9 +5475,10 @@ class PurchaseOrder(models.Model):
 
 class PurchaseOrderItem(models.Model):
     """
-    Architecture Decision: ADR-0185 (P185).
+    Architecture Decision: ADR-0185 (P185) & ADR-0186 (P186).
     Line item for a Purchase Order specifying ordered product, packaging,
-    cost price, trade discount, and delivered quantity tracking.
+    pack units, package size, unit/pack costs, line discounts, VAT/tax rates,
+    and SKU-specific expected delivery schedules.
     """
 
     item_id = models.CharField(max_length=64, primary_key=True)
@@ -5493,11 +5494,17 @@ class PurchaseOrderItem(models.Model):
         related_name="purchase_order_items",
         db_index=True,
     )
+    pack_unit = models.CharField(max_length=32, default="BOX")
     package_type = models.CharField(max_length=32, default="BOX")
     package_size = models.PositiveIntegerField(
         default=1,
         validators=[MinValueValidator(1)],
         help_text="Units per package (e.g. 100 tablets per box)",
+    )
+    ordered_packages = models.PositiveIntegerField(
+        default=1,
+        validators=[MinValueValidator(1)],
+        help_text="Quantity ordered in commercial packaging units",
     )
     ordered_quantity = models.PositiveIntegerField(
         validators=[MinValueValidator(1)],
@@ -5513,6 +5520,20 @@ class PurchaseOrderItem(models.Model):
         validators=[MinValueValidator(Decimal("0.0001"))],
         help_text="Quoted purchase cost per individual base unit (BDT)",
     )
+    package_cost_price = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Calculated purchase cost per pack (BDT)",
+    )
+    mrp_unit = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Maximum Retail Price ceiling benchmark (BDT)",
+    )
     discount_percentage = models.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -5527,12 +5548,38 @@ class PurchaseOrderItem(models.Model):
         validators=[MinValueValidator(Decimal("0.0000"))],
         help_text="Net unit cost after discount (BDT)",
     )
+    tax_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+        help_text="Line-level VAT/Tax percentage",
+    )
+    tax_amount = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Calculated line VAT/Tax amount in BDT",
+    )
+    line_subtotal = models.DecimalField(
+        max_digits=14,
+        decimal_places=4,
+        default=Decimal("0.0000"),
+        validators=[MinValueValidator(Decimal("0.0000"))],
+        help_text="Line net total before tax (BDT)",
+    )
     line_total = models.DecimalField(
         max_digits=14,
         decimal_places=4,
         default=Decimal("0.0000"),
         validators=[MinValueValidator(Decimal("0.0000"))],
-        help_text="Calculated line total liability (BDT)",
+        help_text="Calculated line total liability including tax (BDT)",
+    )
+    expected_delivery_date = models.DateField(null=True, blank=True, db_index=True)
+    free_goods_bonus_quantity = models.PositiveIntegerField(
+        default=0,
+        help_text="Bonus promotional free units provided with this line",
     )
     notes = models.CharField(max_length=255, blank=True, default="")
 
@@ -5554,13 +5601,33 @@ class PurchaseOrderItem(models.Model):
         elif not str(self.item_id).startswith("poi-"):
             self.item_id = f"poi-{self.item_id}"
 
+        if not self.pack_unit and self.package_type:
+            self.pack_unit = self.package_type
+        elif self.pack_unit and not self.package_type:
+            self.package_type = self.pack_unit
+
+        self.package_size = max(1, self.package_size)
+        if self.ordered_packages and self.package_size:
+            calculated_qty = self.ordered_packages * self.package_size
+            if not self.ordered_quantity or self.ordered_quantity < calculated_qty:
+                self.ordered_quantity = calculated_qty
+
+        if self.unit_cost_price and self.package_size:
+            self.package_cost_price = (self.unit_cost_price * Decimal(self.package_size)).quantize(Decimal("0.0001"))
+
         discount_factor = Decimal("1.0000") - (self.discount_percentage / Decimal("100.00"))
         self.net_unit_cost = (self.unit_cost_price * discount_factor).quantize(Decimal("0.0001"))
-        self.line_total = (self.net_unit_cost * Decimal(self.ordered_quantity)).quantize(Decimal("0.0001"))
+        self.line_subtotal = (self.net_unit_cost * Decimal(self.ordered_quantity)).quantize(Decimal("0.0001"))
+        self.tax_amount = (self.line_subtotal * (self.tax_percentage / Decimal("100.00"))).quantize(Decimal("0.0001"))
+        self.line_total = (self.line_subtotal + self.tax_amount).quantize(Decimal("0.0001"))
 
-        if self.product_id and hasattr(self, "product") and self.product and self.product.mrp_unit and self.product.mrp_unit > Decimal("0.0000"):
-            if self.unit_cost_price > self.product.mrp_unit:
-                raise ValidationError({"unit_cost_price": "Quoted purchase unit cost cannot exceed Maximum Retail Price (MRP)."})
+        mrp = self.mrp_unit
+        if (not mrp or mrp == Decimal("0.0000")) and self.product_id and hasattr(self, "product") and self.product:
+            mrp = self.product.mrp_unit
+            self.mrp_unit = mrp or Decimal("0.0000")
+
+        if mrp and mrp > Decimal("0.0000") and self.unit_cost_price > mrp:
+            raise ValidationError({"unit_cost_price": "Quoted purchase unit cost cannot exceed Maximum Retail Price (MRP)."})
 
     def save(self, *args, **kwargs):
         self.clean()
