@@ -424,6 +424,23 @@ class TenantOwnerDashboardService:
         except CustomerDueRecord.DoesNotExist as err:
             raise ValidationError(f"Customer due record '{clean_due_id}' does not exist.") from err
 
+        if actor_user is not None and (record.sale_id or record.customer_id):
+            from apps.core.pos_customer_due_service import PosCustomerDueService
+            from apps.core.pos_domain_service import PosDomainService
+
+            if PosDomainService.has_feature_entitlement(record.tenant, "CUSTOMER_LEDGER"):
+                PosCustomerDueService.collect_customer_due(
+                    actor_user,
+                    record,
+                    {
+                        "tender_type": "CASH",
+                        "amount_bdt": payment_amount_bdt,
+                        "notes": "Settled via Owner Dashboard",
+                    },
+                )
+                record.refresh_from_db()
+                return record
+
         if record.status == DueStatus.SETTLED:
             raise ValidationError(f"Due record '{clean_due_id}' has already been settled.")
 

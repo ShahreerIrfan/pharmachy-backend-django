@@ -651,18 +651,38 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
         else:
             field_errs["non_field_errors"] = [str(raw_errs)]
 
+        val_err_code = "ERR_VALIDATION_FAILED"
+        msg_en = "One or more input fields failed validation."
+        msg_bn = "এক বা একাধিক তথ্যের মান সঠিক নয়।"
+        if isinstance(raw_errs, dict):
+            raw_code = raw_errs.get("error_code")
+            if isinstance(raw_code, list) and raw_code:
+                raw_code = raw_code[0]
+            if raw_code:
+                val_err_code = str(raw_code)
+            raw_msg_en = raw_errs.get("message_en") or raw_errs.get("detail")
+            if isinstance(raw_msg_en, list) and raw_msg_en:
+                raw_msg_en = raw_msg_en[0]
+            if raw_msg_en:
+                msg_en = str(raw_msg_en)
+            raw_msg_bn = raw_errs.get("message_bn")
+            if isinstance(raw_msg_bn, list) and raw_msg_bn:
+                raw_msg_bn = raw_msg_bn[0]
+            if raw_msg_bn:
+                msg_bn = str(raw_msg_bn)
+
         payload = {
             "success": False,
-            "error_code": "ERR_VALIDATION_FAILED",
-            "code": "ERR_VALIDATION_FAILED",
+            "error_code": val_err_code,
+            "code": val_err_code,
             "request_id": correlation_id,
             "correlation_id": correlation_id,
             "http_status": 422,
             "is_retryable": False,
             "retryable": False,
-            "message": "One or more input fields failed validation.",
-            "message_en": "One or more input fields failed validation.",
-            "message_bn": "এক বা একাধিক তথ্যের মান সঠিক নয়।",
+            "message": msg_en,
+            "message_en": msg_en,
+            "message_bn": msg_bn,
             "recovery_action": RecoveryAction.CORRECT_INPUT_FIELDS.value,
             "field_errors": field_errs,
             "details": field_errs,
@@ -696,11 +716,27 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
 
     # 4. Permission Denied Errors (403 Forbidden)
     if isinstance(exc, (DRFPermissionDenied, DjangoPermissionDenied, PermissionError)):
-        msg = str(exc) if str(exc) else "You do not have permission to perform this action."
+        det = getattr(exc, "detail", None)
+        det_dict = det if isinstance(det, dict) else None
+        err_code = (
+            str(det_dict.get("error_code"))
+            if det_dict and det_dict.get("error_code")
+            else "ERR_PERMISSION_DENIED"
+        )
+        msg = (
+            str(det_dict.get("message_en") or det_dict.get("detail") or "You do not have permission to perform this action.")
+            if det_dict
+            else (str(exc) if str(exc) else "You do not have permission to perform this action.")
+        )
+        msg_bn = (
+            str(det_dict.get("message_bn") or "এই কাজটি সম্পাদন করার অনুমতি আপনার নেই।")
+            if det_dict
+            else "এই কাজটি সম্পাদন করার অনুমতি আপনার নেই।"
+        )
         payload = {
             "success": False,
-            "error_code": "ERR_PERMISSION_DENIED",
-            "code": "ERR_PERMISSION_DENIED",
+            "error_code": err_code,
+            "code": err_code,
             "request_id": correlation_id,
             "correlation_id": correlation_id,
             "http_status": 403,
@@ -708,10 +744,10 @@ def custom_drf_exception_handler(exc: Exception, context: dict[str, Any] | None 
             "retryable": False,
             "message": msg,
             "message_en": msg,
-            "message_bn": "এই কাজটি সম্পাদন করার অনুমতি আপনার নেই।",
+            "message_bn": msg_bn,
             "recovery_action": RecoveryAction.REQUEST_MANAGER_OVERRIDE.value,
             "field_errors": {},
-            "details": {"error": str(exc)},
+            "details": det_dict if det_dict is not None else {"error": str(exc)},
             "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         }
         return Response(payload, status=status.HTTP_403_FORBIDDEN)

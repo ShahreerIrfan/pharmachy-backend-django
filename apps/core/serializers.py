@@ -28,8 +28,11 @@ from apps.core.models import (
     PlanCatalogueRecord,
     PlatformApiAccessPolicy,
     PlatformFeatureFlag,
+    PrescriptionAttachment,
+    PrescriptionDispenseRecord,
     PrescriptionItem,
     PrescriptionRecord,
+    PrescriptionVerificationAudit,
     SaleInvoice,
     SaleInvoiceItem,
     StaffMember,
@@ -623,6 +626,7 @@ class PrescriptionItemSerializer(serializers.ModelSerializer):
 
     product_brand = serializers.CharField(source="product.brand_name", read_only=True)
     product_generic = serializers.CharField(source="product.generic_name", read_only=True)
+    remaining_dispense_quantity = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = PrescriptionItem
@@ -635,26 +639,38 @@ class PrescriptionItemSerializer(serializers.ModelSerializer):
             "dosage_instructions",
             "duration_days",
             "quantity_prescribed",
+            "quantity_dispensed",
+            "remaining_dispense_quantity",
             "is_dispensed",
         ]
+        read_only_fields = ["id", "prescription", "quantity_dispensed", "is_dispensed", "remaining_dispense_quantity"]
 
 
 class PrescriptionRecordSerializer(serializers.ModelSerializer):
     """Serializer for clinical prescriptions, BMDC doctor details, and pharmacist verification."""
 
     items = PrescriptionItemSerializer(many=True, read_only=True)
+    items_data = serializers.ListField(child=serializers.DictField(), write_only=True, required=False)
     branch_name = serializers.CharField(source="branch.name", read_only=True)
+    customer_name = serializers.CharField(source="customer.name", read_only=True)
     verified_by_name = serializers.CharField(source="verified_by.full_name", read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+    can_dispense = serializers.BooleanField(read_only=True)
 
     class Meta:
         model = PrescriptionRecord
         fields = [
             "prescription_id",
+            "prescription_number",
             "tenant",
             "branch",
             "branch_name",
+            "customer",
+            "customer_name",
             "doctor_name",
             "doctor_bmdc_no",
+            "doctor_workplace",
+            "prescriber_contact",
             "patient_token",
             "patient_age",
             "patient_gender",
@@ -665,11 +681,55 @@ class PrescriptionRecordSerializer(serializers.ModelSerializer):
             "pharmacist_pcb_no",
             "notes",
             "prescription_date",
+            "expiry_date",
+            "validity_status",
+            "validity_checked_at",
+            "validity_notes",
+            "is_expired",
+            "can_dispense",
             "verified_at",
             "created_at",
+            "updated_at",
             "items",
+            "items_data",
         ]
-        read_only_fields = ["created_at", "verified_at"]
+        read_only_fields = ["created_at", "updated_at", "verified_at", "is_expired", "can_dispense"]
+
+
+class PrescriptionDispenseRecordSerializer(serializers.ModelSerializer):
+    """Serializer for audited prescription item dispensing transactions."""
+
+    dispensed_by_name = serializers.CharField(source="dispensed_by.full_name", read_only=True)
+    product_name = serializers.CharField(source="prescription_item.product.brand_name", read_only=True)
+
+    class Meta:
+        model = PrescriptionDispenseRecord
+        fields = [
+            "dispense_id",
+            "tenant",
+            "branch",
+            "prescription",
+            "prescription_item",
+            "product_name",
+            "sale_order",
+            "batch_stock",
+            "quantity_dispensed",
+            "dispensed_by",
+            "dispensed_by_name",
+            "dispensed_at",
+            "notes",
+        ]
+        read_only_fields = ["dispense_id", "dispensed_at"]
+
+
+class PrescriptionDispenseInputSerializer(serializers.Serializer):
+    """Input serializer for dispensing a prescription item."""
+
+    item_id = serializers.IntegerField(required=True)
+    quantity = serializers.IntegerField(min_value=1, required=True)
+    sale_order_id = serializers.CharField(required=False, allow_blank=True, default="")
+    batch_stock_id = serializers.CharField(required=False, allow_blank=True, default="")
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
 
 
 class PrescriptionVerificationRequestSerializer(serializers.Serializer):
@@ -682,6 +742,150 @@ class PrescriptionVerificationRequestSerializer(serializers.Serializer):
     )
     decision = serializers.ChoiceField(choices=["APPROVED", "REJECTED"])
     notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class PrescriptionAttachmentSerializer(serializers.ModelSerializer):
+    """Serializer for secure prescription image/document attachments."""
+
+    uploaded_by_name = serializers.CharField(source="uploaded_by.full_name", read_only=True)
+    verified_by_name = serializers.CharField(source="verified_by.full_name", read_only=True)
+    is_quarantined = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = PrescriptionAttachment
+        fields = [
+            "attachment_id",
+            "tenant",
+            "branch",
+            "prescription",
+            "file_name",
+            "mime_type",
+            "file_size_bytes",
+            "checksum_sha256",
+            "retention_days",
+            "retention_expires_at",
+            "is_verified_by_pharmacist",
+            "verified_by",
+            "verified_by_name",
+            "uploaded_by",
+            "uploaded_by_name",
+            "is_quarantined",
+            "notes",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "attachment_id",
+            "checksum_sha256",
+            "file_size_bytes",
+            "is_verified_by_pharmacist",
+            "is_quarantined",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class PrescriptionAttachmentVerifySerializer(serializers.Serializer):
+    """Input serializer for pharmacist verification of an uploaded attachment."""
+
+    pharmacist_pcb_no = serializers.CharField(required=True)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class PrescriptionVerificationAuditSerializer(serializers.ModelSerializer):
+    """Serializer for immutable clinical pharmacist review and verification audit records."""
+
+    pharmacist_name = serializers.CharField(source="pharmacist_staff.full_name", read_only=True)
+
+    class Meta:
+        model = PrescriptionVerificationAudit
+        fields = [
+            "audit_id",
+            "tenant",
+            "branch",
+            "prescription",
+            "action",
+            "from_status",
+            "to_status",
+            "pharmacist_pcb_no",
+            "pharmacist_name",
+            "clinical_notes",
+            "clarification_query",
+            "clarification_response",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class PharmacistVerifyInputSerializer(serializers.Serializer):
+    pharmacist_pcb_no = serializers.CharField(required=True)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class PharmacistRejectInputSerializer(serializers.Serializer):
+    pharmacist_pcb_no = serializers.CharField(required=True)
+    rejection_reason = serializers.CharField(required=True, min_length=5)
+
+
+class PharmacistClarificationInputSerializer(serializers.Serializer):
+    pharmacist_pcb_no = serializers.CharField(required=True)
+    clarification_query = serializers.CharField(required=True, min_length=5)
+
+
+class PharmacistResolveClarificationInputSerializer(serializers.Serializer):
+    clarification_response = serializers.CharField(required=True, min_length=3)
+
+
+class PrescriptionValidityRejectInputSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=True, min_length=5)
+    clinical_notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class RxItemMatchLineSerializer(serializers.Serializer):
+    product_id = serializers.CharField(required=True)
+    quantity = serializers.IntegerField(min_value=1, required=True)
+
+
+class RxItemMatchRequestSerializer(serializers.Serializer):
+    items = serializers.ListField(child=RxItemMatchLineSerializer(), allow_empty=False)
+
+
+class RxItemMatchCommitSerializer(serializers.Serializer):
+    sale_order_id = serializers.CharField(required=False, allow_blank=True, default="")
+    items = serializers.ListField(child=RxItemMatchLineSerializer(), allow_empty=False)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class RxItemDispenseReverseSerializer(serializers.Serializer):
+    dispense_id = serializers.CharField(required=True)
+    reverse_quantity = serializers.IntegerField(min_value=1, required=False)
+    reason = serializers.CharField(required=True, min_length=3)
+
+
+class PrescriptionValidityRejectInputSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=True, min_length=5)
+    clinical_notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class RxItemMatchLineSerializer(serializers.Serializer):
+    product_id = serializers.CharField(required=True)
+    quantity = serializers.IntegerField(min_value=1, required=True)
+
+
+class RxItemMatchRequestSerializer(serializers.Serializer):
+    items = serializers.ListField(child=RxItemMatchLineSerializer(), allow_empty=False)
+
+
+class RxItemMatchCommitSerializer(serializers.Serializer):
+    sale_order_id = serializers.CharField(required=False, allow_blank=True, default="")
+    items = serializers.ListField(child=RxItemMatchLineSerializer(), allow_empty=False)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class RxItemDispenseReverseSerializer(serializers.Serializer):
+    dispense_id = serializers.CharField(required=True)
+    reverse_quantity = serializers.IntegerField(min_value=1, required=False)
+    reason = serializers.CharField(required=True, min_length=3)
 
 
 class PaymentTransactionSerializer(serializers.ModelSerializer):

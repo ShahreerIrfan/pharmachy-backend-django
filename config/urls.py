@@ -20,7 +20,9 @@ from apps.core.announcement_views import (
     TenantAnnouncementViewSet,
 )
 from apps.core.approval_views import ApprovalRequestViewSet
+from apps.core.auto_reorder_planner_views import AutoReorderPlannerViewSet
 from apps.core.barcode_identifier_views import BarcodeAlternateIdentifierViewSet
+from apps.core.barcode_inventory_views import BarcodeInventoryViewSet
 from apps.core.batch_entity_views import BatchEntityViewSet
 from apps.core.batch_expiry_views import BatchExpiryViewSet
 from apps.core.batch_merge_views import BatchMergeViewSet
@@ -39,6 +41,7 @@ from apps.core.cashier_register_views import CashierRegisterAssignmentViewSet
 from apps.core.catalogue_contract_views import CatalogueContractSuiteViewSet
 from apps.core.catalogue_recall_views import CatalogueLifecycleNoticeViewSet
 from apps.core.classification_snapshot_views import MedicineClassificationSnapshotViewSet
+from apps.core.cold_chain_excursion_views import ColdChainExcursionViewSet
 from apps.core.conditional_pricing_views import ConditionalPricingViewSet
 from apps.core.cross_tenant_metrics_views import (
     PlatformCrossTenantMetricsViewSet,
@@ -48,6 +51,7 @@ from apps.core.custom_role_views import (
     CustomRoleViewSet,
     PermissionCatalogViewSet,
 )
+from apps.core.delivery_logistics_views import DeliveryLogisticsViewSet
 from apps.core.device_consumable_views import DeviceConsumableEditorViewSet
 from apps.core.device_registration_views import LoginDeviceRegistrationViewSet
 from apps.core.device_seat_views import DeviceSeatViewSet
@@ -72,7 +76,12 @@ from apps.core.health import legacy_health_check, liveness_probe, readiness_prob
 from apps.core.inhaler_views import InhalerEditorViewSet
 from apps.core.injection_vial_views import InjectionVialEditorViewSet
 from apps.core.insulin_views import InsulinEditorViewSet
+from apps.core.interbranch_transfer_views import InterBranchTransferViewSet
 from apps.core.inventory_base_unit_views import InventoryBaseUnitStrategyViewSet
+from apps.core.inventory_count_views import InventoryCountSessionViewSet
+from apps.core.inventory_fault_stress_views import InventoryFaultStressViewSet
+from apps.core.inventory_snapshot_views import InventorySnapshotViewSet
+from apps.core.inventory_valuation_views import InventoryValuationReportViewSet
 from apps.core.landed_cost_views import LandedCostExpenseViewSet
 from apps.core.local_inventory_views import LocalInventoryViewSet
 from apps.core.loose_tablet_sales_views import LooseTabletSalesViewSet
@@ -84,21 +93,7 @@ from apps.core.medicine_form_template_views import MedicineFormTemplateViewSet
 from apps.core.medicine_search_views import MedicineSearchAutocompleteViewSet
 from apps.core.medicine_variant_views import MedicineVariantViewSet
 from apps.core.multi_level_unit_conversion_views import MultiLevelUnitConversionViewSet
-from apps.core.supplier_invoice_views import SupplierInvoiceViewSet
-from apps.core.purchase_return_views import PurchaseReturnViewSet
-from apps.core.supplier_credit_note_views import SupplierCreditNoteViewSet
-from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
-from apps.core.auto_reorder_planner_views import AutoReorderPlannerViewSet
 from apps.core.multi_supplier_comparison_views import MultiSupplierComparisonViewSet
-from apps.core.delivery_logistics_views import DeliveryLogisticsViewSet
-from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
-from apps.core.purchase_document_views import PurchaseDocumentViewSet
-from apps.core.supplier_dashboard_views import SupplierDashboardViewSet
-from apps.core.stock_ledger_views import StockLedgerViewSet
-from apps.core.procurement_e2e_qa_views import ProcurementE2EQaViewSet
-from apps.core.warehouse_location_views import WarehouseViewSet, StorageLocationViewSet
-from apps.core.stock_inquiry_views import StockInquiryViewSet
-from apps.core.inventory_count_views import InventoryCountSessionViewSet
 from apps.core.non_divisible_pack_views import NonDivisiblePackViewSet
 from apps.core.non_medicine_retail_views import NonMedicineRetailItemViewSet
 from apps.core.offline_entitlement_views import OfflineEntitlementViewSet
@@ -114,11 +109,31 @@ from apps.core.plan_catalogue_views import (
     TenantEntitlementViewSet,
 )
 from apps.core.platform_access_views import PlatformAccessPolicyViewSet
+from apps.core.pos_domain_views import (
+    PosAntibioticRegisterViewSet,
+    PosCustomerDueViewSet,
+    PosCustomerViewSet,
+    PosDeliveryOrderViewSet,
+    PosInvoiceNumberPolicyViewSet,
+    PosPaymentAttemptViewSet,
+    PosCashierShiftViewSet,
+    PosDailyCloseViewSet,
+    PosSaleReturnViewSet,
+    PosReceiptPrintLogViewSet,
+    PosSaleAllocationViewSet,
+    PosSaleOrderViewSet,
+)
+from apps.core.pos_resilience_views import PosErrorIncidentViewSet
+from apps.core.pos_sales_e2e_qa_views import PosSalesE2EQaViewSet
+from apps.core.pos_search_cart_views import PosFastSearchViewSet
+from apps.core.procurement_e2e_qa_views import ProcurementE2EQaViewSet
 from apps.core.product_metadata_review_views import ProductMetadataReviewViewSet
 from apps.core.prorated_upgrade_views import ProratedUpgradeViewSet
 from apps.core.purchase_cost_lot_views import PurchaseCostLotViewSet
+from apps.core.purchase_document_views import PurchaseDocumentViewSet
 from apps.core.purchase_order_views import PurchaseOrderViewSet
 from apps.core.purchase_requisition_views import PurchaseRequisitionViewSet
+from apps.core.purchase_return_views import PurchaseReturnViewSet
 from apps.core.quota_counter_views import TenantQuotaUsageViewSet
 from apps.core.regulated_stock_entry_views import RegulatedStockEntryViewSet
 from apps.core.regulatory_source_views import RegulatorySourceAttachmentViewSet
@@ -135,31 +150,29 @@ from apps.core.staff_membership_views import (
 )
 from apps.core.staff_offline_auth_views import StaffOfflineAuthorizationViewSet
 from apps.core.staff_performance_views import StaffPerformanceMetricsViewSet
+from apps.core.stock_adjustment_views import StockAdjustmentViewSet
 from apps.core.stock_availability_views import StockAvailabilityViewSet
 from apps.core.stock_correction_views import StockCorrectionViewSet
+from apps.core.stock_inquiry_views import StockInquiryViewSet
+from apps.core.stock_ledger_views import StockLedgerViewSet
+from apps.core.stock_movement_correction_views import StockMovementCorrectionViewSet
+from apps.core.stock_permission_audit_views import StockPermissionAuditViewSet
+from apps.core.stock_quarantine_views import ExpiredStockQuarantineViewSet
+from apps.core.stock_segregation_views import StockSegregationViewSet
 from apps.core.stock_valuation_views import StockValuationViewSet
 from apps.core.storage_conditional_views import StorageConditionalViewSet
+from apps.core.storage_policy_views import StoragePolicyViewSet
 from apps.core.strength_taxonomy_views import StrengthTaxonomyViewSet
 from apps.core.subscription_portal_views import SubscriptionCustomerPortalViewSet
 from apps.core.subscription_support_views import SubscriptionSupportOverrideViewSet
 from apps.core.subscription_views import SubscriptionViewSet
-from apps.core.supplier_invoice_views import SupplierInvoiceViewSet
-from apps.core.purchase_return_views import PurchaseReturnViewSet
 from apps.core.supplier_credit_note_views import SupplierCreditNoteViewSet
-from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
-from apps.core.auto_reorder_planner_views import AutoReorderPlannerViewSet
-from apps.core.multi_supplier_comparison_views import MultiSupplierComparisonViewSet
-from apps.core.delivery_logistics_views import DeliveryLogisticsViewSet
-from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
-from apps.core.purchase_document_views import PurchaseDocumentViewSet
 from apps.core.supplier_dashboard_views import SupplierDashboardViewSet
-from apps.core.stock_ledger_views import StockLedgerViewSet
-from apps.core.procurement_e2e_qa_views import ProcurementE2EQaViewSet
-from apps.core.warehouse_location_views import WarehouseViewSet, StorageLocationViewSet
-from apps.core.stock_inquiry_views import StockInquiryViewSet
-from apps.core.inventory_count_views import InventoryCountSessionViewSet
-from apps.core.stock_adjustment_views import StockAdjustmentViewSet
+from apps.core.supplier_invoice_views import SupplierInvoiceViewSet
 from apps.core.supplier_organization_views import SupplierOrganizationViewSet
+from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
+from apps.core.supply_chain_alert_views import SupplyChainAlertViewSet
+from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
 from apps.core.support_access_views import (
     PlatformSupportAccessViewSet,
     TenantSupportAccessViewSet,
@@ -172,6 +185,10 @@ from apps.core.suppository_views import SuppositoryEditorViewSet
 from apps.core.suspension_reconstitution_views import SuspensionReconstitutionEditorViewSet
 from apps.core.syrup_liquid_views import SyrupLiquidEditorViewSet
 from apps.core.tablet_capsule_views import TabletCapsuleEditorViewSet
+from apps.core.temperature_monitoring_views import (
+    TemperatureLogReadingViewSet,
+    TemperatureMonitoringDeviceViewSet,
+)
 from apps.core.tenant_deletion_views import (
     PlatformDeletionAssessmentViewSet,
     TenantDeletionRequestViewSet,
@@ -184,6 +201,8 @@ from apps.core.tenant_medicine_config_views import TenantMedicineConfigViewSet
 from apps.core.topical_views import TopicalEditorViewSet
 from apps.core.trial_policy_views import TrialPolicyViewSet
 from apps.core.vendor_price_list_views import VendorProductPriceListViewSet
+from apps.core.pharmacist_queue_views import PharmacistReviewQueueViewSet
+from apps.core.prescription_upload_views import PrescriptionAttachmentViewSet
 from apps.core.views import (
     ApiResponseConventionViewSet,
     AsyncJobRecordViewSet,
@@ -210,6 +229,17 @@ from apps.core.views import (
     TimeMoneyStandardsViewSet,
     ValidationContractViewSet,
 )
+from apps.core.compliance_views import (
+    BatchRecallViewSet,
+    BranchDrugLicenseViewSet,
+    ComplianceAuditExportViewSet,
+    InspectionEvidenceViewSet,
+    PcbRegistrationViewSet,
+    PharmacyIncidentViewSet,
+    RegulatoryReferenceViewSet,
+    TemperatureSafetyReviewViewSet,
+)
+from apps.core.warehouse_location_views import StorageLocationViewSet, WarehouseViewSet
 from apps.data_privacy.views import DataPrivacyViewSet
 from apps.developer_toolchain.views import DeveloperQuickstartViewSet
 from apps.environment_governance.views import EnvironmentProfileViewSet
@@ -317,6 +347,35 @@ router.register("inventory/locations", StorageLocationViewSet, basename="invento
 router.register("inventory/stock-inquiry", StockInquiryViewSet, basename="inventory-stock-inquiry")
 router.register("inventory/count-sessions", InventoryCountSessionViewSet, basename="inventory-count-sessions")
 router.register("inventory/adjustments", StockAdjustmentViewSet, basename="inventory-adjustments")
+router.register("inventory/quarantines", ExpiredStockQuarantineViewSet, basename="inventory-quarantines")
+router.register("inventory/segregations", StockSegregationViewSet, basename="inventory-segregations")
+router.register("inventory/transfers", InterBranchTransferViewSet, basename="inventory-transfers")
+router.register("inventory/cold-chain/devices", TemperatureMonitoringDeviceViewSet, basename="cold-chain-devices")
+router.register("inventory/cold-chain/temperature-logs", TemperatureLogReadingViewSet, basename="cold-chain-temperature-logs")
+router.register("inventory/cold-chain/excursions", ColdChainExcursionViewSet, basename="cold-chain-excursions")
+router.register("inventory/storage-policies", StoragePolicyViewSet, basename="inventory-storage-policies")
+router.register("inventory/alerts", SupplyChainAlertViewSet, basename="inventory-alerts")
+router.register("inventory/snapshots", InventorySnapshotViewSet, basename="inventory-snapshots")
+router.register("inventory/valuation-reports", InventoryValuationReportViewSet, basename="inventory-valuation-reports")
+router.register("inventory/movement-corrections", StockMovementCorrectionViewSet, basename="inventory-movement-corrections")
+router.register("inventory/barcode", BarcodeInventoryViewSet, basename="inventory-barcode")
+router.register("inventory/permissions", StockPermissionAuditViewSet, basename="inventory-permissions")
+router.register("inventory/qa-stress", InventoryFaultStressViewSet, basename="inventory-qa-stress")
+router.register("pos/search", PosFastSearchViewSet, basename="pos-search")
+router.register("pos/customers", PosCustomerViewSet, basename="pos-customers")
+router.register("pos/customer-dues", PosCustomerDueViewSet, basename="pos-customer-dues")
+router.register("pos/invoice-policies", PosInvoiceNumberPolicyViewSet, basename="pos-invoice-policies")
+router.register("pos/shifts", PosCashierShiftViewSet, basename="pos-shifts")
+router.register("pos/daily-close", PosDailyCloseViewSet, basename="pos-daily-close")
+router.register("pos/returns", PosSaleReturnViewSet, basename="pos-returns")
+router.register("pos/receipt-logs", PosReceiptPrintLogViewSet, basename="pos-receipt-logs")
+router.register("pos/error-incidents", PosErrorIncidentViewSet, basename="pos-error-incidents")
+router.register("pos/e2e-qa", PosSalesE2EQaViewSet, basename="pos-e2e-qa")
+router.register("pos/sales", PosSaleOrderViewSet, basename="pos-sales")
+router.register("pos/deliveries", PosDeliveryOrderViewSet, basename="pos-deliveries")
+router.register("pos/antibiotic-register", PosAntibioticRegisterViewSet, basename="pos-antibiotic-register")
+router.register("pos/payment-attempts", PosPaymentAttemptViewSet, basename="pos-payment-attempts")
+router.register("pos/allocations", PosSaleAllocationViewSet, basename="pos-allocations")
 router.register("procurement/qa", ProcurementE2EQaViewSet, basename="procurement-qa")
 router.register("suppliers", SupplierViewSet, basename="suppliers")
 router.register("medicines/editor-schema", MedicineEditorSchemaViewSet, basename="medicine-editor-schema")
@@ -341,7 +400,17 @@ router.register("staff/branch-memberships", BranchStaffMembershipViewSet, basena
 router.register("staff/lifecycle", StaffLifecycleViewSet, basename="staff-lifecycle")
 router.register("staff/audit-timeline", StaffAuditTimelineViewSet, basename="staff-audit-timeline")
 router.register("staff", StaffMemberViewSet, basename="staff")
+router.register("prescriptions/review-queue", PharmacistReviewQueueViewSet, basename="pharmacist-review-queue")
 router.register("prescriptions", PrescriptionRecordViewSet, basename="prescription")
+router.register("prescription-attachments", PrescriptionAttachmentViewSet, basename="prescription-attachment")
+router.register("compliance/drug-licenses", BranchDrugLicenseViewSet, basename="branch-drug-licenses")
+router.register("compliance/pcb-registrations", PcbRegistrationViewSet, basename="pcb-registrations")
+router.register("compliance/inspection-evidence", InspectionEvidenceViewSet, basename="inspection-evidence")
+router.register("compliance/incidents", PharmacyIncidentViewSet, basename="pharmacy-incidents")
+router.register("compliance/recalls", BatchRecallViewSet, basename="batch-recalls")
+router.register("compliance/temperature-reviews", TemperatureSafetyReviewViewSet, basename="temperature-safety-reviews")
+router.register("compliance/audit-exports", ComplianceAuditExportViewSet, basename="compliance-audit-exports")
+router.register("compliance/regulatory-references", RegulatoryReferenceViewSet, basename="compliance-regulatory-references")
 router.register("payments", PaymentTransactionViewSet, basename="payment")
 router.register("audit-logs", AuditLogEntryViewSet, basename="audit-log")
 router.register("developer/quickstart", DeveloperQuickstartViewSet, basename="developer-quickstart")

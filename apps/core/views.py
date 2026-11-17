@@ -39,6 +39,10 @@ from apps.core.pagination import (
     UnicodePhoneticSearchFilter,
     ValidatedQueryFilterBackend,
 )
+from apps.core.prescription_service import PrescriptionService
+from apps.core.prescription_upload_service import PrescriptionUploadService
+from apps.core.prescription_validity_service import PrescriptionValidityService
+from apps.core.rx_matching_service import RxItemMatchingService
 from apps.core.responses import StandardResponseMixin
 from apps.core.serializers import (
     AsyncJobRecordSerializer,
@@ -49,8 +53,15 @@ from apps.core.serializers import (
     DailyBranchAnalyticsSerializer,
     MedicineProductSerializer,
     PaymentTransactionSerializer,
+    PrescriptionAttachmentSerializer,
+    PrescriptionDispenseInputSerializer,
+    PrescriptionDispenseRecordSerializer,
     PrescriptionRecordSerializer,
+    PrescriptionValidityRejectInputSerializer,
     PrescriptionVerificationRequestSerializer,
+    RxItemDispenseReverseSerializer,
+    RxItemMatchCommitSerializer,
+    RxItemMatchRequestSerializer,
     SaleCheckoutRequestSerializer,
     SaleInvoiceSerializer,
     StaffMemberSerializer,
@@ -1002,24 +1013,88 @@ class StaffMemberViewSet(viewsets.ModelViewSet):
 
 
 class PrescriptionRecordViewSet(viewsets.ModelViewSet):
-    """Manages clinical prescriptions and pharmacist verification sign-off (ADR-0010 & ADR-0033)."""
+    """
+    Manages clinical prescriptions, BMDC doctor details, expiry compliance,
+    pharmacist PCB sign-off, and audited dispensing (ADR-0010, ADR-0033 & ADR-0241).
+    """
 
     queryset = PrescriptionRecord.objects.all()
     serializer_class = PrescriptionRecordSerializer
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        tenant_id = self.request.query_params.get("tenant_id")
-        if tenant_id:
-            qs = qs.filter(tenant_id=tenant_id)
+        user = self.request.user
+        qs = PrescriptionRecord.objects.all().prefetch_related("items", "items__product")
+
+        # Multi-tenant scoping: non-superusers can only access their own tenant's prescriptions
+        if not getattr(user, "is_superuser", False) and getattr(user, "is_authenticated", False):
+            user_tenant_id = getattr(user, "tenant_id", None) or getattr(getattr(user, "tenant", None), "tenant_id", None)
+            if not user_tenant_id:
+                return PrescriptionRecord.objects.none()
+            qs = qs.filter(tenant__tenant_id=user_tenant_id)
+        else:
+            tenant_id = self.request.query_params.get("tenant_id")
+            if tenant_id:
+                qs = qs.filter(tenant_id=tenant_id)
+
         branch_id = self.request.query_params.get("branch_id")
         if branch_id:
             qs = qs.filter(branch_id=branch_id)
+
         rx_status = self.request.query_params.get("status")
         if rx_status:
             qs = qs.filter(status=rx_status.upper())
+
+        patient_token = self.request.query_params.get("patient_token")
+        if patient_token:
+            qs = qs.filter(patient_token=patient_token)
+
+        doctor_bmdc = self.request.query_params.get("doctor_bmdc_no")
+        if doctor_bmdc:
+            qs = qs.filter(doctor_bmdc_no__icontains=doctor_bmdc)
+
         return qs
+
+    def create(self, request, *args, **kwargs):
+        """
+        POST /api/v2/prescriptions/ — Create a prescription with validated doctor info,
+        synthetic patient token, and prescribed medicine items.
+        """
+        user = request.user
+        data = request.data
+        items_data = data.get("items_data") or data.get("items") or []
+
+        rx = PrescriptionService.create_prescription(
+            user,
+            doctor_name=data.get("doctor_name", ""),
+            doctor_bmdc_no=data.get("doctor_bmdc_no", ""),
+            patient_token=data.get("patient_token", ""),
+            prescription_date=data.get("prescription_date"),
+            expiry_date=data.get("expiry_date"),
+            patient_age=data.get("patient_age"),
+            patient_gender=data.get("patient_gender", "UNKNOWN"),
+            diagnosis=data.get("diagnosis", ""),
+            doctor_workplace=data.get("doctor_workplace", ""),
+            prescriber_contact=data.get("prescriber_contact", ""),
+            notes=data.get("notes", ""),
+            customer_id=data.get("customer_id") or data.get("customer"),
+            branch_id=data.get("branch_id") or data.get("branch"),
+            items_data=items_data,
+        )
+        serializer = self.get_serializer(rx)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Absolute Block: Prohibit hard deletion of clinical prescriptions.
+        """
+        return Response(
+            {
+                "error": "Absolute Block: Clinical prescription records cannot be deleted or purged (ADR-0010, ADR-0056).",
+                "code": "PROHIBITED_CLINICAL_RECORD_DELETION",
+            },
+            status=status.HTTP_405_METHOD_NOT_ALLOWED,
+        )
 
     @action(detail=True, methods=["post"], url_path="verify")
     def verify_prescription(self, request, pk=None):
@@ -1067,6 +1142,172 @@ class PrescriptionRecordViewSet(viewsets.ModelViewSet):
 
         out_serializer = self.get_serializer(prescription)
         return Response(out_serializer.data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="dispense")
+    def dispense_item(self, request, pk=None):
+        """
+        POST /api/v2/prescriptions/{id}/dispense/ — Record audited dispensing of a prescription line item.
+        """
+        prescription = self.get_object()
+        serializer = PrescriptionDispenseInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        dispense_record = PrescriptionService.dispense_item(
+            request.user,
+            prescription_id=prescription.prescription_id,
+            item_id=data["item_id"],
+            quantity=data["quantity"],
+            sale_order_id=data.get("sale_order_id"),
+            batch_stock_id=data.get("batch_stock_id"),
+            notes=data.get("notes", ""),
+        )
+        out_serializer = PrescriptionDispenseRecordSerializer(dispense_record)
+        return Response(out_serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["post"], url_path="cancel")
+    def cancel_prescription(self, request, pk=None):
+        """
+        POST /api/v2/prescriptions/{id}/cancel/ — Audited cancellation of an un-dispensed prescription.
+        """
+        prescription = self.get_object()
+        reason = request.data.get("reason", "")
+        rx = PrescriptionService.cancel_prescription(
+            request.user,
+            prescription_id=prescription.prescription_id,
+            reason=reason,
+        )
+        return Response(self.get_serializer(rx).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="upload-attachment")
+    def upload_attachment(self, request, pk=None):
+        """
+        POST /api/v2/prescriptions/{id}/upload-attachment/ — Upload an encrypted prescription scan/document.
+        """
+        prescription = self.get_object()
+        uploaded_file = request.FILES.get("file")
+
+        if not uploaded_file:
+            raw_content = request.body
+            if not raw_content:
+                return Response(
+                    {"file": ["A file attachment is required (multipart 'file' or binary body)."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            content = raw_content
+            filename = request.data.get("file_name", "prescription_scan.jpg")
+            declared_mime = request.content_type or "image/jpeg"
+        else:
+            content = uploaded_file.read()
+            filename = uploaded_file.name
+            declared_mime = uploaded_file.content_type or "image/jpeg"
+
+        notes = request.data.get("notes", "")
+        retention_days = request.data.get("retention_days")
+
+        attachment = PrescriptionUploadService.upload_attachment(
+            request.user,
+            prescription_id=prescription.prescription_id,
+            filename=filename,
+            content=content,
+            declared_mime=declared_mime,
+            notes=notes,
+            retention_days=retention_days,
+        )
+        return Response(PrescriptionAttachmentSerializer(attachment).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["get"], url_path="attachments")
+    def list_attachments(self, request, pk=None):
+        """
+        GET /api/v2/prescriptions/{id}/attachments/ — List all attachments for this prescription.
+        """
+        prescription = self.get_object()
+        attachments = prescription.attachments.select_related("file_record", "uploaded_by", "verified_by").all()
+        return Response(PrescriptionAttachmentSerializer(attachments, many=True).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get", "post"], url_path="check-validity")
+    def check_validity(self, request, pk=None):
+        """
+        GET/POST /api/v2/prescriptions/{id}/check-validity/
+        Evaluates prescriber BMDC credentials, expiry bounds, and supporting document completeness (ADR-0244).
+        """
+        prescription = self.get_object()
+        report = PrescriptionValidityService.evaluate_prescription_validity(prescription, update_record=True)
+        return Response(report, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="reject-validity")
+    def reject_validity(self, request, pk=None):
+        """
+        POST /api/v2/prescriptions/{id}/reject-validity/
+        Pharmacist rejection of an invalid, expired, or document-deficient prescription (ADR-0244).
+        """
+        prescription = self.get_object()
+        serializer = PrescriptionValidityRejectInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        rx = PrescriptionValidityService.reject_invalid_prescription(
+            prescription_id=prescription.prescription_id,
+            tenant_id=str(prescription.tenant_id),
+            user=request.user,
+            reason=data["reason"],
+            clinical_notes=data.get("clinical_notes", ""),
+        )
+        return Response(self.get_serializer(rx).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="match-items")
+    def match_items(self, request, pk=None):
+        """
+        POST /api/v2/prescriptions/{id}/match-items/
+        Preflight verification of cart items against authorized prescription items without automated substitution (ADR-0245).
+        """
+        prescription = self.get_object()
+        serializer = RxItemMatchRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        tenant_id = getattr(request.user, "tenant_id", None) or getattr(getattr(request.user, "tenant", None), "tenant_id", None)
+        res = RxItemMatchingService.match_sale_items_preflight(
+            prescription=prescription,
+            cart_items=serializer.validated_data["items"],
+            tenant_id=str(tenant_id or prescription.tenant_id),
+        )
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="commit-matching")
+    def commit_matching(self, request, pk=None):
+        """
+        POST /api/v2/prescriptions/{id}/commit-matching/
+        Atomically commits matched Rx items, records item dispenses, and updates prescription status (ADR-0245).
+        """
+        prescription = self.get_object()
+        serializer = RxItemMatchCommitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        res = RxItemMatchingService.commit_rx_item_dispenses(
+            request.user,
+            prescription_id=prescription.prescription_id,
+            sale_order_id=data.get("sale_order_id") or None,
+            dispense_lines=data["items"],
+            notes=data.get("notes", ""),
+        )
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="reverse-dispense")
+    def reverse_dispense(self, request, pk=None):
+        """
+        POST /api/v2/prescriptions/{id}/reverse-dispense/
+        Audited reversal of a previously recorded dispense (e.g. POS sales return/void) (ADR-0245).
+        """
+        prescription = self.get_object()
+        serializer = RxItemDispenseReverseSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        res = RxItemMatchingService.reverse_rx_item_dispenses(
+            request.user,
+            prescription_id=prescription.prescription_id,
+            dispense_id=data["dispense_id"],
+            reverse_quantity=data.get("reverse_quantity"),
+            reason=data["reason"],
+        )
+        return Response(res, status=status.HTTP_200_OK)
 
 
 class PaymentTransactionViewSet(viewsets.ModelViewSet):
