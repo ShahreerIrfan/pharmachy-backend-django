@@ -26769,6 +26769,82 @@ class OfflineOutboxCommandReceipt(models.Model):
         super().save(*args, **kwargs)
 
 
+class CloudPushBatchStatus(models.TextChoices):
+    COMPLETED = "COMPLETED", "Completed Cleanly"
+    PARTIAL_CONFLICT = "PARTIAL_CONFLICT", "Completed with Conflict Queue Items"
+    REJECTED = "REJECTED", "Rejected"
+
+
+class CloudSyncPushBatch(models.Model):
+    """
+    Architecture Decision: ADR-0305 (P305).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Audited ledger of signed HTTPS cloud sync push batches enforcing bounded batch sizes,
+    monotonic ordered events, event versioning, HMAC-SHA256 device identity verification,
+    and batch-level idempotency.
+    """
+
+    push_batch_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="cloud_sync_push_batches")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="cloud_sync_push_batches")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="push_batches",
+    )
+    client_batch_id = models.CharField(max_length=80, db_index=True)
+    protocol_version = models.PositiveSmallIntegerField(default=1)
+    event_count = models.PositiveIntegerField(default=0)
+    accepted_count = models.PositiveIntegerField(default=0)
+    duplicate_count = models.PositiveIntegerField(default=0)
+    conflict_count = models.PositiveIntegerField(default=0)
+    events_sha256 = models.CharField(max_length=64)
+    signature_verified = models.BooleanField(default=True)
+    status = models.CharField(
+        max_length=24,
+        choices=CloudPushBatchStatus.choices,
+        default=CloudPushBatchStatus.COMPLETED,
+        db_index=True,
+    )
+    pushed_at = models.DateTimeField()
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="submitted_push_batches",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Cloud Sync Push Batch"
+        verbose_name_plural = "Cloud Sync Push Batches"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "-created_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["device_registration", "client_batch_id"],
+                name="uq_cloud_push_device_client_batch",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(event_count__gte=1) & models.Q(event_count__lte=50),
+                name="chk_cloud_push_bounded_batch_1_50",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.push_batch_id:
+            self.push_batch_id = f"pushb-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 
 
 
