@@ -19,6 +19,53 @@ from apps.identity.models import UserRole
 
 logger = logging.getLogger("pharmacy.core.manufacturer_supplier")
 
+SUPPLIER_VIEW_ROLES = {
+    UserRole.PHARMACY_OWNER,
+    UserRole.BRANCH_MANAGER,
+    UserRole.STAFF_PHARMACIST,
+    UserRole.INVENTORY_CLERK,
+    UserRole.FINANCE_OFFICER,
+    UserRole.AUDITOR,
+    UserRole.SUPERADMIN,
+    "PHARMACY_OWNER",
+    "BRANCH_MANAGER",
+    "STAFF_PHARMACIST",
+    "INVENTORY_CLERK",
+    "FINANCE_OFFICER",
+    "AUDITOR",
+    "SUPERADMIN",
+    "OWNER_ADMIN",
+    "ADMIN",
+    "PROCUREMENT_OFFICER",
+}
+
+SUPPLIER_MANAGE_ROLES = {
+    UserRole.PHARMACY_OWNER,
+    UserRole.BRANCH_MANAGER,
+    UserRole.INVENTORY_CLERK,
+    UserRole.FINANCE_OFFICER,
+    UserRole.SUPERADMIN,
+    "PHARMACY_OWNER",
+    "BRANCH_MANAGER",
+    "INVENTORY_CLERK",
+    "FINANCE_OFFICER",
+    "SUPERADMIN",
+    "OWNER_ADMIN",
+    "ADMIN",
+    "PROCUREMENT_OFFICER",
+}
+
+SUPPLIER_ADMIN_ROLES = {
+    UserRole.PHARMACY_OWNER,
+    UserRole.BRANCH_MANAGER,
+    UserRole.SUPERADMIN,
+    "PHARMACY_OWNER",
+    "BRANCH_MANAGER",
+    "SUPERADMIN",
+    "OWNER_ADMIN",
+    "ADMIN",
+}
+
 
 class ManufacturerSupplierService:
     """
@@ -202,6 +249,75 @@ class ManufacturerSupplierService:
     # ==========================================
 
     @classmethod
+    def _assert_view_role(cls, actor_user: Any) -> None:
+        if not actor_user or not getattr(actor_user, "is_authenticated", False):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_UNAUTHENTICATED",
+                    "message_en": "Authentication required to view suppliers.",
+                    "message_bn": "সরবরাহকারী তালিকা দেখার জন্য লগইন আবশ্যক।",
+                }
+            )
+        if getattr(actor_user, "is_superuser", False):
+            return
+        role = getattr(actor_user, "role", None)
+        if role in [UserRole.CASHIER, "CASHIER"] or role not in SUPPLIER_VIEW_ROLES:
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_STAFF_ROLE_DENIED",
+                    "message_en": "Cashier and unauthorized staff are not permitted to view supplier directory.",
+                    "message_bn": "ক্যাশিয়ার বা অননুমোদিত কর্মী সরবরাহকারী তালিকা দেখার অনুমতিপ্রাপ্ত নন।",
+                }
+            )
+
+    @classmethod
+    def _assert_manage_role(cls, actor_user: Any) -> None:
+        if not actor_user or not getattr(actor_user, "is_authenticated", False):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_UNAUTHENTICATED",
+                    "message_en": "Authentication required to manage suppliers.",
+                    "message_bn": "সরবরাহকারী পরিবর্তনের জন্য লগইন আবশ্যক।",
+                }
+            )
+        if getattr(actor_user, "is_superuser", False):
+            return
+        role = getattr(actor_user, "role", None)
+        if (
+            role in [UserRole.CASHIER, "CASHIER", UserRole.STAFF_PHARMACIST, "STAFF_PHARMACIST"]
+            or role not in SUPPLIER_MANAGE_ROLES
+        ):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_STAFF_ROLE_DENIED",
+                    "message_en": "Cashier and staff pharmacist are not permitted to register or modify suppliers.",
+                    "message_bn": "ক্যাশিয়ার বা স্টাফ ফার্মাসিস্ট সরবরাহকারী তৈরি বা পরিবর্তন করার অনুমতিপ্রাপ্ত নন।",
+                }
+            )
+
+    @classmethod
+    def _assert_admin_role(cls, actor_user: Any) -> None:
+        if not actor_user or not getattr(actor_user, "is_authenticated", False):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_UNAUTHENTICATED",
+                    "message_en": "Authentication required for administrative actions.",
+                    "message_bn": "প্রশাসনিক কার্যক্রমের জন্য লগইন আবশ্যক।",
+                }
+            )
+        if getattr(actor_user, "is_superuser", False):
+            return
+        role = getattr(actor_user, "role", None)
+        if role not in SUPPLIER_ADMIN_ROLES:
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_STAFF_ROLE_DENIED",
+                    "message_en": "Only pharmacy owners and branch managers are permitted to merge or archive suppliers.",
+                    "message_bn": "কেবলমাত্র ফার্মেসি মালিক ও শাখা ব্যবস্থাপক সরবরাহকারী মার্জ বা আর্কাইভ করতে পারবেন।",
+                }
+            )
+
+    @classmethod
     def serialize_supplier(cls, s: Supplier) -> Dict[str, Any]:
         return {
             "entity_type": "SUPPLIER",
@@ -230,7 +346,10 @@ class ManufacturerSupplierService:
         tenant_id: str,
         search: Optional[str] = None,
         is_active: Optional[bool] = None,
+        actor_user: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
+        if actor_user is not None:
+            cls._assert_view_role(actor_user)
         qs = Supplier.objects.filter(tenant_id=tenant_id)
         if is_active is not None:
             qs = qs.filter(is_active=is_active)
@@ -246,7 +365,14 @@ class ManufacturerSupplierService:
         return [cls.serialize_supplier(s) for s in qs]
 
     @classmethod
-    def get_supplier(cls, tenant_id: str, supplier_id: str) -> Dict[str, Any]:
+    def get_supplier(
+        cls,
+        tenant_id: str,
+        supplier_id: str,
+        actor_user: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        if actor_user is not None:
+            cls._assert_view_role(actor_user)
         s = Supplier.objects.filter(supplier_id=supplier_id).first()
         if not s:
             raise ValidationError(
@@ -256,7 +382,7 @@ class ManufacturerSupplierService:
                     "message_bn": f"সরবরাহকারী প্রতিষ্ঠান '{supplier_id}' পাওয়া যায়নি।",
                 }
             )
-        if s.tenant_id != tenant_id:
+        if str(s.tenant_id) != str(tenant_id):
             raise PermissionDenied(
                 {
                     "error_code": "ERR_CROSS_TENANT_ACCESS",
@@ -268,15 +394,7 @@ class ManufacturerSupplierService:
 
     @classmethod
     def create_supplier(cls, tenant_id: str, actor_user, data: Dict[str, Any]) -> Dict[str, Any]:
-        role = getattr(actor_user, "role", "")
-        if role in [UserRole.CASHIER]:
-            raise PermissionDenied(
-                {
-                    "error_code": "ERR_STAFF_ROLE_DENIED",
-                    "message_en": "Cashier role is not permitted to register new suppliers.",
-                    "message_bn": "ক্যাশিয়ার নতুন সরবরাহকারী নিবন্ধনের অনুমতিপ্রাপ্ত নন।",
-                }
-            )
+        cls._assert_manage_role(actor_user)
 
         name = data.get("name", "").strip()
         if not name:
@@ -315,6 +433,46 @@ class ManufacturerSupplierService:
         return cls.serialize_supplier(s)
 
     @classmethod
+    def update_supplier(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        supplier_id: str,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        cls._assert_manage_role(actor_user)
+        s = Supplier.objects.filter(supplier_id=supplier_id).first()
+        if not s:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_SUPPLIER_NOT_FOUND",
+                    "message_en": f"Supplier '{supplier_id}' not found.",
+                }
+            )
+        if str(s.tenant_id) != str(tenant_id):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_CROSS_TENANT_ACCESS",
+                    "message_en": "Cross-tenant supplier operation forbidden.",
+                }
+            )
+        if "name" in data:
+            new_name = str(data["name"]).strip()
+            if not new_name:
+                raise ValidationError({"error_code": "ERR_MISSING_SUPPLIER_NAME", "message_en": "Supplier name cannot be empty."})
+            s.name = new_name
+        if "contact_person" in data:
+            s.contact_person = str(data["contact_person"]).strip()
+        if "phone" in data:
+            s.phone = str(data["phone"]).strip()
+        if "email" in data:
+            s.email = str(data["email"]).strip()
+        if "address" in data:
+            s.address = str(data["address"]).strip()
+        s.save()
+        return cls.serialize_supplier(s)
+
+    @classmethod
     def merge_suppliers(
         cls,
         tenant_id: str,
@@ -324,17 +482,9 @@ class ManufacturerSupplierService:
         reason: str = "Consolidation of duplicate supplier entries",
     ) -> Dict[str, Any]:
         """Merges duplicate supplier into a canonical survivor within tenant boundary."""
-        role = getattr(actor_user, "role", "")
-        if role in [UserRole.CASHIER]:
-            raise PermissionDenied(
-                {
-                    "error_code": "ERR_STAFF_ROLE_DENIED",
-                    "message_en": "Cashier role is not permitted to merge suppliers.",
-                    "message_bn": "ক্যাশিয়ার সরবরাহকারী মার্জ করার অনুমতিপ্রাপ্ত নন।",
-                }
-            )
+        cls._assert_admin_role(actor_user)
 
-        if source_id == target_id:
+        if str(source_id).strip() == str(target_id).strip():
             raise ValidationError(
                 {
                     "error_code": "ERR_CANNOT_MERGE_SELF",
@@ -352,7 +502,7 @@ class ManufacturerSupplierService:
             raise ValidationError({"error_code": "ERR_TARGET_NOT_FOUND", "message_en": "Target supplier not found."})
 
         # STRICT TENANT ISOLATION CHECK
-        if source.tenant_id != tenant_id or target.tenant_id != tenant_id:
+        if str(source.tenant_id) != str(tenant_id) or str(target.tenant_id) != str(tenant_id):
             raise PermissionDenied(
                 {
                     "error_code": "ERR_CROSS_TENANT_ACCESS",
@@ -371,10 +521,11 @@ class ManufacturerSupplierService:
             )
 
         source.merged_into = target
+        source.status = "INACTIVE"
         source.is_active = False
         source.merge_reason = reason
         source.merged_at = timezone.now()
-        source.save(update_fields=["merged_into", "is_active", "merge_reason", "merged_at", "updated_at"])
+        source.save(update_fields=["merged_into", "status", "is_active", "merge_reason", "merged_at", "updated_at"])
 
         return {
             "entity_type": "SUPPLIER",
@@ -391,21 +542,13 @@ class ManufacturerSupplierService:
     @classmethod
     def archive_supplier(cls, tenant_id: str, actor_user, supplier_id: str) -> Dict[str, Any]:
         """Soft-deletes / archives a supplier."""
-        role = getattr(actor_user, "role", "")
-        if role in [UserRole.CASHIER]:
-            raise PermissionDenied(
-                {
-                    "error_code": "ERR_STAFF_ROLE_DENIED",
-                    "message_en": "Cashier role is not permitted to archive suppliers.",
-                    "message_bn": "ক্যাশিয়ার সরবরাহকারী নিষ্ক্রিয় করার অনুমতিপ্রাপ্ত নন।",
-                }
-            )
+        cls._assert_admin_role(actor_user)
 
         s = Supplier.objects.filter(supplier_id=supplier_id).first()
         if not s:
             raise ValidationError({"error_code": "ERR_SUPPLIER_NOT_FOUND", "message_en": "Supplier not found."})
 
-        if s.tenant_id != tenant_id:
+        if str(s.tenant_id) != str(tenant_id):
             raise PermissionDenied(
                 {
                     "error_code": "ERR_CROSS_TENANT_ACCESS",
@@ -414,6 +557,7 @@ class ManufacturerSupplierService:
                 }
             )
 
+        s.status = "INACTIVE"
         s.is_active = False
-        s.save(update_fields=["is_active", "updated_at"])
+        s.save(update_fields=["status", "is_active", "updated_at"])
         return cls.serialize_supplier(s)

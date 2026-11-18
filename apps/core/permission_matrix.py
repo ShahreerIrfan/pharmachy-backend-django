@@ -2141,7 +2141,7 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
     ),
     # 21. Phase 12 POS Approved Customer Credit Sales, Receivables & Due Collection (P230)
     EndpointPermissionRule(
-        path_pattern=r"^/api/v2/pos/(?:customer-dues/(?:[^/]+/)?|customers/[^/]+/(?:ledger|purchase-history)/?)$",
+        path_pattern=r"^/api/v2/pos/(?:customer-dues/(?:[^/]+/)?|customers/[^/]+/(?:ledger|purchase-history|credit-eligibility|receivable-statement|statement)/?|credit-eligibility/(?:policy|check)/?|receivable-ledger/statement/?|partial-collections/history/?|statements/generate/?)$",
         method="GET",
         allowed_roles=[
             UserRole.SUPERADMIN,
@@ -2156,7 +2156,7 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         min_plan=PlanTier.STANDARD,
     ),
     EndpointPermissionRule(
-        path_pattern=r"^/api/v2/pos/customer-dues/[^/]+/collect/?$",
+        path_pattern=r"^/api/v2/pos/credit-eligibility/check/?$",
         method="POST",
         allowed_roles=[
             UserRole.SUPERADMIN,
@@ -2170,7 +2170,45 @@ ENDPOINT_PERMISSION_RULES: List[EndpointPermissionRule] = [
         min_plan=PlanTier.STANDARD,
     ),
     EndpointPermissionRule(
-        path_pattern=r"^/api/v2/pos/(?:customers/[^/]+/(?:approve-credit|suspend-credit)|customer-dues/(?:[^/]+/write-off|collections/[^/]+/reverse))/?$",
+        path_pattern=r"^/api/v2/pos/credit-eligibility/policy/?$",
+        method="PUT",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.FINANCE_OFFICER,
+        ],
+        scope=ScopeLevel.BRANCH,
+        min_plan=PlanTier.STANDARD,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/pos/credit-eligibility/policy/?$",
+        method="PATCH",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.FINANCE_OFFICER,
+        ],
+        scope=ScopeLevel.BRANCH,
+        min_plan=PlanTier.STANDARD,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/pos/(?:customer-dues/[^/]+/collect|partial-collections/(?:apply-invoice|apply-multi)|statements/(?:generate|[^/]+/print))/?$",
+        method="POST",
+        allowed_roles=[
+            UserRole.SUPERADMIN,
+            UserRole.PHARMACY_OWNER,
+            UserRole.BRANCH_MANAGER,
+            UserRole.STAFF_PHARMACIST,
+            UserRole.CASHIER,
+            UserRole.FINANCE_OFFICER,
+        ],
+        scope=ScopeLevel.BRANCH,
+        min_plan=PlanTier.STANDARD,
+    ),
+    EndpointPermissionRule(
+        path_pattern=r"^/api/v2/pos/(?:customers/[^/]+/(?:approve-credit|suspend-credit)|customer-dues/(?:[^/]+/write-off|collections/[^/]+/reverse)|receivable-ledger/(?:adjustment|reversal)|partial-collections/[^/]+/reverse)/?$",
         method="POST",
         allowed_roles=[
             UserRole.SUPERADMIN,

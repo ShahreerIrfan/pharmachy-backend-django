@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 
 from apps.audit_logging.models import AuditActionStatus, AuditLogEntry
@@ -52,6 +53,53 @@ ALLOWED_PROCUREMENT_ROLES = {
     "AUDITOR",
 }
 
+SUPPLIER_VIEW_ROLES = {
+    UserRole.PHARMACY_OWNER,
+    UserRole.BRANCH_MANAGER,
+    UserRole.STAFF_PHARMACIST,
+    UserRole.INVENTORY_CLERK,
+    UserRole.FINANCE_OFFICER,
+    UserRole.AUDITOR,
+    UserRole.SUPERADMIN,
+    "PHARMACY_OWNER",
+    "BRANCH_MANAGER",
+    "STAFF_PHARMACIST",
+    "INVENTORY_CLERK",
+    "FINANCE_OFFICER",
+    "AUDITOR",
+    "SUPERADMIN",
+    "OWNER_ADMIN",
+    "ADMIN",
+    "PROCUREMENT_OFFICER",
+}
+
+SUPPLIER_MANAGE_ROLES = {
+    UserRole.PHARMACY_OWNER,
+    UserRole.BRANCH_MANAGER,
+    UserRole.INVENTORY_CLERK,
+    UserRole.FINANCE_OFFICER,
+    UserRole.SUPERADMIN,
+    "PHARMACY_OWNER",
+    "BRANCH_MANAGER",
+    "INVENTORY_CLERK",
+    "FINANCE_OFFICER",
+    "SUPERADMIN",
+    "OWNER_ADMIN",
+    "ADMIN",
+    "PROCUREMENT_OFFICER",
+}
+
+SUPPLIER_ADMIN_ROLES = {
+    UserRole.PHARMACY_OWNER,
+    UserRole.BRANCH_MANAGER,
+    UserRole.SUPERADMIN,
+    "PHARMACY_OWNER",
+    "BRANCH_MANAGER",
+    "SUPERADMIN",
+    "OWNER_ADMIN",
+    "ADMIN",
+}
+
 
 class SupplierOrganizationService:
     """
@@ -60,17 +108,81 @@ class SupplierOrganizationService:
     """
 
     @classmethod
-    def _assert_procurement_role(cls, actor_user: Any) -> None:
+    def _assert_view_role(cls, actor_user: Any) -> None:
+        """Enforces VIEW permissions for supplier directories and ledgers."""
+        if not actor_user or not getattr(actor_user, "is_authenticated", False):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_UNAUTHENTICATED",
+                    "detail": "Authentication required to view supplier organizations.",
+                }
+            )
+        if getattr(actor_user, "is_superuser", False):
+            return
         role = getattr(actor_user, "role", None)
-        if role in [UserRole.CASHIER, "CASHIER"] or (role not in ALLOWED_PROCUREMENT_ROLES and not getattr(actor_user, "is_superuser", False)):
+        if role in [UserRole.CASHIER, "CASHIER"] or role not in SUPPLIER_VIEW_ROLES:
             raise PermissionDenied(
                 {
                     "error_code": "ERR_STAFF_ROLE_DENIED",
-                    "detail": "Cashier and unauthorized staff are not permitted to manage supplier organizations.",
-                    "message_en": "Cashier and unauthorized staff are not permitted to manage supplier organizations.",
-                    "message_bn": "ক্যাশিয়ার বা অননুমোদিত কর্মী সরবরাহকারী প্রতিষ্ঠান ব্যবস্থাপনার অনুমতিপ্রাপ্ত নন।",
+                    "detail": "Cashier and unauthorized staff are not permitted to view supplier organizations.",
+                    "message_en": "Cashier and unauthorized staff are not permitted to view supplier organizations.",
+                    "message_bn": "ক্যাশিয়ার বা অননুমোদিত কর্মী সরবরাহকারী প্রতিষ্ঠান দেখার অনুমতিপ্রাপ্ত নন।",
                 }
             )
+
+    @classmethod
+    def _assert_manage_role(cls, actor_user: Any) -> None:
+        """Enforces CREATE / MODIFY permissions for supplier organizations."""
+        if not actor_user or not getattr(actor_user, "is_authenticated", False):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_UNAUTHENTICATED",
+                    "detail": "Authentication required to manage supplier organizations.",
+                }
+            )
+        if getattr(actor_user, "is_superuser", False):
+            return
+        role = getattr(actor_user, "role", None)
+        if (
+            role in [UserRole.CASHIER, "CASHIER", UserRole.STAFF_PHARMACIST, "STAFF_PHARMACIST"]
+            or role not in SUPPLIER_MANAGE_ROLES
+        ):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_STAFF_ROLE_DENIED",
+                    "detail": "Cashier and staff pharmacist are not permitted to create or modify supplier organizations.",
+                    "message_en": "Cashier and staff pharmacist are not permitted to create or modify supplier organizations.",
+                    "message_bn": "ক্যাশিয়ার বা স্টাফ ফার্মাসিস্ট সরবরাহকারী তৈরি বা পরিবর্তন করার অনুমতিপ্রাপ্ত নন।",
+                }
+            )
+
+    @classmethod
+    def _assert_admin_role(cls, actor_user: Any) -> None:
+        """Enforces MERGE / ARCHIVE / DELETE administrative permissions."""
+        if not actor_user or not getattr(actor_user, "is_authenticated", False):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_UNAUTHENTICATED",
+                    "detail": "Authentication required for administrative supplier actions.",
+                }
+            )
+        if getattr(actor_user, "is_superuser", False):
+            return
+        role = getattr(actor_user, "role", None)
+        if role not in SUPPLIER_ADMIN_ROLES:
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_STAFF_ROLE_DENIED",
+                    "detail": "Only pharmacy owners and branch managers are permitted to merge or delete suppliers.",
+                    "message_en": "Only pharmacy owners and branch managers are permitted to merge or delete suppliers.",
+                    "message_bn": "কেবলমাত্র ফার্মেসি মালিক ও শাখা ব্যবস্থাপক সরবরাহকারী মার্জ বা মুছে ফেলার অনুমতিপ্রাপ্ত।",
+                }
+            )
+
+    @classmethod
+    def _assert_procurement_role(cls, actor_user: Any) -> None:
+        """Legacy compatibility wrapper enforcing manage role."""
+        cls._assert_manage_role(actor_user)
 
     @classmethod
     def _assert_tenant_active(cls, tenant_id: str) -> Tenant:
@@ -164,7 +276,10 @@ class SupplierOrganizationService:
         region: Optional[str] = None,
         status: Optional[str] = None,
         is_active: Optional[bool] = None,
+        actor_user: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
+        if actor_user is not None:
+            cls._assert_view_role(actor_user)
         cls._assert_tenant_active(tenant_id)
         qs = Supplier.objects.filter(tenant_id=tenant_id)
         if is_active is not None:
@@ -189,7 +304,14 @@ class SupplierOrganizationService:
         return [cls.serialize_supplier(s) for s in qs.order_by("name")]
 
     @classmethod
-    def get_supplier(cls, tenant_id: str, supplier_id: str) -> Dict[str, Any]:
+    def get_supplier(
+        cls,
+        tenant_id: str,
+        supplier_id: str,
+        actor_user: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        if actor_user is not None:
+            cls._assert_view_role(actor_user)
         cls._assert_tenant_active(tenant_id)
         s = Supplier.objects.filter(supplier_id=supplier_id).first()
         if not s:
@@ -426,7 +548,7 @@ class SupplierOrganizationService:
     @classmethod
     def archive_or_delete_supplier(cls, tenant_id: str, actor_user: Any, supplier_id: str) -> Dict[str, Any]:
         """Soft-deletes / archives a supplier organization, guarded against outstanding AP balance."""
-        cls._assert_procurement_role(actor_user)
+        cls._assert_admin_role(actor_user)
         tenant = cls._assert_tenant_active(tenant_id)
 
         supplier = Supplier.objects.filter(supplier_id=supplier_id).first()
@@ -478,92 +600,195 @@ class SupplierOrganizationService:
         Posts an atomic, immutable accounts payable ledger entry with exact Decimal(14, 4) precision.
         Updates supplier's current_balance.
         """
-        cls._assert_procurement_role(actor_user)
+        from apps.core.supplier_payable_ledger_service import SupplierPayableLedgerService
+        return SupplierPayableLedgerService.post_entry(
+            tenant_id=tenant_id,
+            actor_user=actor_user,
+            supplier_id=supplier_id,
+            data=data,
+        )
+
+    @classmethod
+    def list_ledger_entries(
+        cls,
+        tenant_id: str,
+        supplier_id: str,
+        actor_user: Optional[Any] = None,
+        posting_type: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        from apps.core.supplier_payable_ledger_service import SupplierPayableLedgerService
+        return SupplierPayableLedgerService.list_entries(
+            tenant_id=tenant_id,
+            supplier_id=supplier_id,
+            actor_user=actor_user,
+            posting_type=posting_type,
+            start_date=start_date,
+            end_date=end_date,
+            search=search,
+        )
+
+    @classmethod
+    def reverse_ledger_entry(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        supplier_id: str,
+        posting_id: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        from apps.core.supplier_payable_ledger_service import SupplierPayableLedgerService
+        return SupplierPayableLedgerService.reverse_entry(
+            tenant_id=tenant_id,
+            actor_user=actor_user,
+            supplier_id=supplier_id,
+            posting_id=posting_id,
+            reason=reason,
+        )
+
+    @classmethod
+    def reconcile_supplier_ledger(
+        cls,
+        tenant_id: str,
+        supplier_id: str,
+        actor_user: Optional[Any] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from apps.core.supplier_payable_ledger_service import SupplierPayableLedgerService
+        return SupplierPayableLedgerService.reconcile_ledger(
+            tenant_id=tenant_id,
+            supplier_id=supplier_id,
+            actor_user=actor_user,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    @classmethod
+    def merge_suppliers(
+        cls,
+        tenant_id: str,
+        actor_user: Any,
+        source_id: str,
+        target_id: str,
+        reason: str = "Consolidation of duplicate supplier entries",
+    ) -> Dict[str, Any]:
+        """
+        Merges duplicate supplier into a canonical survivor within tenant boundary.
+        Re-links contacts and balances, archives source.
+        Only allowed for administrative roles (Owner, Branch Manager, Superadmin).
+        """
+        cls._assert_admin_role(actor_user)
         tenant = cls._assert_tenant_active(tenant_id)
 
-        posting_type = data.get("posting_type", SupplierPostingType.GRN_INVOICE).upper()
-        if posting_type not in SupplierPostingType.values:
-            raise ValidationError({"error_code": "ERR_INVALID_POSTING_TYPE", "detail": f"Invalid posting type '{posting_type}'."})
-
-        ref_number = data.get("reference_number", "").strip()
-        if not ref_number:
-            raise ValidationError({"error_code": "ERR_MISSING_REFERENCE_NUMBER", "detail": "Reference number (PO/GRN/Voucher) is required."})
-
-        debit = Decimal(str(data.get("debit_amount", "0.0000")))
-        credit = Decimal(str(data.get("credit_amount", "0.0000")))
-
-        if debit < Decimal("0.0000") or credit < Decimal("0.0000"):
-            raise ValidationError({"error_code": "ERR_INVALID_AMOUNT", "detail": "Debit and credit amounts cannot be negative."})
-
-        branch_id = data.get("branch_id")
-        branch = None
-        if branch_id:
-            branch = Branch.objects.filter(branch_id=branch_id, tenant=tenant).first()
-
-        with transaction.atomic():
-            supplier = Supplier.objects.select_for_update().filter(supplier_id=supplier_id).first()
-            if not supplier:
-                raise NotFound({"error_code": "ERR_SUPPLIER_NOT_FOUND", "detail": f"Supplier '{supplier_id}' not found."})
-            if str(supplier.tenant_id) != str(tenant_id):
-                raise PermissionDenied({"error_code": "ERR_CROSS_TENANT_ACCESS", "detail": "Cross-tenant supplier posting forbidden."})
-
-            if supplier.status == SupplierStatus.BLACKLISTED:
-                raise PermissionDenied({"error_code": "ERR_SUPPLIER_BLACKLISTED", "detail": "Transactions barred for blacklisted suppliers."})
-
-            # Calculate balance change:
-            # Credit increases payable liability owed to supplier (e.g. GRN receipt of inventory).
-            # Debit decreases payable liability (e.g. payment voucher or purchase return debit note).
-            balance_delta = credit - debit
-            new_balance = supplier.current_balance + balance_delta
-
-            posting_id = f"sup-post-{uuid.uuid4().hex[:12]}"
-            entry = SupplierLedgerEntry.objects.create(
-                posting_id=posting_id,
-                tenant=tenant,
-                supplier=supplier,
-                branch=branch,
-                posting_type=posting_type,
-                reference_number=ref_number,
-                debit_amount=debit,
-                credit_amount=credit,
-                balance_after=new_balance,
-                currency="BDT",
-                notes=data.get("notes", "").strip(),
-                posted_by=actor_user if getattr(actor_user, "is_authenticated", False) else None,
+        if str(source_id).strip() == str(target_id).strip():
+            raise ValidationError(
+                {
+                    "error_code": "ERR_CANNOT_MERGE_SELF",
+                    "detail": "Cannot merge a supplier into itself.",
+                    "message_en": "Cannot merge a supplier into itself.",
+                    "message_bn": "একই সরবরাহকারীকে নিজের সাথে মার্জ করা যাবে না।",
+                }
             )
 
-            supplier.current_balance = new_balance
-            supplier.save(update_fields=["current_balance", "updated_at"])
+        source = Supplier.objects.filter(supplier_id=source_id).first()
+        if not source:
+            raise NotFound(
+                {
+                    "error_code": "ERR_SOURCE_NOT_FOUND",
+                    "detail": f"Source supplier '{source_id}' not found.",
+                }
+            )
+
+        target = Supplier.objects.filter(supplier_id=target_id).first()
+        if not target:
+            raise NotFound(
+                {
+                    "error_code": "ERR_TARGET_NOT_FOUND",
+                    "detail": f"Target supplier '{target_id}' not found.",
+                }
+            )
+
+        # STRICT TENANT ISOLATION CHECK
+        if str(source.tenant_id) != str(tenant_id) or str(target.tenant_id) != str(tenant_id):
+            raise PermissionDenied(
+                {
+                    "error_code": "ERR_CROSS_TENANT_ACCESS",
+                    "detail": "Suppliers belonging to different tenants cannot be merged.",
+                    "message_en": "Suppliers belonging to different tenants cannot be merged.",
+                    "message_bn": "ভিন্ন ফার্মেসির সরবরাহকারী প্রতিষ্ঠান মার্জ করা সম্পূর্ণ নিষিদ্ধ।",
+                }
+            )
+
+        if not target.is_active or target.merged_into_id:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_TARGET_ALREADY_MERGED",
+                    "detail": "Target supplier is inactive or already merged into another entity.",
+                    "message_en": "Target supplier is inactive or already merged into another entity.",
+                    "message_bn": "লক্ষ্য সরবরাহকারীটি নিষ্ক্রিয় বা ইতিমধ্যে মার্জ করা হয়েছে।",
+                }
+            )
+
+        with transaction.atomic():
+            # Transfer balance if any
+            if source.current_balance > Decimal("0.0000"):
+                target.current_balance += source.current_balance
+                target.save(update_fields=["current_balance", "updated_at"])
+
+            # Re-link contacts
+            SupplierContactPerson.objects.filter(supplier=source).update(supplier=target)
+
+            # Mark source as merged & archived
+            source.merged_into = target
+            source.is_active = False
+            source.status = SupplierStatus.INACTIVE
+            source.merge_reason = reason
+            source.merged_at = timezone.now()
+            source.current_balance = Decimal("0.0000")
+            source.save(
+                update_fields=[
+                    "merged_into",
+                    "is_active",
+                    "status",
+                    "merge_reason",
+                    "merged_at",
+                    "current_balance",
+                    "updated_at",
+                ]
+            )
 
             AuditLogEntry.objects.create(
                 request_id=f"req-{uuid.uuid4().hex[:8]}",
                 tenant_id=str(tenant.tenant_id),
                 user_id=getattr(actor_user, "user_id", str(actor_user)),
-                actor_email=str(getattr(actor_user, "email", "manager@pharma.com")),
+                actor_email=str(getattr(actor_user, "email", "admin@pharma.com")),
                 actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
-                action="SUPPLIER_LEDGER_POSTED",
-                resource_type="SupplierLedgerEntry",
-                resource_id=entry.posting_id,
+                action="SUPPLIER_ORGANIZATION_MERGED",
+                resource_type="SupplierOrganization",
+                resource_id=source.supplier_id,
                 ip_address="127.0.0.1",
                 status=AuditActionStatus.SUCCESS,
                 metadata_json={
-                    "supplier_id": supplier.supplier_id,
-                    "posting_type": posting_type,
-                    "reference_number": ref_number,
-                    "balance_after": str(new_balance),
+                    "source_id": source.supplier_id,
+                    "target_id": target.supplier_id,
+                    "reason": reason,
                 },
             )
 
-        return cls.serialize_ledger_entry(entry)
-
-    @classmethod
-    def list_ledger_entries(cls, tenant_id: str, supplier_id: str) -> List[Dict[str, Any]]:
-        cls._assert_tenant_active(tenant_id)
-        supplier = Supplier.objects.filter(supplier_id=supplier_id, tenant_id=tenant_id).first()
-        if not supplier:
-            raise NotFound({"error_code": "ERR_SUPPLIER_NOT_FOUND", "detail": f"Supplier '{supplier_id}' not found."})
-        entries = SupplierLedgerEntry.objects.filter(tenant_id=tenant_id, supplier=supplier).order_by("-posted_at")
-        return [cls.serialize_ledger_entry(e) for e in entries]
+        return {
+            "entity_type": "SUPPLIER",
+            "source_id": source.supplier_id,
+            "target_id": target.supplier_id,
+            "target_name": target.name,
+            "is_merged": True,
+            "merge_reason": reason,
+            "merged_at": source.merged_at.isoformat() if source.merged_at else None,
+            "message_en": f"Successfully merged '{source.name}' into '{target.name}'.",
+            "message_bn": f"'{source.name}' সফলভাবে '{target.name}'-এ মার্জ সম্পন্ন হয়েছে।",
+        }
 
     @classmethod
     def verify_proof_of_origin(

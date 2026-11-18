@@ -254,7 +254,7 @@ class PosDomainService:
         plan_rec = PlanCatalogueRecord.objects.filter(tier=tenant.plan_tier, is_active=True).first()
         if plan_rec and isinstance(plan_rec.features, dict):
             return bool(plan_rec.features.get(feature_key, False))
-        if feature_key == "CUSTOMER_LEDGER":
+        if feature_key in ("CUSTOMER_LEDGER", "CUSTOMER_LOYALTY"):
             return str(tenant.plan_tier).upper() in (PlanTier.STANDARD, PlanTier.PRO)
         return True
 

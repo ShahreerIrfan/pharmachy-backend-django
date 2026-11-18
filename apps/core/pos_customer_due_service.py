@@ -28,6 +28,7 @@ from apps.core.models import (
     CashierRegisterAssignment,
     CustomerDueCollection,
     CustomerDueCollectionStatus,
+    CustomerDueInvoiceAllocation,
     CustomerDueRecord,
     DueStatus,
     PaymentMethod,
@@ -636,6 +637,7 @@ class PosCustomerDueService:
             due_record=due_rec,
             customer=target_customer,
             sale=due_rec.sale,
+            invoice=due_rec.invoice,
             register_assignment=reg,
             journal_entry=journal,
             tender_type=tender,
@@ -653,16 +655,52 @@ class PosCustomerDueService:
             collected_by=user,
         )
 
+        prev_rem = due_rec.remaining_due_bdt
         due_rec.paid_amount_bdt = q2(due_rec.paid_amount_bdt + amount_bdt)
         due_rec.remaining_due_bdt = q2(due_rec.remaining_due_bdt - amount_bdt)
         due_rec.status = DueStatus.SETTLED if due_rec.remaining_due_bdt == Decimal("0.00") else DueStatus.PARTIAL
         due_rec.save(update_fields=["paid_amount_bdt", "remaining_due_bdt", "status", "updated_at"])
+
+        CustomerDueInvoiceAllocation.objects.create(
+            allocation_id=f"alloc-{uuid.uuid4().hex[:12]}",
+            tenant=tenant,
+            branch=branch,
+            collection=collection,
+            due_record=due_rec,
+            sale=due_rec.sale,
+            invoice=due_rec.invoice,
+            allocated_amount_bdt=amount_bdt,
+            previous_remaining_due_bdt=prev_rem,
+            new_remaining_due_bdt=due_rec.remaining_due_bdt,
+            is_reversed=False,
+        )
 
         if target_customer:
             target_customer.current_due_bdt = max(
                 Decimal("0.00"), q2(target_customer.current_due_bdt - amount_bdt)
             )
             target_customer.save(update_fields=["current_due_bdt", "updated_at"])
+
+            from apps.core.customer_receivable_ledger_service import CustomerReceivableLedgerService
+            from apps.core.models import CustomerReceivableEntryType
+
+            CustomerReceivableLedgerService.post_entry_in_tx(
+                tenant=tenant,
+                branch=branch,
+                customer=target_customer,
+                entry_type=CustomerReceivableEntryType.PAYMENT_COLLECTION,
+                reference_number=collection.collection_id,
+                credit_amount_bdt=amount_bdt,
+                debit_amount_bdt=Decimal("0.00"),
+                posted_by=user,
+                source_sale=due_rec.sale,
+                source_invoice=due_rec.invoice,
+                source_due_record=due_rec,
+                source_collection=collection,
+                narration=f"Partial collection {collection.collection_id} against {due_rec.due_id} ({tender})",
+                idempotency_key=f"ar-{collection.collection_id}",
+                skip_customer_balance_update=True,
+            )
 
         if due_rec.sale:
             PosDomainService._record_lifecycle_audit(
@@ -762,10 +800,33 @@ class PosCustomerDueService:
         due_rec.status = DueStatus.OUTSTANDING if due_rec.paid_amount_bdt == Decimal("0.00") else DueStatus.PARTIAL
         due_rec.save(update_fields=["paid_amount_bdt", "remaining_due_bdt", "status", "updated_at"])
 
+        CustomerDueInvoiceAllocation.objects.filter(collection=col).update(is_reversed=True)
+
         if col.customer_id:
             cust = PosCustomer.objects.select_for_update().get(pk=col.customer_id)
             cust.current_due_bdt = q2(cust.current_due_bdt + col.amount_bdt)
             cust.save(update_fields=["current_due_bdt", "updated_at"])
+
+            from apps.core.customer_receivable_ledger_service import CustomerReceivableLedgerService
+            from apps.core.models import CustomerReceivableEntryType
+
+            CustomerReceivableLedgerService.post_entry_in_tx(
+                tenant=tenant,
+                branch=branch,
+                customer=cust,
+                entry_type=CustomerReceivableEntryType.REVERSAL,
+                reference_number=f"rev-{col.collection_id}",
+                debit_amount_bdt=col.amount_bdt,
+                credit_amount_bdt=Decimal("0.00"),
+                posted_by=user,
+                source_sale=col.sale,
+                source_invoice=due_rec.invoice,
+                source_due_record=due_rec,
+                source_collection=col,
+                narration=f"Reversal of collection {col.collection_id}: {clean_reason[:80]}",
+                idempotency_key=f"ar-rev-{col.collection_id}",
+                skip_customer_balance_update=True,
+            )
 
         return col
 
@@ -823,6 +884,26 @@ class PosCustomerDueService:
             cust = PosCustomer.objects.select_for_update().get(pk=due_rec.customer_id)
             cust.current_due_bdt = max(Decimal("0.00"), q2(cust.current_due_bdt - rem))
             cust.save(update_fields=["current_due_bdt", "updated_at"])
+
+            from apps.core.customer_receivable_ledger_service import CustomerReceivableLedgerService
+            from apps.core.models import CustomerReceivableEntryType
+
+            CustomerReceivableLedgerService.post_entry_in_tx(
+                tenant=tenant,
+                branch=branch,
+                customer=cust,
+                entry_type=CustomerReceivableEntryType.WRITE_OFF,
+                reference_number=f"wo-{due_rec.due_id}",
+                debit_amount_bdt=Decimal("0.00"),
+                credit_amount_bdt=rem,
+                posted_by=user,
+                source_sale=due_rec.sale,
+                source_invoice=due_rec.invoice,
+                source_due_record=due_rec,
+                narration=f"Bad debt write-off for due {due_rec.due_id}: {clean_reason[:80]}",
+                idempotency_key=f"ar-wo-{due_rec.due_id}",
+                skip_customer_balance_update=True,
+            )
         return due_rec
 
     @classmethod

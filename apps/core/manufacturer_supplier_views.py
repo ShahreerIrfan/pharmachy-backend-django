@@ -138,24 +138,49 @@ class SupplierViewSet(viewsets.ViewSet):
         if is_active_param is not None:
             is_active = is_active_param.lower() in ("true", "1")
 
-        results = ManufacturerSupplierService.list_suppliers(
-            tenant_id=tenant_id,
-            search=search,
-            is_active=is_active,
-        )
-        return Response({"count": len(results), "results": results}, status=status.HTTP_200_OK)
+        try:
+            results = ManufacturerSupplierService.list_suppliers(
+                tenant_id=tenant_id,
+                search=search,
+                is_active=is_active,
+                actor_user=request.user,
+            )
+            return Response({"count": len(results), "results": results}, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
 
     def retrieve(self, request, pk=None) -> Response:
         """GET /api/v2/suppliers/{pk}/"""
         _check_tenant_suspended(request)
         tenant_id = _get_request_tenant_id(request)
         try:
-            s = ManufacturerSupplierService.get_supplier(tenant_id=tenant_id, supplier_id=pk)
+            s = ManufacturerSupplierService.get_supplier(
+                tenant_id=tenant_id,
+                supplier_id=pk,
+                actor_user=request.user,
+            )
             return Response(s, status=status.HTTP_200_OK)
         except PermissionDenied as exc:
             return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
         except ValidationError as exc:
             return Response(exc.detail, status=status.HTTP_404_NOT_FOUND)
+
+    def partial_update(self, request, pk=None) -> Response:
+        """PATCH /api/v2/suppliers/{pk}/"""
+        _check_tenant_suspended(request)
+        tenant_id = _get_request_tenant_id(request)
+        try:
+            updated = ManufacturerSupplierService.update_supplier(
+                tenant_id=tenant_id,
+                actor_user=request.user,
+                supplier_id=pk,
+                data=request.data,
+            )
+            return Response(updated, status=status.HTTP_200_OK)
+        except PermissionDenied as exc:
+            return Response(exc.detail, status=status.HTTP_403_FORBIDDEN)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
 
     def create(self, request) -> Response:
         """POST /api/v2/suppliers/"""

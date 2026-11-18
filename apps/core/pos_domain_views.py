@@ -20,16 +20,21 @@ from django.utils import timezone
 from rest_framework import permissions, serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.renderers import BaseRenderer, JSONRenderer
 from rest_framework.request import Request
 from rest_framework.response import Response
 
 from apps.core.antibiotic_register_service import AntibioticRegisterLedgerService
+from apps.core.customer_credit_eligibility_service import CustomerCreditEligibilityService
 from apps.core.customer_purchase_history_service import CustomerPurchaseHistoryService
+from apps.core.customer_receivable_ledger_service import CustomerReceivableLedgerService
 from apps.core.models import (
     AntibioticDispenseRegisterEntry,
     Branch,
     CustomerDueCollection,
+    CustomerDueInvoiceAllocation,
     CustomerDueRecord,
+    CustomerStatementAudit,
     DueStatus,
     MedicineProduct,
     PaymentMethod,
@@ -92,10 +97,33 @@ from apps.core.pos_search_cart_service import PosSearchCartService
 from apps.core.pos_search_cart_views import PosCartScanEventSerializer
 
 
+class PosPassthroughHtmlRenderer(BaseRenderer):
+    """Passthrough renderer for server-rendered HTML statements/receipts."""
+
+    media_type = "text/html"
+    format = "html"
+    charset = "utf-8"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
+class PosPassthroughTextRenderer(BaseRenderer):
+    """Passthrough renderer for thermal monospace slips."""
+
+    media_type = "text/plain"
+    format = "text"
+    charset = "utf-8"
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
 class PosCustomerSerializer(serializers.ModelSerializer):
     branch_name = serializers.CharField(source="primary_branch.name", read_only=True, default="")
     credit_approved_by_email = serializers.CharField(source="credit_approved_by.email", read_only=True, default="")
     available_credit_bdt = serializers.SerializerMethodField()
+    is_merged = serializers.SerializerMethodField()
 
     class Meta:
         model = PosCustomer
@@ -120,6 +148,16 @@ class PosCustomerSerializer(serializers.ModelSerializer):
             "credit_suspended_reason",
             "notes",
             "privacy_preferences",
+            "aliases",
+            "secondary_phones",
+            "merged_into",
+            "merged_at",
+            "is_merged",
+            "loyalty_tier",
+            "loyalty_points_balance",
+            "lifetime_loyalty_points_earned",
+            "lifetime_loyalty_spend_bdt",
+            "is_loyalty_enrolled",
             "is_active",
             "is_archived",
             "created_at",
@@ -134,6 +172,12 @@ class PosCustomerSerializer(serializers.ModelSerializer):
             "credit_approved_by_email",
             "credit_approved_at",
             "credit_suspended_reason",
+            "merged_into",
+            "merged_at",
+            "is_merged",
+            "loyalty_points_balance",
+            "lifetime_loyalty_points_earned",
+            "lifetime_loyalty_spend_bdt",
             "is_archived",
             "created_at",
             "updated_at",
@@ -142,6 +186,29 @@ class PosCustomerSerializer(serializers.ModelSerializer):
     def get_available_credit_bdt(self, obj: PosCustomer) -> str:
         return f"{PosCustomerDueService.compute_available_credit(obj):.2f}"
 
+    def get_is_merged(self, obj: PosCustomer) -> bool:
+        return bool(obj.merged_into_id)
+
+
+class CustomerDueInvoiceAllocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CustomerDueInvoiceAllocation
+        fields = [
+            "allocation_id",
+            "tenant_id",
+            "branch_id",
+            "collection_id",
+            "due_record_id",
+            "sale_id",
+            "invoice_id",
+            "allocated_amount_bdt",
+            "previous_remaining_due_bdt",
+            "new_remaining_due_bdt",
+            "is_reversed",
+            "created_at",
+        ]
+        read_only_fields = fields
+
 
 class CustomerDueCollectionSerializer(serializers.ModelSerializer):
     collected_by_email = serializers.CharField(source="collected_by.email", read_only=True, default="")
@@ -149,6 +216,7 @@ class CustomerDueCollectionSerializer(serializers.ModelSerializer):
     debit_account = serializers.CharField(source="journal_entry.debit_account", read_only=True, default="")
     credit_account = serializers.CharField(source="journal_entry.credit_account", read_only=True, default="AR_CUSTOMER_DUE")
     revenue_impact_bdt = serializers.SerializerMethodField()
+    allocations = CustomerDueInvoiceAllocationSerializer(source="invoice_allocations", many=True, read_only=True)
 
     class Meta:
         model = CustomerDueCollection
@@ -182,6 +250,7 @@ class CustomerDueCollectionSerializer(serializers.ModelSerializer):
             "reversed_at",
             "reversal_reason",
             "sha256_hash",
+            "allocations",
         ]
         read_only_fields = fields
 
@@ -770,6 +839,23 @@ class PosCustomerViewSet(viewsets.ModelViewSet):
         if phone_q:
             qs = qs.filter(phone__icontains=phone_q)
 
+        search_q = self.request.query_params.get("search") or self.request.query_params.get("q")
+        if search_q:
+            from apps.core.customer_search_merge_service import normalize_bd_phone
+
+            clean_q = str(search_q).strip()
+            phone_info = normalize_bd_phone(clean_q)
+            sq = (
+                Q(full_name__icontains=clean_q)
+                | Q(aliases__icontains=clean_q)
+                | Q(loyalty_code__iexact=clean_q)
+                | Q(email__icontains=clean_q)
+            )
+            for v in phone_info["variants"]:
+                if len(v) >= 4:
+                    sq |= Q(phone__icontains=v) | Q(secondary_phones__icontains=v)
+            qs = qs.filter(sq)
+
         return qs.order_by("full_name", "-created_at")
 
     def create(self, request: Request, *args, **kwargs) -> Response:
@@ -996,6 +1082,465 @@ class PosCustomerViewSet(viewsets.ModelViewSet):
             page_size=page_size,
         )
         return Response(history_data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="credit-eligibility")
+    def credit_eligibility(self, request: Request, customer_id=None) -> Response:
+        """GET /api/v2/pos/customers/{customer_id}/credit-eligibility/ — Real-time customer credit facility assessment."""
+        customer = self.get_object()
+        branch_id = request.query_params.get("branch") or customer.primary_branch_id
+        additional_due = q2(request.query_params.get("additional_due", "0.00"))
+        result = CustomerCreditEligibilityService.evaluate_credit_eligibility(
+            request.user,
+            customer.tenant,
+            customer.customer_id,
+            branch=branch_id,
+            additional_due_bdt=additional_due,
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="receivable-statement")
+    def receivable_statement(self, request: Request, customer_id=None) -> Response:
+        """GET /api/v2/pos/customers/{customer_id}/receivable-statement/ — Customer AR ledger statement."""
+        customer = self.get_object()
+        branch_id = request.query_params.get("branch")
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        page = request.query_params.get("page", 1)
+        page_size = request.query_params.get("page_size", 20)
+
+        statement = CustomerReceivableLedgerService.get_customer_receivable_statement(
+            request.user,
+            customer.customer_id,
+            branch_id=branch_id,
+            start_date=start_date,
+            end_date=end_date,
+            page=page,
+            page_size=page_size,
+        )
+        return Response(statement, status=status.HTTP_200_OK)
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="statement",
+        renderer_classes=[JSONRenderer, PosPassthroughHtmlRenderer, PosPassthroughTextRenderer],
+    )
+    def statement(self, request: Request, customer_id=None) -> Response:
+        """GET /api/v2/pos/customers/{customer_id}/statement/ — Official printable customer statement of account."""
+        from apps.core.customer_statement_service import CustomerStatementService
+        from django.http import HttpResponse
+
+        clean_cid = str(customer_id or self.kwargs.get("customer_id") or "").strip()
+        branch_id = request.query_params.get("branch")
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+
+        res = CustomerStatementService.generate_statement(
+            user=request.user,
+            customer_id=clean_cid,
+            branch_id=branch_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        fmt = str(request.query_params.get("format") or "json").lower().strip()
+        if fmt == "html":
+            return HttpResponse(res["printable_html"], content_type="text/html; charset=utf-8")
+        if fmt == "text":
+            return HttpResponse(res["printable_text"], content_type="text/plain; charset=utf-8")
+
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="search")
+    def search(self, request: Request) -> Response:
+        """
+        GET /api/v2/pos/customers/search/?q=...
+        Normalized BD phone, aliases, name, and loyalty code lookup (P268).
+        """
+        from apps.core.customer_search_merge_service import CustomerSearchMergeService
+
+        q = request.query_params.get("q") or request.query_params.get("search") or ""
+        branch_id = request.query_params.get("branch")
+        include_merged = str(request.query_params.get("include_merged", "")).lower() in ("true", "1")
+        limit = int(request.query_params.get("limit", 25))
+
+        results = CustomerSearchMergeService.search_customers(
+            user=request.user,
+            query=q,
+            branch_id=branch_id,
+            include_merged=include_merged,
+            limit=limit,
+        )
+        return Response({"results": results, "count": len(results)}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path="merge")
+    def merge(self, request: Request) -> Response:
+        """
+        POST /api/v2/pos/customers/merge/
+        Controlled merge of duplicate customer profile preserving immutable transaction links (P268).
+        """
+        from apps.core.customer_search_merge_service import CustomerSearchMergeService
+
+        source_id = request.data.get("source_customer_id")
+        target_id = request.data.get("target_customer_id")
+        reason = request.data.get("merge_reason")
+        branch_id = request.data.get("branch_id")
+        idempotency_key = request.data.get("idempotency_key") or request.headers.get("X-Idempotency-Key", "")
+
+        result = CustomerSearchMergeService.merge_customers(
+            user=request.user,
+            source_customer_id=source_id,
+            target_customer_id=target_id,
+            merge_reason=reason,
+            branch_id=branch_id,
+            idempotency_key=idempotency_key,
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["get"], url_path="merge-history")
+    def merge_history(self, request: Request) -> Response:
+        """
+        GET /api/v2/pos/customers/merge-history/
+        Returns audited customer profile merge logs within active tenant scope (P268).
+        """
+        from apps.core.customer_search_merge_service import CustomerSearchMergeService
+
+        customer_id = request.query_params.get("customer_id")
+        branch_id = request.query_params.get("branch")
+        limit = int(request.query_params.get("limit", 50))
+
+        history = CustomerSearchMergeService.get_merge_history(
+            user=request.user,
+            customer_id=customer_id,
+            branch_id=branch_id,
+            limit=limit,
+        )
+        return Response({"results": history, "count": len(history)}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="consents")
+    def consents(self, request: Request, customer_id=None) -> Response:
+        """
+        GET /api/v2/pos/customers/{customer_id}/consents/
+        Full communication consent matrix separated from mandatory statutory record retention (P269).
+        """
+        from apps.core.customer_consent_service import CustomerConsentService
+
+        clean_cid = str(customer_id or self.kwargs.get("customer_id") or "").strip()
+        branch_id = request.query_params.get("branch")
+        matrix = CustomerConsentService.get_customer_consent_matrix(
+            user=request.user,
+            customer_id=clean_cid,
+            branch_id=branch_id,
+        )
+        return Response(matrix, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="set-consent")
+    def set_consent(self, request: Request, customer_id=None) -> Response:
+        """
+        POST /api/v2/pos/customers/{customer_id}/set-consent/
+        Updates/grants/revokes consent for a specific optional channel (P269).
+        """
+        from apps.core.customer_consent_service import CustomerConsentService
+
+        clean_cid = str(customer_id or self.kwargs.get("customer_id") or "").strip()
+        channel = request.data.get("channel")
+        status_val = request.data.get("status")
+        capture_method = request.data.get("capture_method")
+        reason = request.data.get("reason", "")
+        notes = request.data.get("notes", "")
+        branch_id = request.data.get("branch_id")
+
+        res = CustomerConsentService.set_channel_consent(
+            user=request.user,
+            customer_id=clean_cid,
+            channel=channel,
+            status=status_val,
+            capture_method=capture_method,
+            reason=reason,
+            notes=notes,
+            branch_id=branch_id,
+        )
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="revoke-all-consents")
+    def revoke_all_consents(self, request: Request, customer_id=None) -> Response:
+        """
+        POST /api/v2/pos/customers/{customer_id}/revoke-all-consents/
+        Revokes all optional communication channels while preserving statutory records (P269).
+        """
+        from apps.core.customer_consent_service import CustomerConsentService
+
+        clean_cid = str(customer_id or self.kwargs.get("customer_id") or "").strip()
+        reason = request.data.get("reason", "Customer requested complete communication opt-out")
+        branch_id = request.data.get("branch_id")
+
+        res = CustomerConsentService.revoke_all_optional_consents(
+            user=request.user,
+            customer_id=clean_cid,
+            reason=reason,
+            branch_id=branch_id,
+        )
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="consent-audit-logs")
+    def consent_audit_logs(self, request: Request, customer_id=None) -> Response:
+        """
+        GET /api/v2/pos/customers/{customer_id}/consent-audit-logs/
+        Returns immutable audit trail of customer communication consent changes (P269).
+        """
+        from apps.core.customer_consent_service import CustomerConsentService
+
+        clean_cid = str(customer_id or self.kwargs.get("customer_id") or "").strip()
+        limit = int(request.query_params.get("limit", 50))
+        logs = CustomerConsentService.get_consent_audit_logs(
+            user=request.user,
+            customer_id=clean_cid,
+            limit=limit,
+        )
+        return Response({"results": logs, "count": len(logs)}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="loyalty")
+    def loyalty(self, request: Request, customer_id=None) -> Response:
+        """
+        GET /api/v2/pos/customers/{customer_id}/loyalty/
+        Customer loyalty tier, points balance, earn/redeem rates, and regulatory exclusions (P270).
+        """
+        from apps.core.customer_loyalty_service import CustomerLoyaltyService
+
+        clean_cid = str(customer_id or self.kwargs.get("customer_id") or "").strip()
+        branch_id = request.query_params.get("branch")
+        profile = CustomerLoyaltyService.get_customer_loyalty_profile(
+            user=request.user,
+            customer_id=clean_cid,
+            branch_id=branch_id,
+        )
+        return Response(profile, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="loyalty-redeem")
+    def loyalty_redeem(self, request: Request, customer_id=None) -> Response:
+        """
+        POST /api/v2/pos/customers/{customer_id}/loyalty-redeem/
+        Redeems loyalty points for monetary discount on eligible non-restricted cart lines (P270).
+        """
+        from apps.core.customer_loyalty_service import CustomerLoyaltyService
+
+        clean_cid = str(customer_id or self.kwargs.get("customer_id") or "").strip()
+        points = int(request.data.get("points_to_redeem") or 0)
+        cart_items = request.data.get("cart_items") or []
+        branch_id = request.data.get("branch_id")
+
+        result = CustomerLoyaltyService.redeem_loyalty_points(
+            user=request.user,
+            customer_id=clean_cid,
+            points_to_redeem=points,
+            cart_items=cart_items,
+            branch_id=branch_id,
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["get"], url_path="loyalty-ledger")
+    def loyalty_ledger(self, request: Request, customer_id=None) -> Response:
+        """
+        GET /api/v2/pos/customers/{customer_id}/loyalty-ledger/
+        Audited points ledger history for customer (P270).
+        """
+        from apps.core.customer_loyalty_service import CustomerLoyaltyService
+
+        clean_cid = str(customer_id or self.kwargs.get("customer_id") or "").strip()
+        limit = int(request.query_params.get("limit", 50))
+        history = CustomerLoyaltyService.get_customer_loyalty_ledger(
+            user=request.user,
+            customer_id=clean_cid,
+            limit=limit,
+        )
+        return Response({"results": history, "count": len(history)}, status=status.HTTP_200_OK)
+
+
+class PosCustomerReceivableLedgerViewSet(viewsets.ViewSet):
+    """
+    ViewSet for customer accounts receivable ledger statement, audited adjustments,
+    and compensating reversals (/api/v2/pos/receivable-ledger/).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=["get"], url_path="statement")
+    def statement(self, request: Request) -> Response:
+        """GET /api/v2/pos/receivable-ledger/statement/?customer={customer_id}"""
+        customer_id = request.query_params.get("customer") or request.query_params.get("customer_id")
+        if not customer_id:
+            raise ValidationError({"customer": "customer query parameter is required."})
+
+        branch_id = request.query_params.get("branch")
+        start_date = request.query_params.get("start_date")
+        end_date = request.query_params.get("end_date")
+        page = request.query_params.get("page", 1)
+        page_size = request.query_params.get("page_size", 20)
+
+        stmt = CustomerReceivableLedgerService.get_customer_receivable_statement(
+            request.user,
+            customer_id,
+            branch_id=branch_id,
+            start_date=start_date,
+            end_date=end_date,
+            page=page,
+            page_size=page_size,
+        )
+        return Response(stmt, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path="adjustment")
+    def adjustment(self, request: Request) -> Response:
+        """POST /api/v2/pos/receivable-ledger/adjustment/ — Audited manual AR adjustment."""
+        customer_id = request.data.get("customer_id") or request.data.get("customer")
+        if not customer_id:
+            raise ValidationError({"customer_id": "customer_id is required."})
+
+        direction = request.data.get("adjustment_direction") or request.data.get("direction")
+        amount = q2(request.data.get("amount_bdt") or request.data.get("amount") or "0.00")
+        reason = request.data.get("reason", "")
+        branch_id = request.data.get("branch")
+        idem_key = request.data.get("idempotency_key", "")
+
+        entry = CustomerReceivableLedgerService.post_adjustment_in_tx(
+            request.user,
+            customer_id,
+            adjustment_direction=direction,
+            amount_bdt=amount,
+            reason=reason,
+            branch_id=branch_id,
+            idempotency_key=idem_key,
+        )
+        return Response(
+            {
+                "entry_id": entry.entry_id,
+                "entry_type": entry.entry_type,
+                "customer_id": entry.customer_id,
+                "reference_number": entry.reference_number,
+                "debit_amount_bdt": f"{entry.debit_amount_bdt:.2f}",
+                "credit_amount_bdt": f"{entry.credit_amount_bdt:.2f}",
+                "balance_after_bdt": f"{entry.balance_after_bdt:.2f}",
+                "narration": entry.narration,
+                "posted_at": entry.posted_at.isoformat(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=["post"], url_path="reversal")
+    def reversal(self, request: Request) -> Response:
+        """POST /api/v2/pos/receivable-ledger/reversal/ — Compensating reversal."""
+        entry_id = request.data.get("entry_id")
+        if not entry_id:
+            raise ValidationError({"entry_id": "entry_id is required."})
+        reason = request.data.get("reason", "")
+        idem_key = request.data.get("idempotency_key", "")
+
+        entry = CustomerReceivableLedgerService.post_reversal_in_tx(
+            request.user,
+            entry_id,
+            reason=reason,
+            idempotency_key=idem_key,
+        )
+        return Response(
+            {
+                "entry_id": entry.entry_id,
+                "entry_type": entry.entry_type,
+                "customer_id": entry.customer_id,
+                "reference_number": entry.reference_number,
+                "debit_amount_bdt": f"{entry.debit_amount_bdt:.2f}",
+                "credit_amount_bdt": f"{entry.credit_amount_bdt:.2f}",
+                "balance_after_bdt": f"{entry.balance_after_bdt:.2f}",
+                "narration": entry.narration,
+                "posted_at": entry.posted_at.isoformat(),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class PosCreditEligibilityViewSet(viewsets.ViewSet):
+    """
+    ViewSet for managing tenant and branch customer credit eligibility policies,
+    evaluating real-time eligibility with hard safety controls (/api/v2/pos/credit-eligibility/).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=["get", "put", "patch"], url_path="policy")
+    def policy(self, request: Request) -> Response:
+        """GET/PUT/PATCH /api/v2/pos/credit-eligibility/policy/"""
+        tenant, branch = PosDomainService.resolve_user_tenant_and_branch(
+            request.user, require_write=(request.method in ("PUT", "PATCH"))
+        )
+        branch_param = request.query_params.get("branch") or (
+            request.data.get("branch") if request.method in ("PUT", "PATCH") else None
+        )
+        effective_branch = branch_param or branch
+
+        if request.method == "GET":
+            policy = CustomerCreditEligibilityService.get_effective_policy(tenant, branch=effective_branch)
+            exposure = CustomerCreditEligibilityService.calculate_branch_credit_exposure(tenant, branch=effective_branch)
+            return Response(
+                {
+                    "policy_id": policy.policy_id,
+                    "tenant_id": str(policy.tenant_id),
+                    "branch_id": str(policy.branch_id) if policy.branch_id else None,
+                    "max_customer_credit_limit_bdt": f"{policy.max_customer_credit_limit_bdt:.2f}",
+                    "branch_credit_ceiling_bdt": f"{policy.branch_credit_ceiling_bdt:.2f}",
+                    "block_credit_if_overdue": policy.block_credit_if_overdue,
+                    "allow_credit_for_narcotics": policy.allow_credit_for_narcotics,
+                    "allow_credit_for_antibiotics": policy.allow_credit_for_antibiotics,
+                    "is_active": policy.is_active,
+                    "current_branch_exposure_bdt": f"{exposure:.2f}",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # PUT / PATCH
+        policy = CustomerCreditEligibilityService.configure_policy(
+            request.user,
+            tenant,
+            request.data,
+            branch=effective_branch,
+        )
+        exposure = CustomerCreditEligibilityService.calculate_branch_credit_exposure(tenant, branch=effective_branch)
+        return Response(
+            {
+                "policy_id": policy.policy_id,
+                "tenant_id": str(policy.tenant_id),
+                "branch_id": str(policy.branch_id) if policy.branch_id else None,
+                "max_customer_credit_limit_bdt": f"{policy.max_customer_credit_limit_bdt:.2f}",
+                "branch_credit_ceiling_bdt": f"{policy.branch_credit_ceiling_bdt:.2f}",
+                "block_credit_if_overdue": policy.block_credit_if_overdue,
+                "allow_credit_for_narcotics": policy.allow_credit_for_narcotics,
+                "allow_credit_for_antibiotics": policy.allow_credit_for_antibiotics,
+                "is_active": policy.is_active,
+                "current_branch_exposure_bdt": f"{exposure:.2f}",
+                "message_en": "Credit eligibility policy configured successfully.",
+                "message_bn": "ক্রেডিট পলিসি সফলভাবে কনফিগার করা হয়েছে।",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=False, methods=["post"], url_path="check")
+    def check(self, request: Request) -> Response:
+        """POST /api/v2/pos/credit-eligibility/check/ — Real-time eligibility evaluation."""
+        tenant, branch = PosDomainService.resolve_user_tenant_and_branch(request.user, require_write=False)
+        customer_id = request.data.get("customer_id") or request.data.get("customer")
+        if not customer_id:
+            raise ValidationError({"customer_id": "customer_id is required."})
+
+        branch_id = request.data.get("branch") or getattr(branch, "branch_id", None)
+        additional_due = q2(request.data.get("additional_due_bdt") or request.data.get("additional_due") or "0.00")
+        cart_lines = request.data.get("cart_lines") or request.data.get("lines") or []
+
+        eval_result = CustomerCreditEligibilityService.evaluate_credit_eligibility(
+            request.user,
+            tenant,
+            customer_id,
+            branch=branch_id,
+            additional_due_bdt=additional_due,
+            cart_lines=cart_lines,
+        )
+        return Response(eval_result, status=status.HTTP_200_OK)
 
 
 class PosSaleOrderViewSet(viewsets.ModelViewSet):
@@ -3285,6 +3830,194 @@ class PosDailyCloseViewSet(viewsets.ModelViewSet):
         )
         serializer = self.get_serializer(close_inst)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class PosPartialCollectionViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0266 (P266).
+    Applies partial collections to original invoices without duplicate settlement or overpayments.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    @action(detail=False, methods=["post"], url_path="apply-invoice")
+    def apply_invoice(self, request: Request) -> Response:
+        from apps.core.customer_partial_collection_service import CustomerPartialCollectionService
+
+        invoice_id = str(
+            request.data.get("invoice_id")
+            or request.data.get("invoice_identifier")
+            or request.data.get("due_id")
+            or ""
+        ).strip()
+        if not invoice_id:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_INVOICE_REQUIRED",
+                    "invoice_id": "Invoice identifier (invoice_id/due_id/order_number) is required.",
+                }
+            )
+
+        res = CustomerPartialCollectionService.apply_partial_collection_to_invoice(
+            user=request.user,
+            invoice_identifier=invoice_id,
+            data=request.data,
+        )
+        return Response(
+            res, status=status.HTTP_201_CREATED if res.get("created") else status.HTTP_200_OK
+        )
+
+    @action(detail=False, methods=["post"], url_path="apply-multi")
+    def apply_multi(self, request: Request) -> Response:
+        from apps.core.customer_partial_collection_service import CustomerPartialCollectionService
+
+        customer_id = str(request.data.get("customer_id") or "").strip()
+        if not customer_id:
+            raise ValidationError(
+                {
+                    "error_code": "ERR_CUSTOMER_REQUIRED",
+                    "customer_id": "Customer ID is required for multi-invoice collection.",
+                }
+            )
+
+        res = CustomerPartialCollectionService.apply_multi_invoice_collection(
+            user=request.user,
+            customer_id=customer_id,
+            data=request.data,
+        )
+        return Response(res, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=["get"], url_path="history")
+    def history(self, request: Request) -> Response:
+        from apps.core.customer_partial_collection_service import CustomerPartialCollectionService
+
+        invoice_id = str(
+            request.query_params.get("invoice_id")
+            or request.query_params.get("invoice_identifier")
+            or request.query_params.get("due_id")
+            or ""
+        ).strip()
+        if not invoice_id:
+            raise ValidationError(
+                {"error_code": "ERR_INVOICE_REQUIRED", "invoice_id": "Invoice identifier is required."}
+            )
+
+        res = CustomerPartialCollectionService.get_invoice_collection_history(
+            user=request.user,
+            invoice_identifier=invoice_id,
+        )
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path=r"(?P<collection_id>[^/.]+)/reverse",
+    )
+    def reverse(self, request: Request, collection_id: str = None) -> Response:
+        user = request.user
+        tenant, _ = PosDomainService.resolve_user_tenant_and_branch(
+            user, require_write=False, allowed_roles=PosDomainService.POS_CUSTOMER_ADMIN_ROLES
+        )
+        col = CustomerDueCollection.objects.filter(tenant=tenant, collection_id=collection_id).first()
+        if not col:
+            raise NotFound(
+                {
+                    "error_code": "ERR_COLLECTION_NOT_FOUND",
+                    "collection_id": f"Due collection '{collection_id}' not found.",
+                }
+            )
+        reason = str(request.data.get("reason") or "")
+        reversed_col = PosCustomerDueService.reverse_due_collection(user, col, reason)
+        due_rec = CustomerDueRecord.objects.get(pk=reversed_col.due_record_id)
+        return Response(
+            {
+                "collection": CustomerDueCollectionSerializer(reversed_col).data,
+                "due_record": CustomerDueRecordSerializer(due_rec).data,
+                "message_en": f"Reversed partial collection {reversed_col.collection_id} successfully.",
+                "message_bn": f"আংশিক কালেকশন {reversed_col.collection_id} সফলভাবে রিভার্স করা হয়েছে।",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class CustomerStatementAuditSerializer(serializers.ModelSerializer):
+    generated_by_email = serializers.CharField(source="generated_by.email", read_only=True, default="")
+
+    class Meta:
+        model = CustomerStatementAudit
+        fields = [
+            "statement_id",
+            "tenant_id",
+            "branch_id",
+            "customer_id",
+            "period_start",
+            "period_end",
+            "opening_balance_bdt",
+            "total_charges_bdt",
+            "total_payments_bdt",
+            "closing_balance_bdt",
+            "aging_current_bdt",
+            "aging_31_60_bdt",
+            "aging_61_90_bdt",
+            "aging_91_plus_bdt",
+            "is_parity_reconciled",
+            "generated_by_email",
+            "generated_at",
+            "print_count",
+            "last_printed_at",
+        ]
+        read_only_fields = fields
+
+
+class PosCustomerStatementViewSet(viewsets.ViewSet):
+    """
+    Architecture Decision: ADR-0267 (P267).
+    Generates printable customer statements with opening balance, charges, payments,
+    closing balance, and 4-tier due aging buckets.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    renderer_classes = [JSONRenderer, PosPassthroughHtmlRenderer, PosPassthroughTextRenderer]
+
+    @action(detail=False, methods=["get", "post"], url_path="generate")
+    def generate(self, request: Request) -> Response:
+        from apps.core.customer_statement_service import CustomerStatementService
+        from django.http import HttpResponse
+
+        params = request.query_params if request.method == "GET" else request.data
+        customer_id = str(params.get("customer_id") or "").strip()
+        if not customer_id:
+            raise ValidationError(
+                {"error_code": "ERR_CUSTOMER_REQUIRED", "customer_id": "Customer ID is required."}
+            )
+
+        res = CustomerStatementService.generate_statement(
+            user=request.user,
+            customer_id=customer_id,
+            branch_id=params.get("branch_id"),
+            start_date=params.get("start_date"),
+            end_date=params.get("end_date"),
+        )
+
+        fmt = str(params.get("format") or "json").lower().strip()
+        if fmt == "html":
+            return HttpResponse(res["printable_html"], content_type="text/html; charset=utf-8")
+        if fmt == "text":
+            return HttpResponse(res["printable_text"], content_type="text/plain; charset=utf-8")
+
+        return Response(res, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=["post"], url_path=r"(?P<statement_id>[^/.]+)/print")
+    def log_print(self, request: Request, statement_id: str = None) -> Response:
+        from apps.core.customer_statement_service import CustomerStatementService
+
+        res = CustomerStatementService.record_statement_print(
+            user=request.user,
+            statement_id=statement_id,
+        )
+        return Response(res, status=status.HTTP_200_OK)
+
+
 
 
 

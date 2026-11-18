@@ -111,10 +111,14 @@ from apps.core.plan_catalogue_views import (
 from apps.core.platform_access_views import PlatformAccessPolicyViewSet
 from apps.core.pos_domain_views import (
     PosAntibioticRegisterViewSet,
+    PosCreditEligibilityViewSet,
     PosCustomerDueViewSet,
+    PosCustomerReceivableLedgerViewSet,
+    PosCustomerStatementViewSet,
     PosCustomerViewSet,
     PosDeliveryOrderViewSet,
     PosInvoiceNumberPolicyViewSet,
+    PosPartialCollectionViewSet,
     PosPaymentAttemptViewSet,
     PosCashierShiftViewSet,
     PosDailyCloseViewSet,
@@ -170,6 +174,40 @@ from apps.core.supplier_credit_note_views import SupplierCreditNoteViewSet
 from apps.core.supplier_dashboard_views import SupplierDashboardViewSet
 from apps.core.supplier_invoice_views import SupplierInvoiceViewSet
 from apps.core.supplier_organization_views import SupplierOrganizationViewSet
+from apps.core.vendor_payment_views import VendorPaymentViewSet
+from apps.core.financial_account_views import FinancialAccountViewSet
+from apps.core.payment_method_views import PaymentMethodViewSet
+from apps.core.payment_status_views import PaymentStatusViewSet
+from apps.core.mobile_customer_due_views import MobileCustomerDueCollectionViewSet
+from apps.core.party_import_export_views import PartyImportExportViewSet
+from apps.core.party_privacy_views import PartyPrivacyViewSet
+from apps.core.party_reconciliation_views import PartyReconciliationViewSet
+from apps.core.chart_of_accounts_views import ChartOfAccountsViewSet
+from apps.core.double_entry_journal_views import DoubleEntryJournalViewSet
+from apps.core.sales_accounting_views import SalesAccountingViewSet
+from apps.core.purchase_accounting_views import PurchaseAccountingViewSet
+from apps.core.control_account_views import ControlAccountViewSet
+from apps.core.expense_category_views import ExpenseCategoryViewSet
+from apps.core.operating_expense_views import OperatingExpenseViewSet
+from apps.core.recurring_expense_views import RecurringExpenseViewSet
+from apps.core.cash_transfer_reconciliation_views import (
+    BankReconciliationViewSet,
+    CashBankTransferViewSet,
+)
+from apps.core.payroll_views import PayrollRunViewSet
+from apps.core.financial_period_views import FinancialPeriodViewSet
+from apps.core.profit_loss_report_views import ProfitLossReportViewSet
+from apps.core.cash_flow_overview_views import CashFlowOverviewViewSet
+from apps.core.inventory_cost_valuation_views import InventoryCostValuationViewSet
+from apps.core.expense_budget_views import ExpenseBudgetViewSet
+from apps.core.tax_configuration_views import TaxConfigurationViewSet
+from apps.core.accounting_reports_export_views import AccountingReportsExportViewSet
+from apps.core.accounting_error_reversal_views import AccountingErrorReversalViewSet
+from apps.core.finance_consistency_audit_views import FinanceConsistencyAuditViewSet
+from apps.core.device_local_db_schema_views import DeviceLocalDbSchemaViewSet
+from apps.core.device_encryption_key_views import DeviceEncryptionKeyViewSet
+from apps.core.offline_cache_seeding_views import OfflineCacheSeedingViewSet
+from apps.core.durable_outbox_views import DurableOutboxViewSet
 from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
 from apps.core.supply_chain_alert_views import SupplyChainAlertViewSet
 from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
@@ -327,6 +365,38 @@ router.register("inventory/batch-merges", BatchMergeViewSet, basename="inventory
 router.register("inventory/valuation", StockValuationViewSet, basename="inventory-valuation")
 router.register("inventory/concurrency-tests", PackagingConcurrencyViewSet, basename="inventory-concurrency-tests")
 router.register("procurement/suppliers", SupplierOrganizationViewSet, basename="procurement-suppliers")
+router.register("procurement/vendor-payments", VendorPaymentViewSet, basename="procurement-vendor-payments")
+router.register("finance/accounts", FinancialAccountViewSet, basename="finance-accounts")
+router.register("finance/chart-of-accounts", ChartOfAccountsViewSet, basename="finance-chart-of-accounts")
+router.register("finance/journals", DoubleEntryJournalViewSet, basename="finance-journals")
+router.register("finance/sales-postings", SalesAccountingViewSet, basename="finance-sales-postings")
+router.register("finance/purchase-postings", PurchaseAccountingViewSet, basename="finance-purchase-postings")
+router.register("finance/control-accounts", ControlAccountViewSet, basename="finance-control-accounts")
+router.register("finance/expense-categories", ExpenseCategoryViewSet, basename="finance-expense-categories")
+router.register("finance/expenses", OperatingExpenseViewSet, basename="finance-expenses")
+router.register("finance/recurring-expenses", RecurringExpenseViewSet, basename="finance-recurring-expenses")
+router.register("finance/treasury/transfers", CashBankTransferViewSet, basename="finance-treasury-transfers")
+router.register("finance/treasury/reconciliations", BankReconciliationViewSet, basename="finance-treasury-reconciliations")
+router.register("finance/payroll/runs", PayrollRunViewSet, basename="finance-payroll-runs")
+router.register("finance/periods", FinancialPeriodViewSet, basename="finance-periods")
+router.register("finance/reports/profit-and-loss", ProfitLossReportViewSet, basename="finance-reports-profit-and-loss")
+router.register("finance/reports/cash-flow", CashFlowOverviewViewSet, basename="finance-reports-cash-flow")
+router.register("finance/inventory-valuation", InventoryCostValuationViewSet, basename="finance-inventory-valuation")
+router.register("finance/expense-budgets", ExpenseBudgetViewSet, basename="finance-expense-budgets")
+router.register("finance/tax-config", TaxConfigurationViewSet, basename="finance-tax-config")
+router.register("finance/accounting-exports", AccountingReportsExportViewSet, basename="finance-accounting-exports")
+router.register("finance/journal-reversals", AccountingErrorReversalViewSet, basename="finance-journal-reversals")
+router.register("finance/consistency-audit", FinanceConsistencyAuditViewSet, basename="finance-consistency-audit")
+router.register("offline-sync/device-schemas", DeviceLocalDbSchemaViewSet, basename="offline-sync-device-schemas")
+router.register("offline-sync/device-keys", DeviceEncryptionKeyViewSet, basename="offline-sync-device-keys")
+router.register("offline-sync/cache-seeds", OfflineCacheSeedingViewSet, basename="offline-sync-cache-seeds")
+router.register("offline-sync/outbox", DurableOutboxViewSet, basename="offline-sync-outbox")
+router.register("finance/payment-methods", PaymentMethodViewSet, basename="finance-payment-methods")
+router.register("finance/payment-status", PaymentStatusViewSet, basename="finance-payment-status")
+router.register("mobile/due-collections", MobileCustomerDueCollectionViewSet, basename="mobile-due-collections")
+router.register("parties/reconciliation", PartyReconciliationViewSet, basename="party-reconciliation")
+router.register("parties/privacy", PartyPrivacyViewSet, basename="party-privacy")
+router.register("parties", PartyImportExportViewSet, basename="parties")
 router.register("procurement/price-lists", VendorProductPriceListViewSet, basename="procurement-price-lists")
 router.register("procurement/requisitions", PurchaseRequisitionViewSet, basename="procurement-requisitions")
 router.register("procurement/orders", PurchaseOrderViewSet, basename="procurement-orders")
@@ -363,7 +433,11 @@ router.register("inventory/permissions", StockPermissionAuditViewSet, basename="
 router.register("inventory/qa-stress", InventoryFaultStressViewSet, basename="inventory-qa-stress")
 router.register("pos/search", PosFastSearchViewSet, basename="pos-search")
 router.register("pos/customers", PosCustomerViewSet, basename="pos-customers")
+router.register("pos/credit-eligibility", PosCreditEligibilityViewSet, basename="pos-credit-eligibility")
+router.register("pos/receivable-ledger", PosCustomerReceivableLedgerViewSet, basename="pos-receivable-ledger")
 router.register("pos/customer-dues", PosCustomerDueViewSet, basename="pos-customer-dues")
+router.register("pos/partial-collections", PosPartialCollectionViewSet, basename="pos-partial-collections")
+router.register("pos/statements", PosCustomerStatementViewSet, basename="pos-statements")
 router.register("pos/invoice-policies", PosInvoiceNumberPolicyViewSet, basename="pos-invoice-policies")
 router.register("pos/shifts", PosCashierShiftViewSet, basename="pos-shifts")
 router.register("pos/daily-close", PosDailyCloseViewSet, basename="pos-daily-close")
