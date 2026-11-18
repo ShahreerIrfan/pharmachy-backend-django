@@ -27201,6 +27201,155 @@ class SyncCursorCheckpointLedger(models.Model):
         super().save(*args, **kwargs)
 
 
+class DeviceConnectivityState(models.TextChoices):
+    CONNECTED = "CONNECTED", "Connected (Healthy Cloud Sync)"
+    DEGRADED = "DEGRADED", "Degraded (High Latency / Packet Loss / Intermittent)"
+    DISCONNECTED = "DISCONNECTED", "Disconnected (Offline Local Queue Mode)"
+    RECONNECTED = "RECONNECTED", "Reconnected (Catch-up Sync Ready)"
+
+
+class DeviceConnectivitySnapshot(models.Model):
+    """
+    Architecture Decision: ADR-0309 (P309).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Tracks each registered POS terminal's non-blocking connectivity state, latency/loss telemetry,
+    pending local outbox count/BDT, and accurate last-sync timestamps linked to P308 DeviceSyncWatermark.
+    """
+
+    snapshot_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="device_connectivity_snapshots")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="device_connectivity_snapshots")
+    device_registration = models.OneToOneField(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="connectivity_snapshot",
+    )
+    sync_watermark = models.ForeignKey(
+        DeviceSyncWatermark,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="connectivity_snapshots",
+    )
+    connectivity_state = models.CharField(
+        max_length=20,
+        choices=DeviceConnectivityState.choices,
+        default=DeviceConnectivityState.DISCONNECTED,
+        db_index=True,
+    )
+    latency_ms = models.PositiveIntegerField(default=0)
+    packet_loss_pct = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00")), MaxValueValidator(Decimal("100.00"))],
+    )
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    pending_outbox_count = models.PositiveIntegerField(default=0)
+    pending_outbox_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    degraded_latency_threshold_ms = models.PositiveIntegerField(default=1500)
+    last_probe_at = models.DateTimeField(null=True, blank=True)
+    last_connected_at = models.DateTimeField(null=True, blank=True)
+    last_successful_sync_at = models.DateTimeField(null=True, blank=True)
+    state_changed_at = models.DateTimeField(auto_now_add=True)
+    is_archived = models.BooleanField(default=False, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Device Connectivity Snapshot"
+        verbose_name_plural = "Device Connectivity Snapshots"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "connectivity_state"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(packet_loss_pct__gte=Decimal("0.00"))
+                & models.Q(packet_loss_pct__lte=Decimal("100.00")),
+                name="chk_conn_pkt_loss_0_100",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(pending_outbox_bdt__gte=Decimal("0.00")),
+                name="chk_conn_pending_bdt_gte_0",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(degraded_latency_threshold_ms__gte=100),
+                name="chk_conn_latency_thresh_gte_100",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.snapshot_id:
+            self.snapshot_id = f"conn-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class DeviceConnectivityTransitionLog(models.Model):
+    """
+    Architecture Decision: ADR-0309 (P309).
+    Append-only audit log of device connectivity transitions (CONNECTED / DEGRADED / DISCONNECTED / RECONNECTED).
+    """
+
+    log_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="connectivity_transition_logs")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="connectivity_transition_logs")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="connectivity_transition_logs",
+    )
+    snapshot = models.ForeignKey(
+        DeviceConnectivitySnapshot,
+        on_delete=models.CASCADE,
+        related_name="transition_logs",
+    )
+    from_state = models.CharField(max_length=20, choices=DeviceConnectivityState.choices)
+    to_state = models.CharField(max_length=20, choices=DeviceConnectivityState.choices, db_index=True)
+    latency_ms = models.PositiveIntegerField(default=0)
+    packet_loss_pct = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("0.00"))
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    pending_outbox_count = models.PositiveIntegerField(default=0)
+    pending_outbox_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    reason = models.CharField(max_length=255, blank=True, default="")
+    idempotency_key = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    recorded_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="connectivity_transitions_recorded",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Device Connectivity Transition Log"
+        verbose_name_plural = "Device Connectivity Transition Logs"
+        indexes = [
+            models.Index(fields=["tenant", "device_registration", "-created_at"]),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.log_id:
+            self.log_id = f"ctlog-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 
 
 
