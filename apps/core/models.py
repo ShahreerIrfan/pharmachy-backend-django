@@ -27059,6 +27059,148 @@ class DeviceChangeFeedCursor(models.Model):
         super().save(*args, **kwargs)
 
 
+class SyncCheckpointStream(models.TextChoices):
+    PULL_FEED = "PULL_FEED", "Incremental Change-Feed Pull"
+    PUSH_ACK = "PUSH_ACK", "Independent Push Acknowledgment"
+    AUDITED_RESET = "AUDITED_RESET", "Audited Recovery Reset / Rewind"
+
+
+class SyncCheckpointStatus(models.TextChoices):
+    COMMITTED = "COMMITTED", "Committed After Durable Local Apply"
+    IDEMPOTENT_REPLAY = "IDEMPOTENT_REPLAY", "Replay-Safe Duplicate Checkpoint"
+    REJECTED_UNAPPLIED = "REJECTED_UNAPPLIED", "Rejected — Local Apply Not Verified"
+    AUDITED_REWIND = "AUDITED_REWIND", "Audited Cursor Rewind (Epoch Incremented)"
+
+
+class DeviceSyncWatermark(models.Model):
+    """
+    Architecture Decision: ADR-0308 (P308).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Maintains strictly independent pull-cursor and push-acknowledgment watermarks per device
+    so a crash or network partition in one stream NEVER corrupts or regresses the other.
+    """
+
+    watermark_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="device_sync_watermarks")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="device_sync_watermarks")
+    device_registration = models.OneToOneField(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="sync_watermark",
+    )
+    pull_cursor = models.ForeignKey(
+        DeviceChangeFeedCursor,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sync_watermarks",
+    )
+    pull_applied_sequence_no = models.BigIntegerField(default=0)
+    pull_apply_digest_sha256 = models.CharField(max_length=64, blank=True, default="")
+    pull_checkpointed_at = models.DateTimeField(null=True, blank=True)
+
+    push_acked_sequence_no = models.BigIntegerField(default=0)
+    push_last_ack_id = models.CharField(max_length=64, blank=True, default="")
+    push_total_acked_count = models.PositiveIntegerField(default=0)
+    push_monetary_reconciled_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    push_checkpointed_at = models.DateTimeField(null=True, blank=True)
+
+    recovery_epoch = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Device Sync Watermark"
+        verbose_name_plural = "Device Sync Watermarks"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "recovery_epoch"]),
+        ]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(pull_applied_sequence_no__gte=0), name="chk_wm_pull_seq_gte_0"),
+            models.CheckConstraint(condition=models.Q(push_acked_sequence_no__gte=0), name="chk_wm_push_seq_gte_0"),
+            models.CheckConstraint(condition=models.Q(recovery_epoch__gte=1), name="chk_wm_epoch_gte_1"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.watermark_id:
+            self.watermark_id = f"syncwm-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class SyncCursorCheckpointLedger(models.Model):
+    """
+    Architecture Decision: ADR-0308 (P308).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Append-only audit ledger capturing every pull checkpoint, independent push ack confirmation,
+    rejected unapplied checkpoint attempt, and owner-authorized recovery rewind.
+    """
+
+    ledger_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="sync_checkpoint_ledgers")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="sync_checkpoint_ledgers")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="sync_checkpoint_ledgers",
+    )
+    watermark = models.ForeignKey(
+        DeviceSyncWatermark,
+        on_delete=models.CASCADE,
+        related_name="ledger_entries",
+    )
+    stream = models.CharField(max_length=24, choices=SyncCheckpointStream.choices, db_index=True)
+    status = models.CharField(max_length=24, choices=SyncCheckpointStatus.choices, db_index=True)
+    previous_sequence_no = models.BigIntegerField(default=0)
+    new_sequence_no = models.BigIntegerField(default=0)
+    durable_local_apply_verified = models.BooleanField(default=False)
+    local_apply_digest_sha256 = models.CharField(max_length=64, blank=True, default="")
+    monetary_reconciled_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    recovery_epoch = models.PositiveIntegerField(default=1)
+    idempotency_key = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    notes = models.TextField(blank=True, default="")
+    actor = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="sync_checkpoint_actions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Sync Cursor Checkpoint Ledger"
+        verbose_name_plural = "Sync Cursor Checkpoint Ledgers"
+        indexes = [
+            models.Index(fields=["tenant", "device_registration", "stream", "-created_at"]),
+        ]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(previous_sequence_no__gte=0), name="chk_cpled_prev_gte_0"),
+            models.CheckConstraint(condition=models.Q(new_sequence_no__gte=0), name="chk_cpled_new_gte_0"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.ledger_id:
+            self.ledger_id = f"cpled-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 
 
 
