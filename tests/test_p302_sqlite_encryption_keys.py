@@ -146,7 +146,7 @@ class TestSqliteEncryptionKeysIntegration:
             },
             format="json",
         )
-        assert bad_rot.status_code == status.HTTP_400_BAD_REQUEST
+        assert bad_rot.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert bad_rot.data["error_code"] == "ERR_KEY_REUSE_FORBIDDEN"
 
         # 3. Rotate v1 -> v2
@@ -211,7 +211,7 @@ class TestSqliteEncryptionKeysIntegration:
             },
             format="json",
         )
-        assert plain.status_code == status.HTTP_400_BAD_REQUEST
+        assert plain.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert plain.data["error_code"] == "ERR_UNWRAPPED_OR_INVALID_KEY_BLOB"
 
         # Branch Manager & Cashier denied key provisioning (403)

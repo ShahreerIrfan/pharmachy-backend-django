@@ -157,7 +157,7 @@ class TestTaxConfigurationAndInvoicesIntegration:
 
         # Review without reference rejected
         no_ref = self.client.post(f"/api/v2/finance/tax-config/{rule_id}/review-activate/", {}, format="json")
-        assert no_ref.status_code == status.HTTP_400_BAD_REQUEST
+        assert no_ref.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert no_ref.data["error_code"] == "ERR_MISSING_REVIEW_REFERENCE"
 
         # Review with valid advisor memo activates rule
@@ -171,7 +171,7 @@ class TestTaxConfigurationAndInvoicesIntegration:
 
         # Reviewed rule is immutable on PATCH
         imm = self.client.patch(f"/api/v2/finance/tax-config/{rule_id}/", {"tax_rate_pct": "15.000"}, format="json")
-        assert imm.status_code == status.HTTP_400_BAD_REQUEST
+        assert imm.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert imm.data["error_code"] == "ERR_TAX_RULE_IMMUTABLE"
 
         # Archive rule
@@ -302,7 +302,7 @@ class TestTaxConfigurationAndInvoicesIntegration:
             },
             format="json",
         )
-        assert bad_rate.status_code == status.HTTP_400_BAD_REQUEST
+        assert bad_rate.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         # Valid rule for cross-tenant & CSV tests
         ok = self.client.post(

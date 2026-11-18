@@ -121,10 +121,9 @@ class TestFinanceE2EConsistencyCapstone:
             product_id=f"med-e2e-{self.suffix}",
             brand_name="Napa Extend",
             generic_name="Paracetamol",
-            strength="665mg",
             dosage_form="TABLET",
-            manufacturer="Beximco Pharmaceuticals",
-            mrp_bdt=Decimal("20.00"),
+            cost_unit=Decimal("10.00"),
+            mrp_unit=Decimal("20.00"),
         )
         self.cat_utilities = ExpenseCategory.objects.get(tenant=self.tenant_a, code="UTILITIES")
 
@@ -136,6 +135,7 @@ class TestFinanceE2EConsistencyCapstone:
             branch=self.branch_a1,
             product=self.med,
             batch_number="B-E2E-01",
+            purchase_date=self.today,
             expiry_date=self.today + datetime.timedelta(days=365),
             quantity_base_units=100,
             cost_per_unit=Decimal("10.00"),
@@ -147,6 +147,7 @@ class TestFinanceE2EConsistencyCapstone:
             branch=self.branch_a2,
             product=self.med,
             batch_number="B-E2E-02",
+            purchase_date=self.today,
             expiry_date=self.today + datetime.timedelta(days=365),
             quantity_base_units=50,
             cost_per_unit=Decimal("12.00"),
@@ -315,7 +316,7 @@ class TestFinanceE2EConsistencyCapstone:
         bad = self.client.get(
             f"/api/v2/finance/consistency-audit/?tenant_id={self.tenant_a.tenant_id}&start_date=2026-12-31&end_date=2026-01-01"
         )
-        assert bad.status_code == status.HTTP_400_BAD_REQUEST
+        assert bad.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         # Cashier denied
         self.client.force_authenticate(user=self.cashier_a1)

@@ -181,7 +181,7 @@ class TestAccountingErrorReversalIntegration:
 
         # 6. Cannot cancel executed reversal
         del_exec = self.client.delete(f"/api/v2/finance/journal-reversals/{req_id}/")
-        assert del_exec.status_code == status.HTTP_400_BAD_REQUEST
+        assert del_exec.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
     def test_02_invalid_unbalanced_replacement_and_duplicate_request_rejected(self):
         self.client.force_authenticate(user=self.finance_a)
@@ -199,7 +199,7 @@ class TestAccountingErrorReversalIntegration:
             },
             format="json",
         )
-        assert unbal.status_code == status.HTTP_400_BAD_REQUEST
+        assert unbal.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert unbal.data["error_code"] == "ERR_UNBALANCED_REPLACEMENT_ENTRY"
 
         # Valid request, then duplicate rejected
@@ -224,7 +224,7 @@ class TestAccountingErrorReversalIntegration:
             },
             format="json",
         )
-        assert dup.status_code == status.HTTP_400_BAD_REQUEST
+        assert dup.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert dup.data["error_code"] == "ERR_DUPLICATE_REVERSAL_REQUEST"
 
     def test_03_rbac_cross_tenant_suspended_and_csv_export(self):

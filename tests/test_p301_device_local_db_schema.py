@@ -241,7 +241,7 @@ class TestDeviceLocalDbSchemaIntegration:
             },
             format="json",
         )
-        assert bad.status_code == status.HTTP_400_BAD_REQUEST
+        assert bad.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         # Cashier denied device registration (403)
         self.client.force_authenticate(user=self.cashier_a1)

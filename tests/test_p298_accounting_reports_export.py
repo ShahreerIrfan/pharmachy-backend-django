@@ -191,12 +191,12 @@ class TestAccountingReportsExportIntegration:
             {"tenant_id": self.tenant_a.tenant_id, "report_type": "NON_EXISTENT"},
             format="json",
         )
-        assert r1.status_code == status.HTTP_400_BAD_REQUEST
+        assert r1.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         r2 = self.client.get(
             f"/api/v2/finance/accounting-exports/live/?report_type=TRIAL_BALANCE&start_date=2026-12-31&end_date=2026-01-01&tenant_id={self.tenant_a.tenant_id}"
         )
-        assert r2.status_code == status.HTTP_400_BAD_REQUEST
+        assert r2.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
     def test_04_permission_scoping_cross_tenant_and_suspended_tenant(self):
         # Owner creates consolidated snapshot

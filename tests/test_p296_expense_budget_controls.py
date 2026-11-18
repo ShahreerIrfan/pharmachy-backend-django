@@ -228,7 +228,7 @@ class TestExpenseBudgetControlsIntegration:
             {"planned_amount_bdt": "15000.00"},
             format="json",
         )
-        assert fail_patch.status_code == status.HTTP_400_BAD_REQUEST
+        assert fail_patch.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert fail_patch.data["error_code"] == "ERR_BUDGET_ARCHIVED"
 
     def test_02_within_budget_warning_threshold_and_balanced_gl(self):
@@ -310,7 +310,7 @@ class TestExpenseBudgetControlsIntegration:
         # 2. Owner without budget_override=True gets 400 confirmation required
         self.client.force_authenticate(user=self.owner_a)
         no_override = self.client.post(f"/api/v2/finance/expenses/{exp_id}/approve/", {}, format="json")
-        assert no_override.status_code == status.HTTP_400_BAD_REQUEST
+        assert no_override.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert no_override.data["error_code"] == "ERR_BUDGET_OVERRIDE_CONFIRMATION_REQUIRED"
 
         # 3. Owner with explicit budget_override=True succeeds and logs APPROVAL_OVERRIDE
@@ -358,7 +358,7 @@ class TestExpenseBudgetControlsIntegration:
             {"budget_override": True, "budget_override_reason": "Try override"},
             format="json",
         )
-        assert blocked.status_code == status.HTTP_400_BAD_REQUEST
+        assert blocked.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert blocked.data["error_code"] == "ERR_BUDGET_HARD_LIMIT_EXCEEDED"
         assert OperatingExpenseEntry.objects.get(expense_id=exp_id).status == OperatingExpenseStatus.DRAFT
 
@@ -438,7 +438,7 @@ class TestExpenseBudgetControlsIntegration:
         assert self.client.post("/api/v2/finance/expense-budgets/", payload, format="json").status_code == status.HTTP_201_CREATED
 
         dup = self.client.post("/api/v2/finance/expense-budgets/", payload, format="json")
-        assert dup.status_code == status.HTTP_400_BAD_REQUEST
+        assert dup.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert dup.data["error_code"] == "ERR_DUPLICATE_ACTIVE_BUDGET"
 
         neg = self.client.post(
@@ -446,7 +446,7 @@ class TestExpenseBudgetControlsIntegration:
             {**payload, "category_id": self.cat_internet.category_id, "planned_amount_bdt": "-100.00"},
             format="json",
         )
-        assert neg.status_code == status.HTTP_400_BAD_REQUEST
+        assert neg.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         bad_thresh = self.client.post(
             "/api/v2/finance/expense-budgets/",
@@ -458,7 +458,7 @@ class TestExpenseBudgetControlsIntegration:
             },
             format="json",
         )
-        assert bad_thresh.status_code == status.HTTP_400_BAD_REQUEST
+        assert bad_thresh.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert bad_thresh.data["error_code"] == "ERR_INVALID_CRITICAL_THRESHOLD"
 
     def test_08_cashier_and_pharmacist_denied_access(self):

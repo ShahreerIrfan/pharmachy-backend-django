@@ -198,7 +198,7 @@ class OfflineCacheSeedingService:
                     "brand_name": m.brand_name,
                     "generic_name": m.generic_name,
                     "dosage_form": str(getattr(m, "dosage_form", "TABLET")),
-                    "mrp_bdt": str(q2(getattr(m, "mrp_bdt", Decimal("0.00")))),
+                    "mrp_bdt": str(q2(getattr(m, "mrp_unit", getattr(m, "mrp_bdt", Decimal("0.00"))))),
                     "rx_required": bool(getattr(m, "requires_prescription", False)),
                     "is_antimicrobial": bool(getattr(m, "is_antimicrobial", False)),
                     "is_active": True,

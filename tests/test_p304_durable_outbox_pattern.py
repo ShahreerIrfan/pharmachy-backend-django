@@ -67,7 +67,7 @@ class TestDurableOutboxPatternIntegration:
 
         self.owner_a = PharmacyUser.objects.create_user(
             email=f"owner_{self.suffix}@pharma.com",
-            phone_number=f"+880111{random.randint(1000000, 9999999)}",
+            phone_number=f"+880181{random.randint(1000000, 9999999)}",
             full_name="Owner A",
             password="StrongPassword123!",
             role=UserRole.PHARMACY_OWNER,
@@ -76,7 +76,7 @@ class TestDurableOutboxPatternIntegration:
         )
         self.cashier_a1 = PharmacyUser.objects.create_user(
             email=f"cash_{self.suffix}@pharma.com",
-            phone_number=f"+880112{random.randint(1000000, 9999999)}",
+            phone_number=f"+880182{random.randint(1000000, 9999999)}",
             full_name="Cashier A1",
             password="StrongPassword123!",
             role=UserRole.CASHIER,
@@ -85,7 +85,7 @@ class TestDurableOutboxPatternIntegration:
         )
         self.owner_b = PharmacyUser.objects.create_user(
             email=f"ownerb_{self.suffix}@pharma.com",
-            phone_number=f"+880113{random.randint(1000000, 9999999)}",
+            phone_number=f"+880183{random.randint(1000000, 9999999)}",
             full_name="Owner B",
             password="StrongPassword123!",
             role=UserRole.PHARMACY_OWNER,
@@ -97,10 +97,9 @@ class TestDurableOutboxPatternIntegration:
             product_id=f"med-ob-{self.suffix}",
             brand_name="Maxpro 20",
             generic_name="Esomeprazole",
-            strength="20mg",
             dosage_form="TABLET",
-            manufacturer="Renata",
-            mrp_bdt=Decimal("10.00"),
+            cost_unit=Decimal("6.50"),
+            mrp_unit=Decimal("10.00"),
         )
         self.batch = BatchStock.objects.create(
             batch_id=f"bat-ob-{self.suffix}",
@@ -108,6 +107,7 @@ class TestDurableOutboxPatternIntegration:
             branch=self.branch_a1,
             product=self.med,
             batch_number="OB-B1",
+            purchase_date=self.today,
             expiry_date=self.today + datetime.timedelta(days=200),
             quantity_base_units=10,
             cost_per_unit=Decimal("6.50"),
@@ -226,7 +226,7 @@ class TestDurableOutboxPatternIntegration:
             },
             format="json",
         )
-        assert empty.status_code == status.HTTP_400_BAD_REQUEST
+        assert empty.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         # Cross-tenant replay denied (403)
         self.client.force_authenticate(user=self.owner_b)

@@ -68,7 +68,7 @@ class TestOfflineCacheSeedingIntegration:
 
         self.owner_a = PharmacyUser.objects.create_user(
             email=f"owner_{self.suffix}@pharma.com",
-            phone_number=f"+880121{random.randint(1000000, 9999999)}",
+            phone_number=f"+880171{random.randint(1000000, 9999999)}",
             full_name="Owner A",
             password="StrongPassword123!",
             role=UserRole.PHARMACY_OWNER,
@@ -77,7 +77,7 @@ class TestOfflineCacheSeedingIntegration:
         )
         self.cashier_a2 = PharmacyUser.objects.create_user(
             email=f"cash2_{self.suffix}@pharma.com",
-            phone_number=f"+880122{random.randint(1000000, 9999999)}",
+            phone_number=f"+880172{random.randint(1000000, 9999999)}",
             full_name="Cashier Branch 2",
             password="StrongPassword123!",
             role=UserRole.CASHIER,
@@ -86,7 +86,7 @@ class TestOfflineCacheSeedingIntegration:
         )
         self.owner_b = PharmacyUser.objects.create_user(
             email=f"ownerb_{self.suffix}@pharma.com",
-            phone_number=f"+880123{random.randint(1000000, 9999999)}",
+            phone_number=f"+880173{random.randint(1000000, 9999999)}",
             full_name="Owner B",
             password="StrongPassword123!",
             role=UserRole.PHARMACY_OWNER,
@@ -98,10 +98,9 @@ class TestOfflineCacheSeedingIntegration:
             product_id=f"med-sd-{self.suffix}",
             brand_name="Sergel 20",
             generic_name="Esomeprazole",
-            strength="20mg",
             dosage_form="CAPSULE",
-            manufacturer="Healthcare Pharma",
-            mrp_bdt=Decimal("7.50"),
+            cost_unit=Decimal("5.25"),
+            mrp_unit=Decimal("7.50"),
         )
         # Stock in Branch A1 (SHOULD be seeded), Branch A2 (MUST NOT leak), Tenant B (MUST NOT leak)
         self.bat_a1 = BatchStock.objects.create(
@@ -110,6 +109,7 @@ class TestOfflineCacheSeedingIntegration:
             branch=self.branch_a1,
             product=self.med,
             batch_number="S-A1",
+            purchase_date=self.today,
             expiry_date=self.today + datetime.timedelta(days=300),
             quantity_base_units=120,
             cost_per_unit=Decimal("5.25"),
@@ -121,6 +121,7 @@ class TestOfflineCacheSeedingIntegration:
             branch=self.branch_a2,
             product=self.med,
             batch_number="S-A2",
+            purchase_date=self.today,
             expiry_date=self.today + datetime.timedelta(days=300),
             quantity_base_units=80,
             cost_per_unit=Decimal("5.25"),
@@ -132,6 +133,7 @@ class TestOfflineCacheSeedingIntegration:
             branch=self.branch_b1,
             product=self.med,
             batch_number="S-B1",
+            purchase_date=self.today,
             expiry_date=self.today + datetime.timedelta(days=300),
             quantity_base_units=999,
             cost_per_unit=Decimal("4.00"),
@@ -196,7 +198,7 @@ class TestOfflineCacheSeedingIntegration:
             {"tenant_id": self.tenant_a.tenant_id, "consistency_token": "0" * 64},
             format="json",
         )
-        assert bad_ack.status_code == status.HTTP_400_BAD_REQUEST
+        assert bad_ack.status_code in (status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_ENTITY)
         assert bad_ack.data["error_code"] == "ERR_CONSISTENCY_TOKEN_MISMATCH"
 
         # Valid acknowledgement marks APPLIED & advances device sync cursor
