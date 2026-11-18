@@ -27553,6 +27553,204 @@ class OfflineStockOversellDispute(models.Model):
         super().save(*args, **kwargs)
 
 
+class OfflineRxCategory(models.TextChoices):
+    OTC = "OTC", "Over-the-Counter (Non-Prescription)"
+    STANDARD_RX = "STANDARD_RX", "Standard Prescription-Only Medicine"
+    ANTIMICROBIAL_RX = "ANTIMICROBIAL_RX", "Antimicrobial / Antibiotic Prescription"
+    CONTROLLED_NARCOTIC = "CONTROLLED_NARCOTIC", "Controlled / Narcotic Substance (Offline Forbidden)"
+
+
+class OfflineRxTokenStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active Pre-Verified Authorization Token"
+    CONSUMED = "CONSUMED", "Fully Dispensed / Consumed"
+    REVOKED = "REVOKED", "Revoked / Reversed by Pharmacist or Manager"
+    EXPIRED = "EXPIRED", "Expired Authorization Window"
+
+
+class OfflinePrescriptionPolicy(models.Model):
+    """
+    Architecture Decision: ADR-0311 (P311).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Branch-scoped offline prescription authorization policy.
+    Hard safety invariant: Controlled/narcotic medicines are NEVER allowed for offline dispensing,
+    and offline prescription verification ALWAYS fails closed when authorization cannot be established.
+    """
+
+    policy_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="offline_rx_policies")
+    branch = models.OneToOneField(Branch, on_delete=models.CASCADE, related_name="offline_rx_policy")
+    allow_offline_otc = models.BooleanField(default=True)
+    allow_offline_standard_rx = models.BooleanField(default=True)
+    allow_offline_antimicrobial_rx = models.BooleanField(default=False)
+    allow_offline_controlled_narcotic = models.BooleanField(default=False)
+    require_pharmacist_pre_verification = models.BooleanField(default=True)
+    fail_closed_when_unverified = models.BooleanField(default=True)
+    max_token_ttl_hours = models.PositiveSmallIntegerField(
+        default=24,
+        validators=[MinValueValidator(1), MaxValueValidator(72)],
+        help_text="Maximum validity window in hours for cached offline Rx authorization tokens (1..72h).",
+    )
+    is_archived = models.BooleanField(default=False, db_index=True)
+    updated_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="offline_rx_policies_updated",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Offline Prescription Policy"
+        verbose_name_plural = "Offline Prescription Policies"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(max_token_ttl_hours__gte=1) & models.Q(max_token_ttl_hours__lte=72),
+                name="chk_orxp_ttl_1_72",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.policy_id:
+            self.policy_id = f"orxp-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class OfflinePrescriptionAuthToken(models.Model):
+    """
+    Architecture Decision: ADR-0311 (P311).
+    Minimal-PHI, policy-approved, SHA-256 signed offline prescription authorization token cached on a bound POS device.
+    Stores ONLY cryptographic prescription reference hashes (never raw patient PII or raw Rx scans).
+    """
+
+    token_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="offline_rx_auth_tokens")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="offline_rx_auth_tokens")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="offline_rx_auth_tokens",
+    )
+    product = models.ForeignKey(MedicineProduct, on_delete=models.CASCADE, related_name="offline_rx_auth_tokens")
+    rx_category = models.CharField(max_length=24, choices=OfflineRxCategory.choices, db_index=True)
+    prescription_ref_hash_sha256 = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text="SHA-256 hash of server prescription ID + salt (minimized PHI for offline cache).",
+    )
+    approved_max_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    dispensed_units = models.PositiveIntegerField(default=0)
+    unit_price_bdt = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("0.00"), validators=[MinValueValidator(Decimal("0.00"))]
+    )
+    authorized_total_bdt = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal("0.00"), validators=[MinValueValidator(Decimal("0.00"))]
+    )
+    verified_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="issued_offline_rx_tokens",
+    )
+    token_signature_sha256 = models.CharField(max_length=64)
+    expires_at = models.DateTimeField(db_index=True)
+    status = models.CharField(
+        max_length=16,
+        choices=OfflineRxTokenStatus.choices,
+        default=OfflineRxTokenStatus.ACTIVE,
+        db_index=True,
+    )
+    revocation_reason = models.CharField(max_length=255, blank=True, default="")
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    idempotency_key = models.CharField(max_length=128, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Offline Prescription Auth Token"
+        verbose_name_plural = "Offline Prescription Auth Tokens"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status", "expires_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="uq_orxtok_tenant_idem"),
+            models.CheckConstraint(condition=models.Q(approved_max_units__gte=1), name="chk_orxtok_max_gte_1"),
+            models.CheckConstraint(
+                condition=models.Q(dispensed_units__lte=models.F("approved_max_units")),
+                name="chk_orxtok_disp_lte_max",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.token_id:
+            self.token_id = f"orxtok-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class OfflineRxDispenseAudit(models.Model):
+    """
+    Architecture Decision: ADR-0311 (P311).
+    Append-only audit log of offline Rx dispense verifications (and replay-safe idempotency keys).
+    """
+
+    audit_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="offline_rx_dispense_audits")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="offline_rx_dispense_audits")
+    token = models.ForeignKey(
+        OfflinePrescriptionAuthToken,
+        on_delete=models.CASCADE,
+        related_name="dispense_audits",
+    )
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="offline_rx_dispense_audits",
+    )
+    local_invoice_ref = models.CharField(max_length=80)
+    dispensed_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    dispensed_value_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    antimicrobial_register_required = models.BooleanField(default=False)
+    idempotency_key = models.CharField(max_length=128, db_index=True)
+    dispensed_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="offline_rx_dispenses_verified",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Offline Rx Dispense Audit"
+        verbose_name_plural = "Offline Rx Dispense Audits"
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="uq_orxaud_tenant_idem"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.audit_id:
+            self.audit_id = f"orxaud-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 
 
 
