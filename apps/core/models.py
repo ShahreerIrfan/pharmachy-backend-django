@@ -26845,6 +26845,86 @@ class CloudSyncPushBatch(models.Model):
         super().save(*args, **kwargs)
 
 
+class CanonicalAckDisposition(models.TextChoices):
+    COMMITTED = "COMMITTED", "Committed Transactionally — Canonical ID Issued"
+    REPLAY_IDEMPOTENT = "REPLAY_IDEMPOTENT", "Replay-Safe Duplicate — Original Canonical ID Returned"
+    RETRYABLE_TRANSIENT = "RETRYABLE_TRANSIENT", "Transient Failure — Retry with Backoff"
+    TERMINAL_CONFLICT = "TERMINAL_CONFLICT", "Terminal Conflict — Routed to Review Queue"
+    TERMINAL_REJECTED = "TERMINAL_REJECTED", "Terminal Policy Rejection"
+
+
+class CanonicalCommandAcknowledgment(models.Model):
+    """
+    Architecture Decision: ADR-0306 (P306).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Immutable, replay-safe canonical server acknowledgment mapping a POS device's local
+    offline command/idempotency key to a stable server canonical entity ID and signed digest.
+    """
+
+    ack_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="canonical_command_acks")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="canonical_command_acks")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="canonical_acks",
+    )
+    outbox_receipt = models.ForeignKey(
+        OfflineOutboxCommandReceipt,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="canonical_acks",
+    )
+    command_id = models.CharField(max_length=64, db_index=True)
+    idempotency_key = models.CharField(max_length=128, db_index=True)
+    client_sequence = models.BigIntegerField()
+    aggregate_type = models.CharField(max_length=48, default="SALE_INVOICE")
+    local_aggregate_ref = models.CharField(max_length=80)
+    canonical_entity_id = models.CharField(max_length=80, blank=True, default="", db_index=True)
+    disposition = models.CharField(
+        max_length=24,
+        choices=CanonicalAckDisposition.choices,
+        default=CanonicalAckDisposition.COMMITTED,
+        db_index=True,
+    )
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    error_detail = models.TextField(blank=True, default="")
+    monetary_total_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    ack_signature_sha256 = models.CharField(max_length=64)
+    replay_count = models.PositiveIntegerField(default=0)
+    acknowledged_by_client_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Canonical Command Acknowledgment"
+        verbose_name_plural = "Canonical Command Acknowledgments"
+        indexes = [
+            models.Index(fields=["tenant", "device_registration", "disposition"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="uq_canonical_ack_tenant_idem"),
+            models.CheckConstraint(condition=models.Q(client_sequence__gte=1), name="chk_canonical_ack_seq_gte_1"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.ack_id:
+            self.ack_id = f"cack-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 
 
 

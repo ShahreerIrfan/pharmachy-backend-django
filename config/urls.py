@@ -209,6 +209,7 @@ from apps.core.device_encryption_key_views import DeviceEncryptionKeyViewSet
 from apps.core.offline_cache_seeding_views import OfflineCacheSeedingViewSet
 from apps.core.durable_outbox_views import DurableOutboxViewSet
 from apps.core.cloud_push_protocol_views import CloudPushProtocolViewSet
+from apps.core.canonical_ack_views import CanonicalAckViewSet
 from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
 from apps.core.supply_chain_alert_views import SupplyChainAlertViewSet
 from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
@@ -393,6 +394,7 @@ router.register("offline-sync/device-keys", DeviceEncryptionKeyViewSet, basename
 router.register("offline-sync/cache-seeds", OfflineCacheSeedingViewSet, basename="offline-sync-cache-seeds")
 router.register("offline-sync/outbox", DurableOutboxViewSet, basename="offline-sync-outbox")
 router.register("offline-sync/push", CloudPushProtocolViewSet, basename="offline-sync-push")
+router.register("offline-sync/canonical-acks", CanonicalAckViewSet, basename="offline-sync-canonical-acks")
 router.register("finance/payment-methods", PaymentMethodViewSet, basename="finance-payment-methods")
 router.register("finance/payment-status", PaymentStatusViewSet, basename="finance-payment-status")
 router.register("mobile/due-collections", MobileCustomerDueCollectionViewSet, basename="mobile-due-collections")
