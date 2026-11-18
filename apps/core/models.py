@@ -27751,6 +27751,139 @@ class OfflineRxDispenseAudit(models.Model):
         super().save(*args, **kwargs)
 
 
+class SignedOfflineLeaseState(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active — Offline POS & Sync Permitted"
+    EXPIRED_RECOVERY_ONLY = "EXPIRED_RECOVERY_ONLY", "Expired — New Sales Blocked, Protected Recovery Sync Allowed"
+    CLOCK_TAMPER_QUARANTINED = "CLOCK_TAMPER_QUARANTINED", "Quarantined — Device Clock Rollback Detected"
+    REVOKED = "REVOKED", "Revoked by Owner/Manager"
+
+
+class SignedOfflineSubscriptionLease(models.Model):
+    """
+    Architecture Decision: ADR-0312 (P312).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Cryptographically signed offline subscription & role lease bound to a registered POS device:
+    - Enforces server-anchored monotonic expiration with zero device-clock-rollback bypass.
+    - Guarantees protected safe sync recovery paths even after lease expiry or subscription lapse
+      so queued offline invoices/data are NEVER silently deleted or stranded.
+    """
+
+    lease_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="signed_offline_leases")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="signed_offline_leases")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="signed_offline_leases",
+    )
+    plan_tier = models.CharField(max_length=32, default="STANDARD")
+    allowed_roles_json = models.JSONField(default=list)
+    entitlements_json = models.JSONField(default=dict)
+    issued_at = models.DateTimeField()
+    expires_at = models.DateTimeField(db_index=True)
+    server_clock_anchor_epoch_ms = models.BigIntegerField()
+    last_observed_client_epoch_ms = models.BigIntegerField(default=0)
+    monotonic_counter = models.PositiveIntegerField(default=1)
+    grace_recovery_window_hours = models.PositiveSmallIntegerField(
+        default=168,
+        validators=[MinValueValidator(24), MaxValueValidator(720)],
+    )
+    lease_signature_hmac_sha256 = models.CharField(max_length=64)
+    status = models.CharField(
+        max_length=32,
+        choices=SignedOfflineLeaseState.choices,
+        default=SignedOfflineLeaseState.ACTIVE,
+        db_index=True,
+    )
+    pending_recovery_count = models.PositiveIntegerField(default=0)
+    pending_recovery_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        validators=[MinValueValidator(Decimal("0.00"))],
+    )
+    revocation_reason = models.CharField(max_length=255, blank=True, default="")
+    idempotency_key = models.CharField(max_length=128, db_index=True)
+    issued_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="issued_signed_offline_leases",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Signed Offline Subscription Lease"
+        verbose_name_plural = "Signed Offline Subscription Leases"
+        indexes = [
+            models.Index(fields=["tenant", "device_registration", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="uq_sol_tenant_idem"),
+            models.CheckConstraint(condition=models.Q(monotonic_counter__gte=1), name="chk_sol_counter_gte_1"),
+            models.CheckConstraint(
+                condition=models.Q(pending_recovery_bdt__gte=Decimal("0.00")), name="chk_sol_rec_bdt_gte_0"
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.lease_id:
+            self.lease_id = f"sol-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class OfflineLeaseAuditEvent(models.Model):
+    """
+    Architecture Decision: ADR-0312 (P312).
+    Append-only audit log for lease issuance, clock-rollback detection, revocation, and protected recovery sync.
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="offline_lease_audit_events")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="offline_lease_audit_events")
+    lease = models.ForeignKey(
+        SignedOfflineSubscriptionLease,
+        on_delete=models.CASCADE,
+        related_name="audit_events",
+    )
+    event_type = models.CharField(max_length=48, db_index=True)
+    client_reported_epoch_ms = models.BigIntegerField(default=0)
+    server_epoch_ms = models.BigIntegerField(default=0)
+    recovered_outbox_count = models.PositiveIntegerField(default=0)
+    recovered_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    detail = models.TextField(blank=True, default="")
+    actor = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="offline_lease_audit_actions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Offline Lease Audit Event"
+        verbose_name_plural = "Offline Lease Audit Events"
+
+    def clean(self):
+        super().clean()
+        if not self.event_id:
+            self.event_id = f"ole-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 
 
 

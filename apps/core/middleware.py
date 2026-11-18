@@ -279,7 +279,10 @@ class TenantContextMiddleware:
                         request_id=request_id,
                     )
 
-            if tenant and not tenant.is_active:
+            protected_recovery_paths = (
+                "/api/v2/offline-sync/subscription-leases/protected-recovery-sync/",
+            )
+            if tenant and not tenant.is_active and not any(request.path.startswith(p) for p in protected_recovery_paths):
                 return self._build_error_response(
                     error_code="ERR_TENANT_INACTIVE",
                     http_status=status.HTTP_403_FORBIDDEN,

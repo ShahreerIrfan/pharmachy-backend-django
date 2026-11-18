@@ -54,6 +54,7 @@ class SubscriptionActivationGateService:
         r"^/api/v2/tenants/[^/]+/data-export/.*$",
         r"^/api/v2/tenants/[^/]+/privacy/.*$",
         r"^/api/v2/inventory/recall-quarantine/.*$",
+        r"^/api/v2/offline-sync/subscription-leases/protected-recovery-sync/?$",
     )
 
     @classmethod
