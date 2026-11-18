@@ -26925,6 +26925,140 @@ class CanonicalCommandAcknowledgment(models.Model):
         super().save(*args, **kwargs)
 
 
+class ChangeFeedOperation(models.TextChoices):
+    UPSERT = "UPSERT", "Upsert Entity State"
+    TOMBSTONE = "TOMBSTONE", "Tombstone / Soft-Delete Entity"
+    REVERSAL = "REVERSAL", "Audited Reversal Event"
+
+
+class ChangeFeedEntityType(models.TextChoices):
+    MEDICINE_CATALOG = "MEDICINE_CATALOG", "Medicine Catalog"
+    BATCH_STOCK = "BATCH_STOCK", "Branch Batch Stock"
+    STAFF_PERMISSION = "STAFF_PERMISSION", "Staff Permission"
+    SUBSCRIPTION_LEASE = "SUBSCRIPTION_LEASE", "Subscription Lease"
+    PRICE_POLICY = "PRICE_POLICY", "Price / Tax Policy"
+    SALE_INVOICE = "SALE_INVOICE", "Sale Invoice"
+
+
+class ChangeFeedEvent(models.Model):
+    """
+    Architecture Decision: ADR-0307 (P307).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Append-only, tenant-monotonic change feed event powering incremental POS pull sync,
+    tombstones, audited reversals, and branch/entity scoped filtering.
+    """
+
+    event_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="change_feed_events")
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="change_feed_events",
+        help_text="Null means tenant-wide (e.g. shared tenant catalog/policy); non-null scopes event strictly to one branch.",
+    )
+    sequence_no = models.BigIntegerField(db_index=True)
+    entity_type = models.CharField(max_length=32, choices=ChangeFeedEntityType.choices, db_index=True)
+    entity_id = models.CharField(max_length=80, db_index=True)
+    operation = models.CharField(
+        max_length=16,
+        choices=ChangeFeedOperation.choices,
+        default=ChangeFeedOperation.UPSERT,
+        db_index=True,
+    )
+    entity_version = models.PositiveIntegerField(default=1)
+    payload_json = models.JSONField(default=dict)
+    payload_sha256 = models.CharField(max_length=64)
+    monetary_impact_bdt = models.DecimalField(
+        max_digits=14,
+        decimal_places=2,
+        default=Decimal("0.00"),
+    )
+    source_device_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    idempotency_key = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    emitted_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="emitted_change_feed_events",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["sequence_no"]
+        verbose_name = "Change Feed Event"
+        verbose_name_plural = "Change Feed Events"
+        indexes = [
+            models.Index(fields=["tenant", "sequence_no"]),
+            models.Index(fields=["tenant", "branch", "sequence_no"]),
+            models.Index(fields=["tenant", "entity_type", "sequence_no"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "sequence_no"], name="uq_change_feed_tenant_seq"),
+            models.CheckConstraint(condition=models.Q(sequence_no__gte=1), name="chk_change_feed_seq_gte_1"),
+            models.CheckConstraint(condition=models.Q(entity_version__gte=1), name="chk_change_feed_ver_gte_1"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.event_id:
+            self.event_id = f"cfe-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class DeviceChangeFeedCursor(models.Model):
+    """
+    Architecture Decision: ADR-0307 (P307).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Durable per-device pull watermark tracking the highest change-feed sequence_no
+    verified and applied into the device's local SQLite store.
+    """
+
+    cursor_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="device_change_feed_cursors")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="device_change_feed_cursors")
+    device_registration = models.OneToOneField(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="change_feed_cursor",
+    )
+    last_sequence_no = models.BigIntegerField(default=0)
+    last_cursor_token = models.CharField(max_length=128, blank=True, default="")
+    pull_count = models.PositiveIntegerField(default=0)
+    total_events_applied = models.PositiveIntegerField(default=0)
+    last_pull_at = models.DateTimeField(null=True, blank=True)
+    last_checkpoint_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Device Change Feed Cursor"
+        verbose_name_plural = "Device Change Feed Cursors"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "last_sequence_no"]),
+        ]
+        constraints = [
+            models.CheckConstraint(condition=models.Q(last_sequence_no__gte=0), name="chk_cf_cursor_seq_gte_0"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.cursor_id:
+            self.cursor_id = f"cfcur-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 
 
 

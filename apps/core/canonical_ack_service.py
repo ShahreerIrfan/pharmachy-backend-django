@@ -226,6 +226,37 @@ class CanonicalAckService:
                     ack_signature_sha256=sig,
                     replay_count=0,
                 )
+                if disposition == CanonicalAckDisposition.COMMITTED:
+                    from apps.core.change_feed_service import ChangeFeedService
+
+                    feed_entity_type = (
+                        "BATCH_STOCK"
+                        if agg_type in ("BATCH_STOCK", "STOCK_ADJUSTMENT")
+                        else "SALE_INVOICE"
+                    )
+                    ChangeFeedService.publish_change_event(
+                        tenant_id=str(tenant.tenant_id),
+                        entity_type=feed_entity_type,
+                        entity_id=canonical_id,
+                        operation="UPSERT",
+                        payload_json={
+                            "canonical_entity_id": canonical_id,
+                            "local_aggregate_ref": agg_ref,
+                            "command_id": cmd_id,
+                            "monetary_total_bdt": str(q2(amt)),
+                            "batch_id": (cmd.get("payload") or cmd.get("payload_json") or {}).get("batch_id", ""),
+                            "quantity_base_units": (cmd.get("payload") or cmd.get("payload_json") or {}).get(
+                                "quantity_base_units", 0
+                            ),
+                        },
+                        branch_id=str(reg.branch_id),
+                        entity_version=max(1, seq),
+                        monetary_impact_bdt=amt,
+                        source_device_id=reg.device_id,
+                        idempotency_key=f"cack-feed:{idem_key}",
+                        actor_user=actor_user,
+                        system_internal=True,
+                    )
                 acks.append(cls._serialize_ack(ack, is_replay=False))
 
         return {
