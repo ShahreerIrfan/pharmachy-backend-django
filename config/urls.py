@@ -213,6 +213,7 @@ from apps.core.canonical_ack_views import CanonicalAckViewSet
 from apps.core.change_feed_views import ChangeFeedPullViewSet
 from apps.core.sync_cursor_checkpoint_views import SyncCursorCheckpointViewSet
 from apps.core.connectivity_detection_views import ConnectivityDetectionViewSet
+from apps.core.offline_stock_allocation_views import OfflineStockAllocationPolicyViewSet
 from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
 from apps.core.supply_chain_alert_views import SupplyChainAlertViewSet
 from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
@@ -401,6 +402,7 @@ router.register("offline-sync/canonical-acks", CanonicalAckViewSet, basename="of
 router.register("offline-sync/change-feed", ChangeFeedPullViewSet, basename="offline-sync-change-feed")
 router.register("offline-sync/cursor-checkpoints", SyncCursorCheckpointViewSet, basename="offline-sync-cursor-checkpoints")
 router.register("offline-sync/connectivity", ConnectivityDetectionViewSet, basename="offline-sync-connectivity")
+router.register("offline-sync/stock-allocation-policies", OfflineStockAllocationPolicyViewSet, basename="offline-sync-stock-allocation-policies")
 router.register("finance/payment-methods", PaymentMethodViewSet, basename="finance-payment-methods")
 router.register("finance/payment-status", PaymentStatusViewSet, basename="finance-payment-status")
 router.register("mobile/due-collections", MobileCustomerDueCollectionViewSet, basename="mobile-due-collections")

@@ -27350,6 +27350,209 @@ class DeviceConnectivityTransitionLog(models.Model):
         super().save(*args, **kwargs)
 
 
+class OfflineStockPolicyMode(models.TextChoices):
+    STRICT_LOCAL_ONLY = "STRICT_LOCAL_ONLY", "Strict Local Cap — Block When Local Cap Reached"
+    SOFT_RESERVE_FLAG_OVERSELL = "SOFT_RESERVE_FLAG_OVERSELL", "Soft Reserve — Flag Cross-Device Oversell Honestly"
+    CONTROLLED_RECONCILIATION = "CONTROLLED_RECONCILIATION", "Controlled Reconciliation — Queue Oversell Disputes"
+
+
+class OfflineReservationStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active Local Reservation"
+    COMMITTED = "COMMITTED", "Committed to Posted Stock"
+    RELEASED = "RELEASED", "Released / Reversed"
+    OVERSELL_DISPUTE = "OVERSELL_DISPUTE", "Cross-Device Oversell — Dispute Opened"
+
+
+class OversellDisputeStatus(models.TextChoices):
+    OPEN = "OPEN", "Open — Manager Review Required"
+    RESOLVED_STOCK_ADJUSTMENT = "RESOLVED_STOCK_ADJUSTMENT", "Resolved via Audited Stock Adjustment"
+    RESOLVED_AUDITED_REVERSAL = "RESOLVED_AUDITED_REVERSAL", "Resolved via Audited Sale Reversal"
+    RESOLVED_SHORTAGE_LOGGED = "RESOLVED_SHORTAGE_LOGGED", "Resolved — Posted Records Kept & Shortage Audited"
+
+
+class OfflineStockAllocationPolicy(models.Model):
+    """
+    Architecture Decision: ADR-0310 (P310).
+    Phase 16: JavaFX SQLite Offline Store & Reliable Cloud Sync.
+
+    Branch-scoped policy governing offline batch stock reservations, honest oversell
+    disclosure, expired/quarantined batch blocking, and non-destructive dispute resolution.
+    """
+
+    policy_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="offline_stock_policies")
+    branch = models.OneToOneField(Branch, on_delete=models.CASCADE, related_name="offline_stock_policy")
+    policy_mode = models.CharField(
+        max_length=32,
+        choices=OfflineStockPolicyMode.choices,
+        default=OfflineStockPolicyMode.CONTROLLED_RECONCILIATION,
+        db_index=True,
+    )
+    max_offline_reserve_pct = models.PositiveSmallIntegerField(
+        default=80,
+        validators=[MinValueValidator(1), MaxValueValidator(100)],
+        help_text="Maximum % of cached branch batch stock reservable per offline window before warning/blocking.",
+    )
+    block_expired_and_quarantined = models.BooleanField(default=True)
+    allow_negative_stock_posting = models.BooleanField(default=False)
+    require_manager_for_dispute_resolution = models.BooleanField(default=True)
+    is_archived = models.BooleanField(default=False, db_index=True)
+    updated_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="offline_stock_policies_updated",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+        verbose_name = "Offline Stock Allocation Policy"
+        verbose_name_plural = "Offline Stock Allocation Policies"
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(max_offline_reserve_pct__gte=1) & models.Q(max_offline_reserve_pct__lte=100),
+                name="chk_osap_reserve_pct_1_100",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.policy_id:
+            self.policy_id = f"osap-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class OfflineStockReservation(models.Model):
+    """
+    Architecture Decision: ADR-0310 (P310).
+    Device-scoped offline batch reservation with exact Decimal cost valuation and replay-safe idempotency.
+    """
+
+    reservation_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="offline_stock_reservations")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="offline_stock_reservations")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="offline_stock_reservations",
+    )
+    batch = models.ForeignKey(BatchStock, on_delete=models.CASCADE, related_name="offline_stock_reservations")
+    local_invoice_ref = models.CharField(max_length=80, db_index=True)
+    idempotency_key = models.CharField(max_length=128, db_index=True)
+    reserved_base_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    unit_cost_bdt = models.DecimalField(
+        max_digits=12, decimal_places=4, default=Decimal("0.0000"), validators=[MinValueValidator(Decimal("0.0000"))]
+    )
+    reserved_value_bdt = models.DecimalField(
+        max_digits=14, decimal_places=2, default=Decimal("0.00"), validators=[MinValueValidator(Decimal("0.00"))]
+    )
+    status = models.CharField(
+        max_length=24,
+        choices=OfflineReservationStatus.choices,
+        default=OfflineReservationStatus.ACTIVE,
+        db_index=True,
+    )
+    notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Offline Stock Reservation"
+        verbose_name_plural = "Offline Stock Reservations"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "batch", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="uq_offline_res_tenant_idem"),
+            models.CheckConstraint(condition=models.Q(reserved_base_units__gte=1), name="chk_offline_res_units_gte_1"),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.reservation_id:
+            self.reservation_id = f"osres-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
+class OfflineStockOversellDispute(models.Model):
+    """
+    Architecture Decision: ADR-0310 (P310).
+    Immutable cross-device oversell dispute record. Posted records are NEVER silently mutated;
+    resolution requires an explicit audited action by authorized management.
+    """
+
+    dispute_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="offline_oversell_disputes")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="offline_oversell_disputes")
+    batch = models.ForeignKey(BatchStock, on_delete=models.CASCADE, related_name="offline_oversell_disputes")
+    reservation = models.ForeignKey(
+        OfflineStockReservation,
+        on_delete=models.CASCADE,
+        related_name="oversell_disputes",
+    )
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration,
+        on_delete=models.CASCADE,
+        related_name="offline_oversell_disputes",
+    )
+    available_units_at_reconcile = models.IntegerField(default=0)
+    requested_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    oversell_shortage_units = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    unit_cost_bdt = models.DecimalField(max_digits=12, decimal_places=4, default=Decimal("0.0000"))
+    disputed_cost_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    status = models.CharField(
+        max_length=32,
+        choices=OversellDisputeStatus.choices,
+        default=OversellDisputeStatus.OPEN,
+        db_index=True,
+    )
+    posted_records_preserved = models.BooleanField(default=True)
+    resolution_reference_id = models.CharField(max_length=80, blank=True, default="")
+    resolution_notes = models.TextField(blank=True, default="")
+    resolved_by = models.ForeignKey(
+        "identity.PharmacyUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="oversell_disputes_resolved",
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = "Offline Stock Oversell Dispute"
+        verbose_name_plural = "Offline Stock Oversell Disputes"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(oversell_shortage_units__gte=1), name="chk_oversell_shortage_gte_1"
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.dispute_id:
+            self.dispute_id = f"osdisp-{uuid.uuid4().hex[:12]}"
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        super().save(*args, **kwargs)
+
+
 
 
 
