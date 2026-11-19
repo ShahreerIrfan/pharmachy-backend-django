@@ -67,6 +67,14 @@ class SyncConflictClassificationViewSet(viewsets.ViewSet):
             "resolution_status": ticket.resolution_status,
             "resolution_notes": ticket.resolution_notes,
             "resolution_reference_id": ticket.resolution_reference_id,
+            "proposed_decision": ticket.proposed_decision,
+            "proposed_by_id": str(ticket.proposed_by.user_id) if ticket.proposed_by else None,
+            "proposed_at": ticket.proposed_at.isoformat() if ticket.proposed_at else None,
+            "proposed_notes": ticket.proposed_notes,
+            "approved_by_id": str(ticket.approved_by.user_id) if ticket.approved_by else None,
+            "approved_at": ticket.approved_at.isoformat() if ticket.approved_at else None,
+            "approval_notes": ticket.approval_notes,
+            "final_cloud_outcome": ticket.final_cloud_outcome,
             "resolved_by_id": str(ticket.resolved_by.user_id) if ticket.resolved_by else None,
             "resolved_at": ticket.resolved_at.isoformat() if ticket.resolved_at else None,
             "created_at": ticket.created_at.isoformat(),
@@ -153,6 +161,36 @@ class SyncConflictClassificationViewSet(viewsets.ViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(detail=True, methods=["post"], url_path="propose-decision")
+    def propose_decision(self, request, pk=None):
+        tenant = self._resolve_tenant_and_device(request)
+        decision = request.data.get("proposed_decision")
+        notes = request.data.get("proposed_notes", "")
+
+        ticket = SyncConflictClassificationService.propose_conflict_decision(
+            tenant_id=str(tenant.tenant_id),
+            conflict_id=pk,
+            proposed_decision=decision,
+            proposed_notes=notes,
+            actor_user=request.user,
+        )
+        return Response(self._serialize_ticket(ticket), status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=["post"], url_path="approve-decision")
+    def approve_decision(self, request, pk=None):
+        tenant = self._resolve_tenant_and_device(request)
+        notes = request.data.get("approval_notes", "")
+        ref_id = request.data.get("resolution_reference_id", "")
+
+        ticket = SyncConflictClassificationService.approve_and_execute_decision(
+            tenant_id=str(tenant.tenant_id),
+            conflict_id=pk,
+            approval_notes=notes,
+            resolution_reference_id=ref_id,
+            actor_user=request.user,
+        )
+        return Response(self._serialize_ticket(ticket), status=status.HTTP_200_OK)
 
     @action(detail=True, methods=["post"], url_path="resolve")
     def resolve(self, request, pk=None):

@@ -48,6 +48,7 @@ from apps.core.models import (
     SyncConflictErrorCode,
     SyncConflictRecord,
     SyncConflictResolutionStatus,
+    ConflictProposedDecision,
     Tenant,
     TenantLifecycleStatus,
 )
@@ -367,6 +368,199 @@ class SyncConflictClassificationService:
                 "conflict_category": ticket.conflict_category,
                 "error_code": ticket.error_code,
                 "disputed_monetary_bdt": str(monetary_amt),
+            },
+        )
+
+        return ticket
+
+    @classmethod
+    @transaction.atomic
+    def propose_conflict_decision(
+        cls,
+        *,
+        tenant_id: str,
+        conflict_id: str,
+        proposed_decision: str,
+        proposed_notes: str,
+        actor_user: Any = None,
+    ) -> SyncConflictRecord:
+        """
+        Manager proposes a resolution decision in the Conflict Review Center.
+        """
+        if not actor_user or not getattr(actor_user, "is_authenticated", False):
+            raise PermissionDenied({"error_code": "ERR_UNAUTHENTICATED", "detail": "Authentication required."})
+
+        user_role = getattr(actor_user, "role", None)
+        if user_role not in CONFLICT_RESOLVE_ROLES:
+            raise PermissionDenied(
+                {"error_code": "ERR_PERMISSION_DENIED", "detail": "Only Pharmacy Owner or Branch Manager can propose decisions."}
+            )
+
+        tenant = cls.assert_tenant_active(tenant_id)
+        ticket = (
+            SyncConflictRecord.objects.select_for_update()
+            .select_related("tenant", "branch", "device_registration")
+            .filter(tenant=tenant, conflict_id=conflict_id)
+            .first()
+        )
+        if not ticket:
+            raise NotFound({"error_code": "ERR_CONFLICT_NOT_FOUND", "detail": f"Conflict ticket '{conflict_id}' not found."})
+
+        if ticket.resolution_status not in (SyncConflictResolutionStatus.OPEN, SyncConflictResolutionStatus.DECISION_PROPOSED):
+            raise ValidationError(
+                {"error_code": "ERR_CONFLICT_ALREADY_RESOLVED", "detail": f"Cannot propose decision for '{ticket.resolution_status}' ticket."}
+            )
+
+        decision = str(proposed_decision or "").strip().upper()
+        if decision not in ConflictProposedDecision.values:
+            raise ValidationError(
+                {"error_code": "ERR_INVALID_PROPOSED_DECISION", "detail": f"Valid decisions: {ConflictProposedDecision.values}."}
+            )
+
+        notes = str(proposed_notes or "").strip()
+        if len(notes) < 3:
+            raise ValidationError(
+                {"error_code": "ERR_NOTES_REQUIRED", "detail": "Proposed decision notes must be at least 3 characters."}
+            )
+
+        ticket.proposed_decision = decision
+        ticket.proposed_by = actor_user
+        ticket.proposed_at = timezone.now()
+        ticket.proposed_notes = notes
+        ticket.resolution_status = SyncConflictResolutionStatus.DECISION_PROPOSED
+        ticket.save()
+
+        AuditLogEntry.objects.create(
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            tenant_id=str(tenant.tenant_id),
+            user_id=str(getattr(actor_user, "user_id", "") or ""),
+            actor_email=str(getattr(actor_user, "email", "") or ""),
+            actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+            action="SYNC_CONFLICT_DECISION_PROPOSED",
+            resource_type="SyncConflictRecord",
+            resource_id=ticket.conflict_id,
+            status=AuditActionStatus.SUCCESS,
+            metadata_json={
+                "proposed_decision": ticket.proposed_decision,
+                "proposed_notes": ticket.proposed_notes,
+            },
+        )
+
+        return ticket
+
+    @classmethod
+    @transaction.atomic
+    def approve_and_execute_decision(
+        cls,
+        *,
+        tenant_id: str,
+        conflict_id: str,
+        approval_notes: str,
+        resolution_reference_id: str = "",
+        actor_user: Any = None,
+    ) -> SyncConflictRecord:
+        """
+        Manager or Owner approves and authoritatively executes the proposed decision into final cloud outcome.
+        """
+        if not actor_user or not getattr(actor_user, "is_authenticated", False):
+            raise PermissionDenied({"error_code": "ERR_UNAUTHENTICATED", "detail": "Authentication required."})
+
+        user_role = getattr(actor_user, "role", None)
+        if user_role not in CONFLICT_RESOLVE_ROLES:
+            raise PermissionDenied(
+                {"error_code": "ERR_PERMISSION_DENIED", "detail": "Only Pharmacy Owner or Branch Manager can approve decisions."}
+            )
+
+        tenant = cls.assert_tenant_active(tenant_id)
+        ticket = (
+            SyncConflictRecord.objects.select_for_update()
+            .select_related("tenant", "branch", "device_registration")
+            .filter(tenant=tenant, conflict_id=conflict_id)
+            .first()
+        )
+        if not ticket:
+            raise NotFound({"error_code": "ERR_CONFLICT_NOT_FOUND", "detail": f"Conflict ticket '{conflict_id}' not found."})
+
+        if not ticket.proposed_decision:
+            raise ValidationError(
+                {"error_code": "ERR_NO_DECISION_PROPOSED", "detail": "No decision has been proposed yet for this ticket."}
+            )
+
+        app_notes = str(approval_notes or "").strip()
+        if len(app_notes) < 3:
+            raise ValidationError(
+                {"error_code": "ERR_APPROVAL_NOTES_REQUIRED", "detail": "Approval notes must be at least 3 characters."}
+            )
+
+        ref_id = str(resolution_reference_id or f"app-{uuid.uuid4().hex[:8]}").strip()
+
+        # Map proposed decision to authoritative final resolution status
+        decision_map = {
+            ConflictProposedDecision.KEEP_SERVER_DISCARD_LOCAL: SyncConflictResolutionStatus.RESOLVED_KEEP_SERVER,
+            ConflictProposedDecision.OVERRIDE_WITH_INVENTORY_ADJUSTMENT: SyncConflictResolutionStatus.RESOLVED_ADJUSTED,
+            ConflictProposedDecision.SPLIT_BATCH_ALLOCATION: SyncConflictResolutionStatus.RESOLVED_ADJUSTED,
+            ConflictProposedDecision.ESCALATE_TO_OWNER: SyncConflictResolutionStatus.ESCALATED,
+            ConflictProposedDecision.REJECT_FRAUD: SyncConflictResolutionStatus.REJECTED,
+        }
+        final_status = decision_map.get(ticket.proposed_decision, SyncConflictResolutionStatus.RESOLVED_KEEP_SERVER)
+
+        ticket.resolution_status = final_status
+        ticket.approved_by = actor_user
+        ticket.approved_at = timezone.now()
+        ticket.approval_notes = app_notes
+        ticket.resolved_by = actor_user
+        ticket.resolved_at = timezone.now()
+        ticket.resolution_notes = f"Approved '{ticket.proposed_decision}': {app_notes}"
+        ticket.resolution_reference_id = ref_id
+
+        # Generate final cloud outcome audit package
+        ticket.final_cloud_outcome = {
+            "execution_status": "COMMITTED_CLOUD",
+            "final_resolution_status": final_status,
+            "decision": ticket.proposed_decision,
+            "reference_id": ref_id,
+            "reconciled_disputed_bdt": str(ticket.disputed_monetary_bdt),
+            "approved_by_email": str(getattr(actor_user, "email", "") or ""),
+            "executed_at": timezone.now().isoformat(),
+        }
+        ticket.save()
+
+        # Emit change feed event
+        from apps.core.change_feed_service import ChangeFeedService
+        ChangeFeedService.publish_change_event(
+            tenant_id=str(tenant.tenant_id),
+            branch_id=str(ticket.branch.branch_id),
+            entity_type=ChangeFeedEntityType.BATCH_STOCK,
+            entity_id=ticket.conflict_id,
+            operation=ChangeFeedOperation.REVERSAL if final_status == SyncConflictResolutionStatus.REJECTED else ChangeFeedOperation.UPSERT,
+            payload_json={
+                "conflict_id": ticket.conflict_id,
+                "command_id": ticket.command_id,
+                "resolution_status": ticket.resolution_status,
+                "proposed_decision": ticket.proposed_decision,
+                "resolved_by_id": str(getattr(actor_user, "user_id", "") or ""),
+                "resolution_reference_id": ticket.resolution_reference_id,
+                "final_cloud_outcome": ticket.final_cloud_outcome,
+                "reversal_reason": "SYNC_CONFLICT_REJECTED" if final_status == SyncConflictResolutionStatus.REJECTED else "",
+            },
+            system_internal=True,
+        )
+
+        AuditLogEntry.objects.create(
+            request_id=f"req-{uuid.uuid4().hex[:8]}",
+            tenant_id=str(tenant.tenant_id),
+            user_id=str(getattr(actor_user, "user_id", "") or ""),
+            actor_email=str(getattr(actor_user, "email", "") or ""),
+            actor_role=str(getattr(actor_user, "role", "BRANCH_MANAGER")),
+            action="SYNC_CONFLICT_DECISION_APPROVED_EXECUTED",
+            resource_type="SyncConflictRecord",
+            resource_id=ticket.conflict_id,
+            status=AuditActionStatus.SUCCESS,
+            metadata_json={
+                "final_resolution_status": ticket.resolution_status,
+                "proposed_decision": ticket.proposed_decision,
+                "resolution_reference_id": ticket.resolution_reference_id,
+                "approval_notes": ticket.approval_notes,
             },
         )
 

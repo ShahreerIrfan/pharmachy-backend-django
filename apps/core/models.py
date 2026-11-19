@@ -27904,10 +27904,19 @@ class SyncConflictErrorCode(models.TextChoices):
 
 class SyncConflictResolutionStatus(models.TextChoices):
     OPEN = "OPEN", "Open / Pending Manager Review"
+    DECISION_PROPOSED = "DECISION_PROPOSED", "Decision Proposed / Awaiting Approval"
     RESOLVED_KEEP_SERVER = "RESOLVED_KEEP_SERVER", "Resolved (Authoritative Server State Maintained)"
     RESOLVED_ADJUSTED = "RESOLVED_ADJUSTED", "Resolved with Compensating Adjustment"
     ESCALATED = "ESCALATED", "Escalated for Owner/Regulatory Review"
     REJECTED = "REJECTED", "Rejected (Fraud / Tamper Refusal)"
+
+
+class ConflictProposedDecision(models.TextChoices):
+    KEEP_SERVER_DISCARD_LOCAL = "KEEP_SERVER_DISCARD_LOCAL", "Keep Authoritative Server State (Void Local)"
+    OVERRIDE_WITH_INVENTORY_ADJUSTMENT = "OVERRIDE_WITH_INVENTORY_ADJUSTMENT", "Override with Compensating Adjustment"
+    SPLIT_BATCH_ALLOCATION = "SPLIT_BATCH_ALLOCATION", "Split and Re-allocate from Alternative Batch"
+    ESCALATE_TO_OWNER = "ESCALATE_TO_OWNER", "Escalate to Pharmacy Owner for Audit Review"
+    REJECT_FRAUD = "REJECT_FRAUD", "Reject as Tampered / Fraudulent Attempt"
 
 
 class SyncConflictRecord(models.Model):
@@ -27942,6 +27951,32 @@ class SyncConflictRecord(models.Model):
     )
     resolution_notes = models.TextField(blank=True, default="")
     resolution_reference_id = models.CharField(max_length=64, blank=True, default="")
+    proposed_decision = models.CharField(
+        max_length=48,
+        choices=ConflictProposedDecision.choices,
+        blank=True,
+        default="",
+        db_index=True,
+    )
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="proposed_sync_conflict_decisions",
+    )
+    proposed_at = models.DateTimeField(null=True, blank=True)
+    proposed_notes = models.TextField(blank=True, default="")
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="approved_sync_conflict_decisions",
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approval_notes = models.TextField(blank=True, default="")
+    final_cloud_outcome = models.JSONField(default=dict, blank=True)
     resolved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         null=True,
