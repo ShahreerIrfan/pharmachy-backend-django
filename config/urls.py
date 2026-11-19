@@ -218,6 +218,7 @@ from apps.core.offline_prescription_policy_views import OfflinePrescriptionPolic
 from apps.core.offline_subscription_lease_views import OfflineSubscriptionLeaseViewSet
 from apps.core.sync_conflict_classification_views import SyncConflictClassificationViewSet
 from apps.core.provisional_identifier_views import ProvisionalIdentifierViewSet
+from apps.core.event_ordering_views import EventOrderingBarrierViewSet
 from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
 from apps.core.supply_chain_alert_views import SupplyChainAlertViewSet
 from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
@@ -411,6 +412,7 @@ router.register("offline-sync/prescription-policies", OfflinePrescriptionPolicyV
 router.register("offline-sync/subscription-leases", OfflineSubscriptionLeaseViewSet, basename="offline-sync-subscription-leases")
 router.register("offline-sync/conflicts", SyncConflictClassificationViewSet, basename="offline-sync-conflicts")
 router.register("offline-sync/provisional-identifiers", ProvisionalIdentifierViewSet, basename="offline-sync-provisional-identifiers")
+router.register("offline-sync/ordering-barriers", EventOrderingBarrierViewSet, basename="offline-sync-ordering-barriers")
 router.register("finance/payment-methods", PaymentMethodViewSet, basename="finance-payment-methods")
 router.register("finance/payment-status", PaymentStatusViewSet, basename="finance-payment-status")
 router.register("mobile/due-collections", MobileCustomerDueCollectionViewSet, basename="mobile-due-collections")

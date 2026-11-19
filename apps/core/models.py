@@ -28045,6 +28045,69 @@ class ProvisionalIdentifierMapping(models.Model):
         return f"ProvMapping({self.entity_type}: {self.provisional_id} -> {self.canonical_id})"
 
 
+# ---------------------------------------------------------------------------
+# ADR-0316 (P316): Event Ordering and Transactional Dependency Barriers
+# ---------------------------------------------------------------------------
+
+class EventDependencyRule(models.TextChoices):
+    CUSTOMER_BEFORE_SALE = "CUSTOMER_BEFORE_SALE", "Customer Creation Precedes Sale"
+    GRN_BEFORE_SALE = "GRN_BEFORE_SALE", "Goods Receipt/Batch Precedes Sale"
+    SALE_BEFORE_RETURN = "SALE_BEFORE_RETURN", "Original Sale Precedes Return/Refund"
+    PRESCRIPTION_BEFORE_SALE = "PRESCRIPTION_BEFORE_SALE", "Prescription Authorization Precedes Sale"
+    STRICT_SEQUENCE = "STRICT_SEQUENCE", "Strict Monotonic Sequence Barrier"
+
+
+class EventBarrierStatus(models.TextChoices):
+    SATISFIED = "SATISFIED", "Dependencies Satisfied — Ready to Commit"
+    BLOCKED_ON_DEPENDENCY = "BLOCKED_ON_DEPENDENCY", "Blocked on Uncommitted Upstream Event"
+    CYCLE_REJECTED = "CYCLE_REJECTED", "Rejected Due to Circular Dependency Graph"
+
+
+class EventOrderingBarrier(models.Model):
+    """
+    Architecture Decision: ADR-0316 (P316).
+    Phase 16: JavaFX SQLite Offline Store and Reliable Cloud Sync.
+
+    Transactional ordering barrier tracking causal dependencies between outbox operations
+    (e.g., Customer before Sale, GRN before Sale, Sale before Return). Halts downstream execution
+    if prerequisites are missing or uncommitted.
+    """
+
+    barrier_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="ordering_barriers")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="ordering_barriers")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration, on_delete=models.CASCADE, related_name="ordering_barriers"
+    )
+    command_id = models.CharField(max_length=64, db_index=True)
+    command_type = models.CharField(max_length=48, db_index=True)
+    depends_on_command_ids = models.JSONField(default=list)
+    dependency_rule = models.CharField(
+        max_length=48, choices=EventDependencyRule.choices, db_index=True
+    )
+    status = models.CharField(
+        max_length=32,
+        choices=EventBarrierStatus.choices,
+        default=EventBarrierStatus.SATISFIED,
+        db_index=True,
+    )
+    blocking_reasons = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Event Ordering Barrier"
+        verbose_name_plural = "Event Ordering Barriers"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status", "created_at"]),
+            models.Index(fields=["tenant", "command_id"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"EventBarrier({self.command_id}, {self.dependency_rule}, {self.status})"
+
+
+
 
 
 
