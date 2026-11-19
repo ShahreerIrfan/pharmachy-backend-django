@@ -28162,3 +28162,109 @@ class SyncBackpressurePolicy(models.Model):
 
     def __str__(self) -> str:
         return f"BackpressurePolicy({self.device_registration_id}, max_batch={self.max_batch_size}, throttled={self.is_throttled})"
+
+
+# ---------------------------------------------------------------------------
+# ADR-0318 (P318): Local Schema Migrations, Rollback & Outbox Preservation
+# ---------------------------------------------------------------------------
+
+class DeviceMigrationStatus(models.TextChoices):
+    SUCCESS = "SUCCESS", "Migration Succeeded and Outbox Preserved"
+    FAILED_ROLLED_BACK = "FAILED_ROLLED_BACK", "Failed - Transactional Rollback Executed"
+    PENDING = "PENDING", "Pending Execution"
+
+
+class DeviceSchemaMigrationRecord(models.Model):
+    record_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="schema_migration_records")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="schema_migration_records")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration, on_delete=models.CASCADE, related_name="schema_migration_records"
+    )
+    from_version = models.PositiveIntegerField()
+    to_version = models.PositiveIntegerField()
+    status = models.CharField(
+        max_length=32,
+        choices=DeviceMigrationStatus.choices,
+        default=DeviceMigrationStatus.SUCCESS,
+        db_index=True,
+    )
+    outbox_events_preserved = models.PositiveIntegerField(default=0)
+    backup_file_hash_sha256 = models.CharField(max_length=64, blank=True, default="")
+    error_message = models.TextField(blank=True, default="")
+    applied_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Device Schema Migration Record"
+        verbose_name_plural = "Device Schema Migration Records"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["tenant", "device_registration", "applied_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"DeviceMigration({self.device_registration_id}: v{self.from_version}->v{self.to_version} [{self.status}])"
+
+
+# ---------------------------------------------------------------------------
+# ADR-0319 (P319): Device Revocation, Compromise Quarantining & Data Recovery
+# ---------------------------------------------------------------------------
+
+class CompromiseType(models.TextChoices):
+    STOLEN = "STOLEN", "Stolen Hardware Terminal"
+    LOST = "LOST", "Lost / Missing Workstation"
+    RETIRED_HARDWARE = "RETIRED_HARDWARE", "Decommissioned / Retired POS"
+    SECURITY_COMPROMISE = "SECURITY_COMPROMISE", "Security Compromise / Malware Infection"
+    UNAUTHORIZED_CLONE = "UNAUTHORIZED_CLONE", "Anti-Cloning Hardware Tampering"
+
+
+class RecoveryDocketStatus(models.TextChoices):
+    EVIDENCE_RETAINED = "EVIDENCE_RETAINED", "Evidence Retained - Forensic Quarantine"
+    MANUALLY_RECONCILED = "MANUALLY_RECONCILED", "Manually Reconciled by Authorized Owner"
+    ABANDONED = "ABANDONED", "Permanently Written Off"
+
+
+class DeviceCompromiseRecoveryDocket(models.Model):
+    docket_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="device_recovery_dockets")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="device_recovery_dockets")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration, on_delete=models.CASCADE, related_name="device_recovery_dockets"
+    )
+    compromise_type = models.CharField(
+        max_length=48, choices=CompromiseType.choices, default=CompromiseType.STOLEN, db_index=True
+    )
+    revocation_reason = models.TextField()
+    revoked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name="revoked_device_dockets"
+    )
+    revoked_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    retained_unsynced_evidence_json = models.JSONField(default=dict, blank=True)
+    last_known_client_sequence = models.PositiveIntegerField(default=0)
+    last_known_sync_cursor = models.CharField(max_length=128, blank=True, default="")
+    recovery_status = models.CharField(
+        max_length=32,
+        choices=RecoveryDocketStatus.choices,
+        default=RecoveryDocketStatus.EVIDENCE_RETAINED,
+        db_index=True,
+    )
+    reconciliation_notes = models.TextField(blank=True, default="")
+    reconciled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="reconciled_device_dockets",
+    )
+    reconciled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Device Compromise Recovery Docket"
+        verbose_name_plural = "Device Compromise Recovery Dockets"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "recovery_status"]),
+            models.Index(fields=["tenant", "device_registration", "revoked_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"RecoveryDocket({self.device_registration_id}: {self.compromise_type} [{self.recovery_status}])"
