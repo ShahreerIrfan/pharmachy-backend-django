@@ -27884,6 +27884,88 @@ class OfflineLeaseAuditEvent(models.Model):
         super().save(*args, **kwargs)
 
 
+class SyncConflictCategory(models.TextChoices):
+    STALE_STOCK = "STALE_STOCK", "Stale Stock Allocation / Depleted Batch"
+    STALE_PRICE = "STALE_PRICE", "Stale Price / MRP Variance"
+    REVOKED_PERMISSION = "REVOKED_PERMISSION", "Revoked Staff Permission / Deactivated Account"
+    EXPIRED_SUBSCRIPTION = "EXPIRED_SUBSCRIPTION", "Expired Subscription / Inactive Offline Lease"
+    UNVERIFIED_PRESCRIPTION = "UNVERIFIED_PRESCRIPTION", "Unverified / Revoked Prescription"
+    DUPLICATE_COMMAND_TAMPERED = "DUPLICATE_COMMAND_TAMPERED", "Tampered Duplicate Command / Sequence Gap"
+
+
+class SyncConflictErrorCode(models.TextChoices):
+    CONFLICT_STALE_STOCK = "CONFLICT_STALE_STOCK", "Stock is depleted, recalled, quarantined, or insufficient on server"
+    CONFLICT_STALE_PRICE = "CONFLICT_STALE_PRICE", "Item was sold at outdated price/MRP exceeding allowable tolerance"
+    CONFLICT_REVOKED_PERMISSION = "CONFLICT_REVOKED_PERMISSION", "Cashier/staff credentials or role was revoked prior to sync"
+    CONFLICT_EXPIRED_SUBSCRIPTION = "CONFLICT_EXPIRED_SUBSCRIPTION", "Subscription tier or offline lease expired prior to transaction"
+    CONFLICT_UNVERIFIED_PRESCRIPTION = "CONFLICT_UNVERIFIED_PRESCRIPTION", "Prescription token invalid, expired, revoked, or unverified for Rx medicine"
+    CONFLICT_DUPLICATE_COMMAND_TAMPERED = "CONFLICT_DUPLICATE_COMMAND_TAMPERED", "Payload or sequence tampered for replayed idempotency key"
+
+
+class SyncConflictResolutionStatus(models.TextChoices):
+    OPEN = "OPEN", "Open / Pending Manager Review"
+    RESOLVED_KEEP_SERVER = "RESOLVED_KEEP_SERVER", "Resolved (Authoritative Server State Maintained)"
+    RESOLVED_ADJUSTED = "RESOLVED_ADJUSTED", "Resolved with Compensating Adjustment"
+    ESCALATED = "ESCALATED", "Escalated for Owner/Regulatory Review"
+    REJECTED = "REJECTED", "Rejected (Fraud / Tamper Refusal)"
+
+
+class SyncConflictRecord(models.Model):
+    """
+    Architecture Decision: ADR-0313 (P313).
+    Phase 16: JavaFX SQLite Offline Store and Reliable Cloud Sync.
+
+    Immutable conflict ticket preserving offline command payload, authoritative server state snapshot,
+    exact Decimal BDT variance, and machine-readable error codes.
+    Guarantees that conflicting offline sales NEVER silently alter posted stock or finance records.
+    """
+
+    conflict_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="sync_conflict_tickets")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="sync_conflict_tickets")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration, on_delete=models.CASCADE, related_name="sync_conflict_tickets"
+    )
+    command_id = models.CharField(max_length=64, db_index=True)
+    idempotency_key = models.CharField(max_length=128, db_index=True)
+    client_sequence = models.PositiveIntegerField(default=1)
+    conflict_category = models.CharField(max_length=32, choices=SyncConflictCategory.choices, db_index=True)
+    error_code = models.CharField(max_length=48, choices=SyncConflictErrorCode.choices, db_index=True)
+    disputed_monetary_bdt = models.DecimalField(max_digits=14, decimal_places=2, default=Decimal("0.00"))
+    local_payload_json = models.JSONField(default=dict)
+    server_state_snapshot = models.JSONField(default=dict)
+    resolution_status = models.CharField(
+        max_length=32,
+        choices=SyncConflictResolutionStatus.choices,
+        default=SyncConflictResolutionStatus.OPEN,
+        db_index=True,
+    )
+    resolution_notes = models.TextField(blank=True, default="")
+    resolution_reference_id = models.CharField(max_length=64, blank=True, default="")
+    resolved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="resolved_sync_conflict_tickets",
+    )
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Sync Conflict Record"
+        verbose_name_plural = "Sync Conflict Records"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "resolution_status", "created_at"]),
+            models.Index(fields=["tenant", "conflict_category", "error_code"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"SyncConflict({self.conflict_id}, {self.error_code}, {self.resolution_status})"
+
+
+
 
 
 
