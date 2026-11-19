@@ -28318,3 +28318,53 @@ class ChaosSyncAcceptanceDrill(models.Model):
 
     def __str__(self) -> str:
         return f"ChaosDrill({self.drill_id}: {self.drill_name} [{self.status}])"
+
+
+# ---------------------------------------------------------------------------
+# ADR-0321 (P321): JavaFX macOS-Inspired App Shell Architecture & Workspaces
+# ---------------------------------------------------------------------------
+
+class DesktopShellTheme(models.TextChoices):
+    MACOS_LIGHT = "MACOS_LIGHT", "macOS Restrained Light"
+    MACOS_DARK = "MACOS_DARK", "macOS Neutral Dark"
+    HIGH_CONTRAST = "HIGH_CONTRAST", "High Contrast Accessibility"
+
+
+class DesktopShellProfile(models.Model):
+    profile_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="desktop_shell_profiles")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="desktop_shell_profiles")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="desktop_shell_profiles",
+    )
+    device_id = models.CharField(max_length=100, db_index=True)
+    theme = models.CharField(
+        max_length=32,
+        choices=DesktopShellTheme.choices,
+        default=DesktopShellTheme.MACOS_LIGHT,
+    )
+    locale = models.CharField(max_length=10, default="en_BD")
+    sidebar_collapsed = models.BooleanField(default=False)
+    quick_shortcuts_enabled = models.BooleanField(default=True)
+    enabled_routes_json = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Desktop Shell Profile"
+        verbose_name_plural = "Desktop Shell Profiles"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "branch", "user", "device_id"],
+                name="uniq_desktop_shell_profile_per_user_device",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "device_id"]),
+            models.Index(fields=["user", "device_id"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"DesktopShellProfile({self.profile_id}: {self.user} @ {self.device_id})"

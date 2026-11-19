@@ -223,6 +223,7 @@ from apps.core.sync_backpressure_views import SyncBackpressureViewSet
 from apps.core.device_schema_migration_views import DeviceSchemaMigrationViewSet
 from apps.core.device_compromise_recovery_views import DeviceCompromiseRecoveryViewSet
 from apps.core.chaos_sync_views import ChaosSyncAcceptanceViewSet
+from apps.core.desktop_shell_views import DesktopShellProfileViewSet
 from apps.core.supplier_payment_schedule_views import SupplierPaymentScheduleViewSet
 from apps.core.supply_chain_alert_views import SupplyChainAlertViewSet
 from apps.core.supply_chain_traceability_views import SupplyChainTraceabilityViewSet
@@ -421,6 +422,7 @@ router.register("offline-sync/backpressure", SyncBackpressureViewSet, basename="
 router.register("offline-sync/schema-migrations", DeviceSchemaMigrationViewSet, basename="offline-sync-schema-migrations")
 router.register("offline-sync/device-revocations", DeviceCompromiseRecoveryViewSet, basename="offline-sync-device-revocations")
 router.register("offline-sync/chaos-drills", ChaosSyncAcceptanceViewSet, basename="offline-sync-chaos-drills")
+router.register("desktop/shell-profiles", DesktopShellProfileViewSet, basename="desktop-shell-profiles")
 router.register("finance/payment-methods", PaymentMethodViewSet, basename="finance-payment-methods")
 router.register("finance/payment-status", PaymentStatusViewSet, basename="finance-payment-status")
 router.register("mobile/due-collections", MobileCustomerDueCollectionViewSet, basename="mobile-due-collections")
