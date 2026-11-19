@@ -28268,3 +28268,53 @@ class DeviceCompromiseRecoveryDocket(models.Model):
 
     def __str__(self) -> str:
         return f"RecoveryDocket({self.device_registration_id}: {self.compromise_type} [{self.recovery_status}])"
+
+
+# ---------------------------------------------------------------------------
+# ADR-0320 (P320): Chaos Sync Acceptance & Data Safety Drills
+# ---------------------------------------------------------------------------
+
+class ChaosDrillStatus(models.TextChoices):
+    PASSED = "PASSED", "Passed All Safety Criteria"
+    FAILED = "FAILED", "Safety Violation Detected"
+    RUNNING = "RUNNING", "Drill in Progress"
+
+
+class ChaosSyncAcceptanceDrill(models.Model):
+    drill_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="chaos_sync_drills")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="chaos_sync_drills")
+    drill_name = models.CharField(max_length=80, default="PHASE_16_CHAOS_SYNC_SUITE")
+    status = models.CharField(
+        max_length=32,
+        choices=ChaosDrillStatus.choices,
+        default=ChaosDrillStatus.PASSED,
+        db_index=True,
+    )
+    app_crash_recovered = models.BooleanField(default=True)
+    network_partition_recovered = models.BooleanField(default=True)
+    duplicate_push_idempotent = models.BooleanField(default=True)
+    lost_ack_reconciled = models.BooleanField(default=True)
+    multi_counter_conflict_quarantined = models.BooleanField(default=True)
+    lease_expiry_blocked = models.BooleanField(default=True)
+    stock_ledger_precision_intact = models.BooleanField(default=True)
+    evidence_payload_json = models.JSONField(default=dict, blank=True)
+    conducted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="conducted_chaos_drills",
+    )
+    conducted_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Chaos Sync Acceptance Drill"
+        verbose_name_plural = "Chaos Sync Acceptance Drills"
+        indexes = [
+            models.Index(fields=["tenant", "branch", "status"]),
+            models.Index(fields=["tenant", "conducted_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ChaosDrill({self.drill_id}: {self.drill_name} [{self.status}])"
