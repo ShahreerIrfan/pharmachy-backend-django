@@ -28000,6 +28000,52 @@ class SyncConflictRecord(models.Model):
         return f"SyncConflict({self.conflict_id}, {self.error_code}, {self.resolution_status})"
 
 
+class ProvisionalEntityType(models.TextChoices):
+    INVOICE = "INVOICE", "Sale Invoice"
+    CUSTOMER = "CUSTOMER", "Customer Record"
+    PAYMENT = "PAYMENT", "Payment Transaction"
+    PRESCRIPTION = "PRESCRIPTION", "Prescription Record"
+    RETURN_RECEIPT = "RETURN_RECEIPT", "Sale Return Receipt"
+
+
+class ProvisionalIdentifierMapping(models.Model):
+    """
+    Architecture Decision: ADR-0315 (P315).
+    Phase 16: JavaFX SQLite Offline Store and Reliable Cloud Sync.
+
+    Authoritative bidirectional mapping between client-generated provisional UUIDs
+    and canonical sequential cloud IDs, preventing reference collisions across offline terminals.
+    """
+
+    mapping_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="provisional_id_mappings")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="provisional_id_mappings")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration, on_delete=models.CASCADE, related_name="provisional_id_mappings"
+    )
+    entity_type = models.CharField(max_length=32, choices=ProvisionalEntityType.choices, db_index=True)
+    provisional_id = models.CharField(max_length=80, db_index=True)
+    canonical_id = models.CharField(max_length=80, db_index=True)
+    idempotency_key = models.CharField(max_length=128, db_index=True)
+    client_sequence = models.PositiveIntegerField(default=1)
+    reconciliation_status = models.CharField(max_length=24, default="RECONCILED", db_index=True)
+    mapped_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Provisional Identifier Mapping"
+        verbose_name_plural = "Provisional Identifier Mappings"
+        unique_together = [("tenant", "entity_type", "provisional_id")]
+        indexes = [
+            models.Index(fields=["tenant", "entity_type", "canonical_id"]),
+            models.Index(fields=["tenant", "device_registration", "mapped_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"ProvMapping({self.entity_type}: {self.provisional_id} -> {self.canonical_id})"
+
+
+
 
 
 
