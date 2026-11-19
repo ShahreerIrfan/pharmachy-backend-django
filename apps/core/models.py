@@ -28114,3 +28114,51 @@ class EventOrderingBarrier(models.Model):
 
 
 
+
+
+# ---------------------------------------------------------------------------
+# ADR-0317 (P317): Sync Backpressure, Adaptive Batching & Retry Backoff
+# ---------------------------------------------------------------------------
+
+class SyncBackpressurePolicy(models.Model):
+    """
+    Architecture Decision: ADR-0317 (P317).
+    Phase 16: JavaFX SQLite Offline Store and Reliable Cloud Sync.
+
+    Server-authoritative and client-adaptive sync backpressure policy:
+    enforces retry backoff, dynamic batch size limits, payload size caps,
+    cancellation tokens, and outbox throughput limits to prevent starvation of POS terminals.
+    """
+
+    policy_id = models.CharField(max_length=64, primary_key=True)
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="sync_backpressure_policies")
+    branch = models.ForeignKey(Branch, on_delete=models.CASCADE, related_name="sync_backpressure_policies")
+    device_registration = models.ForeignKey(
+        DeviceLocalDbRegistration, on_delete=models.CASCADE, related_name="sync_backpressure_policies"
+    )
+    max_batch_size = models.PositiveIntegerField(default=50)
+    max_payload_bytes = models.PositiveIntegerField(default=524288)  # 512 KB
+    retry_base_delay_ms = models.PositiveIntegerField(default=1000)  # 1 second
+    retry_max_delay_ms = models.PositiveIntegerField(default=60000)  # 60 seconds
+    retry_max_attempts = models.PositiveIntegerField(default=5)
+    is_throttled = models.BooleanField(default=False, db_index=True)
+    throttle_reason = models.CharField(max_length=128, blank=True, default="")
+    retry_after_seconds = models.PositiveIntegerField(default=0)
+    throttled_until = models.DateTimeField(null=True, blank=True, db_index=True)
+    consecutive_failures = models.PositiveIntegerField(default=0)
+    last_sync_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_sync_success_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Sync Backpressure Policy"
+        verbose_name_plural = "Sync Backpressure Policies"
+        unique_together = [("tenant", "device_registration")]
+        indexes = [
+            models.Index(fields=["tenant", "branch", "is_throttled"]),
+            models.Index(fields=["tenant", "throttled_until"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"BackpressurePolicy({self.device_registration_id}, max_batch={self.max_batch_size}, throttled={self.is_throttled})"
